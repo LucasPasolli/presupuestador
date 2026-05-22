@@ -1,9 +1,12 @@
 // src/lib/database.js
-// sql.js is loaded as a classic <script> in index.html, so window.initSqlJs is always available.
+// sql.js cargado como <script> clásico en index.html → window.initSqlJs disponible.
+
+import { PRODUCTOS_SEED } from './seedData.js'
 
 let db = null
 
-const DB_STORAGE_KEY = 'motoparts_db_v1'
+// Cambiar la key cuando el schema cambia para forzar re-creación de la BD.
+const DB_STORAGE_KEY = 'motoparts_db_v2'
 
 export function persistDB() {
   if (!db) return
@@ -44,7 +47,7 @@ function runSchema() {
   db.run(`
     CREATE TABLE IF NOT EXISTS Categoria (
       idCategoria  INTEGER PRIMARY KEY AUTOINCREMENT,
-      nombre       TEXT NOT NULL
+      nombre       TEXT NOT NULL UNIQUE
     );
   `)
 
@@ -60,14 +63,30 @@ function runSchema() {
     );
   `)
 
+  // Producto: tieneMedidas=1 significa que el stock se gestiona por medida en ProductoMedida.
+  // tieneMedidas=0 significa stock único en columna "cantidad".
   db.run(`
     CREATE TABLE IF NOT EXISTS Producto (
       idProducto     INTEGER PRIMARY KEY AUTOINCREMENT,
-      idCategoria    INTEGER NOT NULL,
+      idCategoria    INTEGER NOT NULL DEFAULT 1,
       nombre         TEXT NOT NULL,
       precioUnitario REAL NOT NULL DEFAULT 0,
       cantidad       INTEGER NOT NULL DEFAULT 0,
+      tieneMedidas   INTEGER NOT NULL DEFAULT 0 CHECK(tieneMedidas IN (0,1)),
       FOREIGN KEY (idCategoria) REFERENCES Categoria(idCategoria) ON DELETE RESTRICT
+    );
+  `)
+
+  // Stock por medida. Solo se usa cuando Producto.tieneMedidas = 1.
+  // Las medidas válidas: standard, 0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00
+  db.run(`
+    CREATE TABLE IF NOT EXISTS ProductoMedida (
+      idMedida    INTEGER PRIMARY KEY AUTOINCREMENT,
+      idProducto  INTEGER NOT NULL,
+      medida      TEXT NOT NULL CHECK(medida IN ('standard','0.25','0.50','0.75','1.00','1.25','1.50','1.75','2.00')),
+      cantidad    INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(idProducto, medida),
+      FOREIGN KEY (idProducto) REFERENCES Producto(idProducto) ON DELETE CASCADE
     );
   `)
 
@@ -88,6 +107,7 @@ function runSchema() {
       idDetalle      INTEGER PRIMARY KEY AUTOINCREMENT,
       idPresupuesto  INTEGER NOT NULL,
       idProducto     INTEGER NOT NULL,
+      medida         TEXT,
       cantidad       INTEGER NOT NULL,
       precioUnitario REAL NOT NULL,
       subtotal       REAL NOT NULL,
@@ -124,6 +144,7 @@ function runSchema() {
       idDetallePedido INTEGER PRIMARY KEY AUTOINCREMENT,
       idPedido        INTEGER NOT NULL,
       idProducto      INTEGER NOT NULL,
+      medida          TEXT,
       cantidad        INTEGER NOT NULL,
       precioUnitario  REAL NOT NULL,
       subtotal        REAL NOT NULL,
@@ -132,13 +153,28 @@ function runSchema() {
     );
   `)
 
-  // Seed default category on first run
-  const count = db.exec(`SELECT COUNT(*) as c FROM Categoria`)
-  if (count[0].values[0][0] === 0) {
+  // ── Seed inicial ──────────────────────────────────────────────────────────
+  const catCount = db.exec(`SELECT COUNT(*) FROM Categoria`)[0].values[0][0]
+  if (catCount === 0) {
+    // Insertar categoría General
     db.run(`INSERT INTO Categoria (nombre) VALUES ('General')`)
+
+    // Insertar todos los productos del CSV en bloque usando una transacción
+    db.run(`BEGIN TRANSACTION`)
+    for (const nombre of PRODUCTOS_SEED) {
+      db.run(
+        `INSERT INTO Producto (idCategoria, nombre, precioUnitario, cantidad, tieneMedidas)
+         VALUES (1, ?, 0, 0, 0)`,
+        [nombre]
+      )
+    }
+    db.run(`COMMIT`)
+
     persistDB()
   }
 }
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 export function query(sql, params = []) {
   if (!db) throw new Error('DB no inicializada')
@@ -157,6 +193,4 @@ export function run(sql, params = []) {
   return db.exec('SELECT last_insert_rowid() as id')[0].values[0][0]
 }
 
-export function getDB() {
-  return db
-}
+export function getDB() { return db }
