@@ -1,0 +1,162 @@
+// src/lib/database.js
+// sql.js is loaded as a classic <script> in index.html, so window.initSqlJs is always available.
+
+let db = null
+
+const DB_STORAGE_KEY = 'motoparts_db_v1'
+
+export function persistDB() {
+  if (!db) return
+  const data = db.export()
+  localStorage.setItem(DB_STORAGE_KEY, JSON.stringify(Array.from(data)))
+}
+
+export async function initDB() {
+  if (db) return db
+
+  if (typeof window.initSqlJs !== 'function') {
+    throw new Error(
+      'sql.js no está disponible en window.initSqlJs. ' +
+      'Asegurate de que el <script> del CDN cargó correctamente.'
+    )
+  }
+
+  const SQL = await window.initSqlJs({
+    locateFile: (file) =>
+      `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`,
+  })
+
+  const saved = localStorage.getItem(DB_STORAGE_KEY)
+  if (saved) {
+    const buffer = new Uint8Array(JSON.parse(saved))
+    db = new SQL.Database(buffer)
+  } else {
+    db = new SQL.Database()
+  }
+
+  runSchema()
+  return db
+}
+
+function runSchema() {
+  db.run(`PRAGMA foreign_keys = ON;`)
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS Categoria (
+      idCategoria  INTEGER PRIMARY KEY AUTOINCREMENT,
+      nombre       TEXT NOT NULL
+    );
+  `)
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS Cliente (
+      idCliente   INTEGER PRIMARY KEY AUTOINCREMENT,
+      nombre      TEXT NOT NULL,
+      apellido    TEXT NOT NULL,
+      cuit        TEXT,
+      domicilio   TEXT,
+      telefono    TEXT,
+      mail        TEXT
+    );
+  `)
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS Producto (
+      idProducto     INTEGER PRIMARY KEY AUTOINCREMENT,
+      idCategoria    INTEGER NOT NULL,
+      nombre         TEXT NOT NULL,
+      precioUnitario REAL NOT NULL DEFAULT 0,
+      cantidad       INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (idCategoria) REFERENCES Categoria(idCategoria) ON DELETE RESTRICT
+    );
+  `)
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS Presupuesto (
+      idPresupuesto  INTEGER PRIMARY KEY AUTOINCREMENT,
+      idCliente      INTEGER NOT NULL,
+      fecha          TEXT NOT NULL,
+      metodoPago     TEXT NOT NULL CHECK(metodoPago IN ('efectivo','transferencia','cc30','cc15')),
+      montoOriginal  REAL NOT NULL DEFAULT 0,
+      monto          REAL NOT NULL DEFAULT 0,
+      FOREIGN KEY (idCliente) REFERENCES Cliente(idCliente) ON DELETE RESTRICT
+    );
+  `)
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS DetallePresupuesto (
+      idDetalle      INTEGER PRIMARY KEY AUTOINCREMENT,
+      idPresupuesto  INTEGER NOT NULL,
+      idProducto     INTEGER NOT NULL,
+      cantidad       INTEGER NOT NULL,
+      precioUnitario REAL NOT NULL,
+      subtotal       REAL NOT NULL,
+      FOREIGN KEY (idPresupuesto) REFERENCES Presupuesto(idPresupuesto) ON DELETE CASCADE,
+      FOREIGN KEY (idProducto)   REFERENCES Producto(idProducto) ON DELETE RESTRICT
+    );
+  `)
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS Saldo (
+      idSaldo        INTEGER PRIMARY KEY AUTOINCREMENT,
+      idPresupuesto  INTEGER NOT NULL UNIQUE,
+      idCliente      INTEGER NOT NULL,
+      fechaInicio    TEXT NOT NULL,
+      fechaFin       TEXT NOT NULL,
+      monto          REAL NOT NULL,
+      estado         TEXT NOT NULL DEFAULT 'pendiente' CHECK(estado IN ('pendiente','pagado')),
+      FOREIGN KEY (idPresupuesto) REFERENCES Presupuesto(idPresupuesto) ON DELETE CASCADE,
+      FOREIGN KEY (idCliente)     REFERENCES Cliente(idCliente) ON DELETE RESTRICT
+    );
+  `)
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS PedidoCompra (
+      idPedido  INTEGER PRIMARY KEY AUTOINCREMENT,
+      fecha     TEXT NOT NULL,
+      monto     REAL NOT NULL DEFAULT 0,
+      estado    TEXT NOT NULL DEFAULT 'pendiente' CHECK(estado IN ('pendiente','revisado'))
+    );
+  `)
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS DetallePedidoCompra (
+      idDetallePedido INTEGER PRIMARY KEY AUTOINCREMENT,
+      idPedido        INTEGER NOT NULL,
+      idProducto      INTEGER NOT NULL,
+      cantidad        INTEGER NOT NULL,
+      precioUnitario  REAL NOT NULL,
+      subtotal        REAL NOT NULL,
+      FOREIGN KEY (idPedido)   REFERENCES PedidoCompra(idPedido) ON DELETE CASCADE,
+      FOREIGN KEY (idProducto) REFERENCES Producto(idProducto) ON DELETE RESTRICT
+    );
+  `)
+
+  // Seed default category on first run
+  const count = db.exec(`SELECT COUNT(*) as c FROM Categoria`)
+  if (count[0].values[0][0] === 0) {
+    db.run(`INSERT INTO Categoria (nombre) VALUES ('General')`)
+    persistDB()
+  }
+}
+
+export function query(sql, params = []) {
+  if (!db) throw new Error('DB no inicializada')
+  const result = db.exec(sql, params)
+  if (!result.length) return []
+  const { columns, values } = result[0]
+  return values.map((row) =>
+    Object.fromEntries(columns.map((col, i) => [col, row[i]]))
+  )
+}
+
+export function run(sql, params = []) {
+  if (!db) throw new Error('DB no inicializada')
+  db.run(sql, params)
+  persistDB()
+  return db.exec('SELECT last_insert_rowid() as id')[0].values[0][0]
+}
+
+export function getDB() {
+  return db
+}
