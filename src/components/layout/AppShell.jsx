@@ -50,7 +50,7 @@ export default function AppShell({ children }) {
             <span className="text-2xl">🏍</span>
             <div>
               <p className="font-display text-2xl text-white tracking-widest leading-none">
-                MOTOPARTS
+                POWDER
               </p>
               <p className="text-surface-500 text-xs font-body">Gestión</p>
             </div>
@@ -102,7 +102,7 @@ export default function AppShell({ children }) {
           >
             <Menu size={22} />
           </button>
-          <span className="font-display text-xl text-white tracking-widest">MOTOPARTS</span>
+          <span className="font-display text-xl text-white tracking-widest">POWDER</span>
         </header>
 
         <main className="flex-1 p-6 overflow-auto animate-fade-in">

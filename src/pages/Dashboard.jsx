@@ -72,7 +72,7 @@ export default function Dashboard() {
   useEffect(() => {
     try {
       const p  = query('SELECT COUNT(*) as c FROM Presupuesto')[0]?.c ?? 0
-      const s  = query("SELECT COUNT(*) as c FROM Saldo WHERE estado='pendiente'")[0]?.c ?? 0
+      const s  = query("SELECT COUNT(*) as c FROM Saldo WHERE estado = 'pendiente'")[0]?.c ?? 0
       const pr = query('SELECT COUNT(*) as c FROM Producto')[0]?.c ?? 0
       setStats({ presupuestos: p, pendientes: s, productos: pr })
     } catch {
@@ -88,7 +88,7 @@ export default function Dashboard() {
           Panel Principal
         </p>
         <h1 className="font-display text-6xl text-white tracking-widest leading-none">
-          MOTOPARTS
+          POWDER
         </h1>
         <p className="text-surface-400 mt-2 font-body">
           Sistema de gestión y presupuestos para repuestos de motos

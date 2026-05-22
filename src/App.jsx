@@ -6,7 +6,8 @@ import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Presupuestador from './pages/Presupuestador'
 import Inventario from './pages/Inventario'
-import { Historial, Facturas, Estadisticas, PedidosCompra, Saldos } from './pages/Placeholder'
+import Historial from './pages/Historial'
+import { Facturas, Estadisticas, PedidosCompra, Saldos } from './pages/Placeholder'
 
 function RequireAuth({ children }) {
   const { authed } = useAuth()
@@ -18,7 +19,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/login" element={<Login />} />
+        <Route path="/login"          element={<Login />} />
         <Route path="/"               element={<RequireAuth><Dashboard /></RequireAuth>} />
         <Route path="/presupuestador" element={<RequireAuth><Presupuestador /></RequireAuth>} />
         <Route path="/historial"      element={<RequireAuth><Historial /></RequireAuth>} />
@@ -27,7 +28,7 @@ export default function App() {
         <Route path="/estadisticas"   element={<RequireAuth><Estadisticas /></RequireAuth>} />
         <Route path="/pedidos"        element={<RequireAuth><PedidosCompra /></RequireAuth>} />
         <Route path="/saldos"         element={<RequireAuth><Saldos /></RequireAuth>} />
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="*"               element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
   )
