@@ -4,7 +4,7 @@ import {
   FileText, Clock, Package, Receipt,
   BarChart2, ShoppingCart, Wallet, ArrowRight
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { query } from '../lib/database'
 
 const SECTIONS = [
@@ -69,16 +69,24 @@ const SECTIONS = [
 export default function Dashboard() {
   const [stats, setStats] = useState({ presupuestos: 0, pendientes: 0, productos: 0 })
 
-  useEffect(() => {
+  const loadStats = useCallback(() => {
     try {
       const p  = query('SELECT COUNT(*) as c FROM Presupuesto')[0]?.c ?? 0
-      const s  = query("SELECT COUNT(*) as c FROM Saldo WHERE estado = 'pendiente'")[0]?.c ?? 0
+      // Saldos pendientes = presupuestos CC aún no pagados
+      const s  = query('SELECT COUNT(*) as c FROM Saldo WHERE estado = ?', ['pendiente'])[0]?.c ?? 0
       const pr = query('SELECT COUNT(*) as c FROM Producto')[0]?.c ?? 0
       setStats({ presupuestos: p, pendientes: s, productos: pr })
     } catch {
-      // db might not have tables yet on very first load
+      // db might not be ready yet on first load
     }
   }, [])
+
+  useEffect(() => {
+    loadStats()
+    // Re-carga cuando el usuario vuelve a esta pestaña (ej: creó un presupuesto y volvió)
+    window.addEventListener('focus', loadStats)
+    return () => window.removeEventListener('focus', loadStats)
+  }, [loadStats])
 
   return (
     <div className="max-w-6xl mx-auto space-y-10">

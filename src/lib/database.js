@@ -189,8 +189,10 @@ export function query(sql, params = []) {
 export function run(sql, params = []) {
   if (!db) throw new Error('DB no inicializada')
   db.run(sql, params)
+  // IMPORTANT: read rowid BEFORE persistDB() — db.export() resets last_insert_rowid to 0
+  const lastId = db.exec('SELECT last_insert_rowid() as id')[0].values[0][0]
   persistDB()
-  return db.exec('SELECT last_insert_rowid() as id')[0].values[0][0]
+  return lastId
 }
 
 export function getDB() { return db }

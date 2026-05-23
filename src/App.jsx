@@ -7,7 +7,9 @@ import Dashboard from './pages/Dashboard'
 import Presupuestador from './pages/Presupuestador'
 import Inventario from './pages/Inventario'
 import Historial from './pages/Historial'
-import { Facturas, Estadisticas, PedidosCompra, Saldos } from './pages/Placeholder'
+import Facturas from './pages/Facturas'
+import Estadisticas from './pages/Estadisticas'
+import { PedidosCompra, Saldos } from './pages/Placeholder'
 
 function RequireAuth({ children }) {
   const { authed } = useAuth()
