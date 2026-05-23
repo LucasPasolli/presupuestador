@@ -356,9 +356,16 @@ function calcularMetricas(desde, hasta) {
   `, [desde, hasta])[0]?.c ?? 0
 
   // ── 9. Egresos (pedidos de compra del período) ───────────────────────────
+  // Egresos: solo pedidos efectivamente pagados
   m.egresosPedidos = query(`
     SELECT COALESCE(SUM(monto),0) as v FROM PedidoCompra
-    WHERE fecha >= ? AND fecha <= ?
+    WHERE fecha >= ? AND fecha <= ? AND estado = 'pagado'
+  `, [desde, hasta])[0]?.v ?? 0
+
+  // Pedidos pendientes de pago (deuda con proveedores)
+  m.pedidosPendientes = query(`
+    SELECT COALESCE(SUM(monto),0) as v FROM PedidoCompra
+    WHERE fecha >= ? AND fecha <= ? AND estado = 'pendiente'
   `, [desde, hasta])[0]?.v ?? 0
 
   // ── 10. Resultado operativo estimado ─────────────────────────────────────
@@ -461,13 +468,27 @@ export default function Estadisticas() {
           sub="en el período" />
         <KpiCard icon={Tag}         label="Descuentos dados" value={fmtCompacto(m.descuentosOtorgados)} color="yellow"
           sub={`${pct(m.descuentosOtorgados, m.facturadoTotal)} del facturado`} />
-        <KpiCard icon={TrendingDown} label="Egresos (pedidos)" value={fmtCompacto(m.egresosPedidos)} color="red"
+        <KpiCard icon={TrendingDown} label="Egresos pagados" value={fmtCompacto(m.egresosPedidos)} color="red"
           sub="pedidos de compra" />
         <KpiCard icon={m.resultadoEstimado >= 0 ? TrendingUp : TrendingDown}
           label="Resultado operativo" value={fmtCompacto(m.resultadoEstimado)}
           color={m.resultadoEstimado >= 0 ? 'green' : 'red'}
           sub="cobrado − egresos" />
       </div>
+
+      {/* ── Deuda con proveedores ── */}
+      {m.pedidosPendientes > 0 && (
+        <div className="bg-yellow-500/8 border border-yellow-500/25 rounded-2xl px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <AlertTriangle size={18} className="text-yellow-400 flex-shrink-0" />
+            <div>
+              <p className="text-yellow-300 text-sm font-body font-medium">Pedidos pendientes de pago</p>
+              <p className="text-surface-400 text-xs font-body">Deuda con proveedores en el período seleccionado</p>
+            </div>
+          </div>
+          <p className="text-yellow-400 font-mono font-bold text-xl">{fmtCompacto(m.pedidosPendientes)}</p>
+        </div>
+      )}
 
       {/* ── Evolución mensual ── */}
       <Card className="p-6">
