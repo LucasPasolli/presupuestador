@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { query, run } from '../lib/database'
 import { Button, Card, PageHeader, Modal, Input } from '../components/ui'
-import { Plus, Trash2, Search, UserPlus, CheckCircle2, AlertCircle } from 'lucide-react'
+import { Plus, Trash2, Search, UserPlus, CheckCircle2, AlertCircle, Download, FileText } from 'lucide-react'
 
 // ─── Constantes ────────────────────────────────────────────────────────────
 
@@ -198,19 +198,37 @@ function ClienteSelector({ value, onChange, onToast }) {
 // para escapar de cualquier contenedor con overflow:hidden.
 
 function ProductoDropdown({ results, anchorRef, onSelect, query: searchText }) {
-  const [pos, setPos] = useState({ top: 0, left: 0, width: 0 })
+  const [pos, setPos] = useState({ top: 0, left: 0, width: 0, openUp: false })
 
   useEffect(() => {
     if (!anchorRef.current) return
-    const rect = anchorRef.current.getBoundingClientRect()
-    setPos({ top: rect.bottom + window.scrollY + 4, left: rect.left + window.scrollX, width: rect.width })
+    const rect       = anchorRef.current.getBoundingClientRect()
+    const maxH       = 260
+    const spaceBelow = window.innerHeight - rect.bottom - 8
+    const spaceAbove = rect.top - 8
+    // Abrir hacia arriba si no hay espacio abajo pero sí arriba
+    const openUp     = spaceBelow < maxH && spaceAbove > spaceBelow
+    // Con position:fixed NO se suma scrollY — las coords del viewport son directas
+    const topFixed   = openUp
+      ? rect.top - Math.min(maxH, spaceAbove) - 4
+      : rect.bottom + 4
+    // Limitar maxHeight al espacio real disponible para no salir de pantalla
+    const realMaxH   = openUp
+      ? Math.min(maxH, spaceAbove)
+      : Math.min(maxH, spaceBelow)
+    setPos({
+      top:    topFixed,
+      left:   rect.left,
+      width:  rect.width,
+      realMaxH,
+    })
   })
 
   if (!anchorRef.current) return null
 
   return (
     <div
-      style={{ position: 'fixed', top: `${pos.top}px`, left: `${pos.left}px`, width: `${Math.max(pos.width, 320)}px`, zIndex: 9999, maxHeight: '260px', overflowY: 'auto' }}
+      style={{ position: 'fixed', top: `${pos.top}px`, left: `${pos.left}px`, width: `${Math.max(pos.width, 320)}px`, zIndex: 9999, maxHeight: `${pos.realMaxH ?? 260}px`, overflowY: 'auto' }}
       className="bg-surface-800 border border-surface-600 rounded-xl shadow-2xl"
     >
       {results.length === 0 ? (
@@ -232,7 +250,7 @@ function ProductoDropdown({ results, anchorRef, onSelect, query: searchText }) {
 
 // ─── Fila de ítem ───────────────────────────────────────────────────────────
 
-function ItemRow({ item, index, onUpdate, onRemove }) {
+function ItemRow({ item, index, onUpdate, onRemove, onClearError }) {
   const [nombreSearch,   setNombreSearch]   = useState(item.nombreProducto || '')
   const [nombreResults,  setNombreResults]  = useState([])
   const [showDrop,       setShowDrop]       = useState(false)
@@ -261,6 +279,7 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
 
   function buscarPorNombre(text) {
     setNombreSearch(text)
+    onClearError()
     onUpdate(index, 'nombreProducto', text)
     if (!text.trim()) { setNombreResults([]); setShowDrop(false); return }
     const rows = query(`SELECT * FROM Producto WHERE nombre LIKE ? LIMIT 12`, [`%${text.trim()}%`])
@@ -271,6 +290,7 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
   function seleccionarProducto(p) {
     setNombreSearch(p.nombre)
     setShowDrop(false)
+    onClearError()
     onUpdate(index, 'idProducto',     p.idProducto)
     onUpdate(index, 'nombreProducto', p.nombre)
     onUpdate(index, 'precioUnitario', p.precioUnitario)
@@ -279,6 +299,7 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
 
   function handleIdChange(val) {
     const clean = val.replace(/\D/g, '')
+    onClearError()
     onUpdate(index, 'idProducto', clean)
     if (clean) {
       const p = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(clean)])[0]
@@ -303,7 +324,15 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
       {/* Cantidad */}
       <td className="py-2 px-2 w-20">
         <input type="text" inputMode="numeric" value={item.cantidad}
-          onChange={e => onUpdate(index, 'cantidad', e.target.value.replace(/\D/g, '') || '1')}
+          onChange={e => {
+            onClearError()
+            const raw = e.target.value.replace(/\D/g, '')
+            onUpdate(index, 'cantidad', raw)
+          }}
+          onBlur={e => {
+            // Al salir del campo, si quedó vacío ponemos 1
+            if (!e.target.value || parseInt(e.target.value) < 1) onUpdate(index, 'cantidad', '1')
+          }}
           className={cell + ' w-full text-center'} />
       </td>
 
@@ -441,6 +470,104 @@ function MetodoPagoSelector({ metodoPago, onMetodoPago, excepcionFactor, onExcep
 
 // ─── Componente principal ───────────────────────────────────────────────────
 
+// ─── Generador PDF de presupuesto ──────────────────────────────────────────
+
+async function generarPDFPresupuesto(idPresupuesto) {
+  const { default: jsPDF }     = await import('jspdf')
+  const { default: autoTable } = await import('jspdf-autotable')
+
+  const pres = query('SELECT p.*, c.nombre AS cNombre, c.apellido AS cApellido, c.cuit, c.telefono, c.mail FROM Presupuesto p JOIN Cliente c ON c.idCliente = p.idCliente WHERE p.idPresupuesto = ?', [idPresupuesto])[0]
+  if (!pres) return
+
+  const detalles = query(`
+    SELECT dp.*, pr.nombre AS nombreProducto
+    FROM DetallePresupuesto dp
+    LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
+    WHERE dp.idPresupuesto = ?
+    ORDER BY dp.idDetalle
+  `, [idPresupuesto])
+
+  const metodoLabel = { efectivo:'Efectivo', transferencia:'Transferencia', cc15:'CC 15 días', cc30:'CC 30 días' }
+  const fmtFecha = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${d}/${m}/${y}` }
+
+  const doc  = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+  const PW   = 210
+  const ML   = 14
+
+  // Encabezado naranja
+  doc.setFillColor(234, 88, 12)
+  doc.rect(0, 0, PW, 18, 'F')
+  doc.setFontSize(13); doc.setFont('helvetica', 'bold'); doc.setTextColor(255,255,255)
+  doc.text('POWDER — Gestión', ML, 12)
+  doc.setFontSize(9); doc.setFont('helvetica', 'normal')
+  doc.text(`Presupuesto #${idPresupuesto}`, PW - ML, 12, { align: 'right' })
+
+  // Datos cabecera
+  doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(50,50,50)
+  doc.text(`PRESUPUESTO #${idPresupuesto}`, ML, 28)
+  doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(100,100,100)
+  doc.text(`Fecha: ${fmtFecha(pres.fecha)}`, ML, 34)
+  doc.text(`Método de pago: ${metodoLabel[pres.metodoPago] ?? pres.metodoPago}`, ML, 39)
+
+  // Datos cliente
+  doc.setFontSize(9); doc.setFont('helvetica','bold'); doc.setTextColor(50,50,50)
+  doc.text('CLIENTE', PW - ML - 70, 26)
+  doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(100,100,100)
+  doc.text(`${pres.cNombre} ${pres.cApellido}`, PW - ML - 70, 32)
+  if (pres.cuit)    doc.text(`CUIT: ${pres.cuit}`,       PW - ML - 70, 37)
+  if (pres.telefono) doc.text(`Tel: ${pres.telefono}`,    PW - ML - 70, 42)
+  if (pres.mail)    doc.text(pres.mail,                   PW - ML - 70, 47)
+
+  // Tabla de ítems
+  autoTable(doc, {
+    startY: 55,
+    margin: { left: ML, right: ML },
+    head: [['Producto', 'Medida', 'Cant.', 'Precio Unit.', 'Subtotal']],
+    body: detalles.map(d => [
+      d.nombreProducto ?? `#${d.idProducto}`,
+      d.medida ?? '—',
+      d.cantidad,
+      fmt(d.precioUnitario),
+      fmt(d.subtotal),
+    ]),
+    styles:     { fontSize: 8, cellPadding: 2.5, textColor: [50,50,50] },
+    headStyles: { fillColor: [234,88,12], textColor: [255,255,255], fontStyle: 'bold' },
+    alternateRowStyles: { fillColor: [250,250,250] },
+    columnStyles: {
+      0: { cellWidth: 'auto' },
+      1: { cellWidth: 22, halign: 'center' },
+      2: { cellWidth: 16, halign: 'center' },
+      3: { cellWidth: 34, halign: 'right' },
+      4: { cellWidth: 34, halign: 'right' },
+    },
+  })
+
+  const finalY = doc.lastAutoTable.finalY + 6
+
+  // Totales
+  doc.setDrawColor(220,220,220); doc.line(ML, finalY, PW - ML, finalY)
+  doc.setFontSize(8.5); doc.setFont('helvetica','normal'); doc.setTextColor(100,100,100)
+  doc.text('Subtotal (precio lista):', PW - ML - 70, finalY + 7)
+  doc.setFont('helvetica','normal'); doc.setTextColor(50,50,50)
+  doc.text(fmt(pres.montoOriginal), PW - ML, finalY + 7, { align: 'right' })
+
+  const ajuste = pres.monto - pres.montoOriginal
+  if (ajuste !== 0) {
+    doc.setFontSize(8.5); doc.setTextColor(100,100,100)
+    doc.text('Ajuste:', PW - ML - 70, finalY + 13)
+    doc.setTextColor(ajuste < 0 ? 22 : 220, ajuste < 0 ? 163 : 38, ajuste < 0 ? 74 : 38)
+    doc.text(`${ajuste < 0 ? '- ' : '+ '}${fmt(Math.abs(ajuste))}`, PW - ML, finalY + 13, { align: 'right' })
+  }
+
+  doc.setFillColor(234,88,12)
+  doc.roundedRect(ML, finalY + 18, PW - ML*2, 12, 2, 2, 'F')
+  doc.setFontSize(10); doc.setFont('helvetica','bold'); doc.setTextColor(255,255,255)
+  doc.text('TOTAL', ML + 4, finalY + 26)
+  doc.text(fmt(pres.monto), PW - ML - 4, finalY + 26, { align: 'right' })
+
+  doc.save(`Presupuesto_${idPresupuesto}_${pres.cNombre}_${pres.cApellido}.pdf`)
+}
+
 const ITEM_EMPTY = () => ({ idProducto: '', nombreProducto: '', cantidad: 1, precioUnitario: 0, medida: null })
 
 export default function Presupuestador() {
@@ -464,6 +591,7 @@ export default function Presupuestador() {
 
   function updateItem(idx, key, val) {
     setItems(prev => prev.map((it, i) => i === idx ? { ...it, [key]: val } : it))
+    setError('')   // limpiar error al editar cualquier campo
   }
   function addItem()       { setItems(prev => [...prev, ITEM_EMPTY()]) }
   function removeItem(idx) { setItems(prev => prev.filter((_, i) => i !== idx)) }
@@ -521,7 +649,7 @@ export default function Presupuestador() {
       ? `Excepción (${METODOS_BASE.find(m => m.value === excepcionSubMetodo)?.label})`
       : METODOS_BASE.find(m => m.value === metodoPago)?.label ?? metodoPago
 
-    setGuardado({ idPresupuesto: presupuestoReal, esCuenta, totalFinal, metodoLabel })
+    setGuardado({ idPresupuesto: presupuestoReal, esCuenta, totalFinal, metodoLabel, clienteNombre: `${cliente.nombre} ${cliente.apellido}`, clienteId: cliente.idCliente })
   }
 
   function nuevo() {
@@ -536,15 +664,37 @@ export default function Presupuestador() {
         <div className="bg-surface-800 border border-surface-700 rounded-2xl p-10 space-y-4">
           <CheckCircle2 size={52} className="text-emerald-400 mx-auto" />
           <h2 className="font-display text-3xl text-white tracking-widest">GUARDADO</h2>
-          <p className="text-surface-300 font-body">
-            Presupuesto <span className="text-brand-400 font-mono">#{guardado.idPresupuesto}</span> creado correctamente.
-          </p>
+          <div className="bg-surface-700/60 border border-surface-600 rounded-xl px-5 py-4 text-left space-y-2">
+            <div className="flex justify-between items-center">
+              <span className="text-surface-400 text-xs uppercase tracking-widest font-body">Presupuesto</span>
+              <span className="text-brand-400 font-mono font-bold">#{guardado.idPresupuesto}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-surface-400 text-xs uppercase tracking-widest font-body">Cliente</span>
+              <span className="text-white text-sm font-body">{guardado.clienteNombre}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-surface-400 text-xs uppercase tracking-widest font-body">Total</span>
+              <span className="text-brand-400 font-mono font-bold">{fmt(guardado.totalFinal)}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-surface-400 text-xs uppercase tracking-widest font-body">Método</span>
+              <span className="text-surface-200 text-sm font-body">{guardado.metodoLabel}</span>
+            </div>
+          </div>
           {guardado.esCuenta && (
             <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3 text-yellow-300 text-sm font-body">
               Se generó un <strong>Saldo pendiente</strong> por {fmt(guardado.totalFinal)} ({guardado.metodoLabel}).
             </div>
           )}
-          <Button variant="secondary" className="w-full" onClick={nuevo}>Nuevo Presupuesto</Button>
+          <div className="flex flex-col gap-2 pt-2">
+            <Button icon={Download} className="w-full" onClick={() => generarPDFPresupuesto(guardado.idPresupuesto)}>
+              Descargar PDF del Presupuesto
+            </Button>
+            <Button variant="secondary" className="w-full" onClick={nuevo}>
+              Nuevo Presupuesto
+            </Button>
+          </div>
         </div>
       </div>
     )
@@ -561,7 +711,7 @@ export default function Presupuestador() {
       <Card className="p-6">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-start">
           <div className="md:col-span-2">
-            <ClienteSelector value={cliente} onChange={setCliente} onToast={setToast} />
+            <ClienteSelector value={cliente} onChange={v => { setCliente(v); setError('') }} onToast={setToast} />
           </div>
           <div>
             <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1">Fecha</label>
@@ -573,7 +723,7 @@ export default function Presupuestador() {
 
         <MetodoPagoSelector
           metodoPago={metodoPago}
-          onMetodoPago={setMetodoPago}
+          onMetodoPago={v => { setMetodoPago(v); setError('') }}
           excepcionFactor={excepcionFactor}
           onExcepcionFactor={setExcepcionFactor}
           excepcionSubMetodo={excepcionSubMetodo}
@@ -598,7 +748,7 @@ export default function Presupuestador() {
             </thead>
             <tbody>
               {items.map((item, idx) => (
-                <ItemRow key={idx} item={item} index={idx} onUpdate={updateItem} onRemove={removeItem} />
+                <ItemRow key={idx} item={item} index={idx} onUpdate={updateItem} onRemove={removeItem} onClearError={() => setError('')} />
               ))}
             </tbody>
           </table>
