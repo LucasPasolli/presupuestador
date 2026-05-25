@@ -42,18 +42,34 @@ function Toast({ message, onDone }) {
 // ─── Dropdown de productos con posición fixed ───────────────────────────────
 
 function ProductoDropdown({ results, anchorRef, onSelect, searchText }) {
-  const [pos, setPos] = useState({ top: 0, left: 0, width: 320 })
+  const [pos, setPos] = useState({ top: 0, left: 0, width: 320, realMaxH: 260 })
+
+  const recalc = useCallback(() => {
+    if (!anchorRef.current) return
+    const rect       = anchorRef.current.getBoundingClientRect()
+    const maxH       = 260
+    const spaceBelow = window.innerHeight - rect.bottom - 8
+    const spaceAbove = rect.top - 8
+    const openUp     = spaceBelow < maxH && spaceAbove > spaceBelow
+    const topFixed   = openUp ? rect.top - Math.min(maxH, spaceAbove) - 4 : rect.bottom + 4
+    const realMaxH   = openUp ? Math.min(maxH, spaceAbove) : Math.min(maxH, spaceBelow)
+    setPos({ top: topFixed, left: rect.left, width: Math.max(rect.width, 320), realMaxH })
+  }, [])
 
   useEffect(() => {
-    if (!anchorRef.current) return
-    const r = anchorRef.current.getBoundingClientRect()
-    setPos({ top: r.bottom + 4, left: r.left, width: Math.max(r.width, 320) })
-  })
+    recalc()
+    window.addEventListener('scroll', recalc, true)
+    window.addEventListener('resize', recalc)
+    return () => {
+      window.removeEventListener('scroll', recalc, true)
+      window.removeEventListener('resize', recalc)
+    }
+  }, [recalc])
 
   return (
     <div style={{
       position: 'fixed', top: `${pos.top}px`, left: `${pos.left}px`,
-      width: `${pos.width}px`, zIndex: 9999, maxHeight: '260px', overflowY: 'auto'
+      width: `${pos.width}px`, zIndex: 9999, maxHeight: `${pos.realMaxH}px`, overflowY: 'auto'
     }} className="bg-surface-800 border border-surface-600 rounded-xl shadow-2xl">
       {results.length === 0
         ? <p className="px-4 py-3 text-surface-300 text-xs font-body">Sin resultados para "{searchText}"</p>

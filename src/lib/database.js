@@ -6,7 +6,7 @@ import { PRODUCTOS_SEED } from './seedData.js'
 let db = null
 
 // Cambiar la key cuando el schema cambia para forzar re-creación de la BD.
-const DB_STORAGE_KEY = 'motoparts_db_v3'
+const DB_STORAGE_KEY = 'motoparts_db_v5'
 
 export function persistDB() {
   if (!db) return
@@ -98,6 +98,7 @@ function runSchema() {
       metodoPago     TEXT NOT NULL CHECK(metodoPago IN ('efectivo','transferencia','cc30','cc15')),
       montoOriginal  REAL NOT NULL DEFAULT 0,
       monto          REAL NOT NULL DEFAULT 0,
+      estado         TEXT NOT NULL DEFAULT 'borrador' CHECK(estado IN ('borrador','aprobado','pagado','rechazado')),
       FOREIGN KEY (idCliente) REFERENCES Cliente(idCliente) ON DELETE RESTRICT
     );
   `)

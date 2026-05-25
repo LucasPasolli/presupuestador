@@ -220,9 +220,10 @@ function calcularMetricas(desde, hasta) {
 
   // ── 1. Ingresos totales del período ──────────────────────────────────────
   const presupuestosPeriodo = query(`
-    SELECT p.idPresupuesto, p.monto, p.montoOriginal, p.metodoPago, p.fecha, p.idCliente
+    SELECT p.idPresupuesto, p.monto, p.montoOriginal, p.metodoPago, p.fecha, p.idCliente, p.estado
     FROM Presupuesto p
     WHERE p.fecha >= ? AND p.fecha <= ?
+      AND p.estado IN ('aprobado','pagado')
   `, [desde, hasta])
 
   m.facturadoTotal  = presupuestosPeriodo.reduce((a, p) => a + p.monto, 0)
@@ -258,7 +259,7 @@ function calcularMetricas(desde, hasta) {
   const montoCCPendiente = saldosDelPeriodo.filter(s => s.estado === 'pendiente').reduce((a, s) => a + s.monto, 0)
 
   const montoContado = presupuestosPeriodo
-    .filter(p => p.metodoPago === 'efectivo' || p.metodoPago === 'transferencia')
+    .filter(p => (p.metodoPago === 'efectivo' || p.metodoPago === 'transferencia') && p.estado === 'pagado')
     .reduce((a, p) => a + p.monto, 0)
 
   m.cobradoReal      = montoContado + montoCCPagado

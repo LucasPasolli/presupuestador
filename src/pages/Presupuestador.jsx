@@ -198,31 +198,34 @@ function ClienteSelector({ value, onChange, onToast }) {
 // para escapar de cualquier contenedor con overflow:hidden.
 
 function ProductoDropdown({ results, anchorRef, onSelect, query: searchText }) {
-  const [pos, setPos] = useState({ top: 0, left: 0, width: 0, openUp: false })
+  const [pos, setPos] = useState({ top: 0, left: 0, width: 0, realMaxH: 260 })
 
-  useEffect(() => {
+  const recalc = useCallback(() => {
     if (!anchorRef.current) return
     const rect       = anchorRef.current.getBoundingClientRect()
     const maxH       = 260
     const spaceBelow = window.innerHeight - rect.bottom - 8
     const spaceAbove = rect.top - 8
-    // Abrir hacia arriba si no hay espacio abajo pero sí arriba
     const openUp     = spaceBelow < maxH && spaceAbove > spaceBelow
-    // Con position:fixed NO se suma scrollY — las coords del viewport son directas
     const topFixed   = openUp
       ? rect.top - Math.min(maxH, spaceAbove) - 4
       : rect.bottom + 4
-    // Limitar maxHeight al espacio real disponible para no salir de pantalla
     const realMaxH   = openUp
       ? Math.min(maxH, spaceAbove)
       : Math.min(maxH, spaceBelow)
-    setPos({
-      top:    topFixed,
-      left:   rect.left,
-      width:  rect.width,
-      realMaxH,
-    })
-  })
+    setPos({ top: topFixed, left: rect.left, width: rect.width, realMaxH })
+  }, [])
+
+  useEffect(() => {
+    recalc()
+    // Recalculate on scroll and resize so dropdown stays anchored
+    window.addEventListener('scroll', recalc, true)
+    window.addEventListener('resize', recalc)
+    return () => {
+      window.removeEventListener('scroll', recalc, true)
+      window.removeEventListener('resize', recalc)
+    }
+  }, [recalc])
 
   if (!anchorRef.current) return null
 
@@ -255,6 +258,7 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError }) {
   const [nombreResults,  setNombreResults]  = useState([])
   const [showDrop,       setShowDrop]       = useState(false)
   const [medidas,        setMedidas]        = useState([])
+  const [idError,        setIdError]        = useState('')
   const inputRef = useRef(null)
   const wrapRef  = useRef(null)
 
@@ -291,6 +295,7 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError }) {
     setNombreSearch(p.nombre)
     setShowDrop(false)
     onClearError()
+    setIdError('')
     onUpdate(index, 'idProducto',     p.idProducto)
     onUpdate(index, 'nombreProducto', p.nombre)
     onUpdate(index, 'precioUnitario', p.precioUnitario)
@@ -308,7 +313,17 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError }) {
         onUpdate(index, 'nombreProducto', p.nombre)
         onUpdate(index, 'precioUnitario', p.precioUnitario)
         onUpdate(index, 'medida', null)
+        setIdError('')
+      } else {
+        // ID no existe — limpiamos nombre y precio, no rellenamos nada
+        setNombreSearch('')
+        onUpdate(index, 'nombreProducto', '')
+        onUpdate(index, 'precioUnitario', 0)
+        onUpdate(index, 'medida', null)
+        setIdError(`Sin producto con ID ${clean}`)
       }
+    } else {
+      setIdError('')
     }
   }
 
@@ -356,7 +371,8 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError }) {
         <input type="text" inputMode="numeric" value={item.idProducto || ''}
           onChange={e => handleIdChange(e.target.value)}
           placeholder="ID"
-          className={cell + ' w-full text-center'} />
+          className={cell + ' w-full text-center' + (idError ? ' border-red-500' : '')} />
+        {idError && <p className="text-red-400 text-[10px] font-body mt-0.5 leading-tight">{idError}</p>}
       </td>
 
       {/* Medida */}
@@ -614,7 +630,7 @@ export default function Presupuestador() {
     const metodoDb = esExcepcion ? excepcionSubMetodo : metodoPago
 
     const idPresupuesto = run(
-      `INSERT INTO Presupuesto (idCliente, fecha, metodoPago, montoOriginal, monto) VALUES (?,?,?,?,?)`,
+      `INSERT INTO Presupuesto (idCliente, fecha, metodoPago, montoOriginal, monto, estado) VALUES (?,?,?,?,?,'borrador')`,
       [cliente.idCliente, fecha, metodoDb, subtotalOriginal, totalFinal]
     )
     // Verificamos leyendo el ID real de la DB por si last_insert_rowid fue afectado
@@ -782,13 +798,16 @@ export default function Presupuestador() {
             </div>
           </div>
 
-          <div className="space-y-2">
-            {error && (
-              <div className="flex items-center gap-2 text-red-400 text-xs bg-red-500/10 border border-red-500/30
-                              rounded-xl px-3 py-2 max-w-xs">
-                <AlertCircle size={14} className="flex-shrink-0" />{error}
-              </div>
-            )}
+          <div className="flex flex-col gap-2 items-end">
+            {/* Área de error con altura reservada — el botón nunca se mueve */}
+            <div className="h-9 flex items-center justify-end">
+              {error && (
+                <div className="flex items-center gap-2 text-red-400 text-xs bg-red-500/10 border border-red-500/30
+                                rounded-xl px-3 py-2 max-w-xs">
+                  <AlertCircle size={14} className="flex-shrink-0" />{error}
+                </div>
+              )}
+            </div>
             <Button size="lg" onClick={guardar} className="w-full md:w-auto">Guardar Presupuesto</Button>
           </div>
         </div>
