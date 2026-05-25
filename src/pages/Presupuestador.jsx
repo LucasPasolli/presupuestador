@@ -645,20 +645,9 @@ export default function Presupuestador() {
       )
     }
 
-    // Saldo para CC (tanto normal como excepción con CC como base)
+    // El saldo CC se crea solo cuando el presupuesto sea APROBADO desde Historial
     const esCuenta = metodoPago === 'cc15' || metodoPago === 'cc30' ||
                      (esExcepcion && (excepcionSubMetodo === 'cc15' || excepcionSubMetodo === 'cc30'))
-    const metodoCc = esExcepcion ? excepcionSubMetodo : metodoPago
-
-    if (esCuenta) {
-      const dias = metodoCc === 'cc15' ? 15 : 30
-      const fechaFin = new Date()
-      fechaFin.setDate(fechaFin.getDate() + dias)
-      run(
-        `INSERT INTO Saldo (idPresupuesto, idCliente, fechaInicio, fechaFin, monto, estado) VALUES (?,?,?,?,?,'pendiente')`,
-        [idPresupuesto, cliente.idCliente, fecha, fechaFin.toISOString().slice(0, 10), totalFinal]
-      )
-    }
 
     // Capturamos todos los datos necesarios para la pantalla de éxito ANTES de resetear
     const metodoLabel = esExcepcion
