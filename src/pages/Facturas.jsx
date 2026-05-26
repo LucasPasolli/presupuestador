@@ -37,6 +37,7 @@ function cargarDatos(desde, hasta) {
     FROM Presupuesto p
     JOIN Cliente c ON c.idCliente = p.idCliente
     WHERE p.fecha >= ? AND p.fecha <= ?
+      AND p.estado IN ('pagado','aprobado')
     ORDER BY p.idCliente, p.idPresupuesto
   `, [desde, hasta])
 
@@ -47,6 +48,7 @@ function cargarDatos(desde, hasta) {
     JOIN Presupuesto p  ON p.idPresupuesto = dp.idPresupuesto
     JOIN Producto   pr ON pr.idProducto    = dp.idProducto
     WHERE p.fecha >= ? AND p.fecha <= ?
+      AND p.estado IN ('pagado','aprobado')
   `, [desde, hasta])
 
   // Indexar detalles por presupuesto

@@ -1,11 +1,10 @@
 // src/pages/Historial.jsx
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { query, run } from '../lib/database'
-import { Card, PageHeader, Button, Badge, Modal, Input, Select } from '../components/ui'
+import { Card, PageHeader, Button, Badge, Modal } from '../components/ui'
 import {
   Search, ChevronDown, ChevronUp, ArrowLeft, FileText,
-  Clock, CheckCircle2, XCircle, ThumbsUp, AlertCircle,
-  Pencil, Trash2, Plus, Download
+  Clock, CheckCircle2, XCircle, ThumbsUp, AlertCircle, Trash2
 } from 'lucide-react'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -61,194 +60,6 @@ function descontarStock(idPresupuesto) {
   }
 }
 
-// ─── Modal de edición de presupuesto ───────────────────────────────────────
-
-function EditarPresupuestoModal({ open, onClose, presupuesto, onSaved }) {
-  const [metodoPago, setMetodoPago] = useState(presupuesto?.metodoPago ?? 'efectivo')
-  const [items,      setItems]      = useState([])
-  const [productos,  setProductos]  = useState([])
-  const [error,      setError]      = useState('')
-
-  useEffect(() => {
-    if (!open || !presupuesto) return
-    setMetodoPago(presupuesto.metodoPago)
-    setError('')
-    const rows = query(`
-      SELECT dp.*, pr.nombre AS nombreProducto
-      FROM DetallePresupuesto dp
-      LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
-      WHERE dp.idPresupuesto = ?
-      ORDER BY dp.idDetalle
-    `, [presupuesto.idPresupuesto])
-    setItems(rows.map(r => ({
-      idDetalle:     r.idDetalle,
-      idProducto:    r.idProducto,
-      nombreProducto:r.nombreProducto ?? '',
-      medida:        r.medida ?? '',
-      cantidad:      r.cantidad,
-      precioUnitario:r.precioUnitario,
-    })))
-  }, [open, presupuesto?.idPresupuesto])
-
-  useEffect(() => {
-    setProductos(query('SELECT idProducto, nombre, precioUnitario FROM Producto ORDER BY nombre LIMIT 200'))
-  }, [])
-
-  const METODOS = [
-    { value:'efectivo',      label:'Efectivo',          factor:0.95  },
-    { value:'transferencia', label:'Transferencia',      factor:0.95  },
-    { value:'cc15',          label:'Cta. Cte. 15 días', factor:1.00  },
-    { value:'cc30',          label:'Cta. Cte. 30 días', factor:1.105 },
-  ]
-  const factor = METODOS.find(m => m.value === metodoPago)?.factor ?? 1
-
-  function updateItem(idx, key, val) {
-    setItems(prev => prev.map((it, i) => i === idx ? { ...it, [key]: val } : it))
-  }
-  function removeItem(idx) {
-    setItems(prev => prev.filter((_, i) => i !== idx))
-  }
-  function addItem() {
-    setItems(prev => [...prev, { idDetalle: null, idProducto: '', nombreProducto: '', medida: '', cantidad: 1, precioUnitario: 0 }])
-  }
-
-  function handleIdChange(idx, val) {
-    const clean = val.replace(/\D/g, '')
-    updateItem(idx, 'idProducto', clean)
-    if (clean) {
-      const p = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(clean)])[0]
-      if (p) {
-        updateItem(idx, 'nombreProducto', p.nombre)
-        updateItem(idx, 'precioUnitario', p.precioUnitario)
-      }
-    }
-  }
-
-  function guardar() {
-    setError('')
-    const valid = items.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
-    if (!valid.length) { setError('Agregá al menos un producto válido.'); return }
-
-    const montoOrig = valid.reduce((a, it) => a + parseInt(it.cantidad) * parseFloat(it.precioUnitario), 0)
-    const monto     = montoOrig * factor
-
-    // Update presupuesto header
-    run(`UPDATE Presupuesto SET metodoPago=?, montoOriginal=?, monto=?, factorAplicado=? WHERE idPresupuesto=?`,
-      [metodoPago, montoOrig, monto, factor, presupuesto.idPresupuesto])
-
-    // Remove all old details and re-insert
-    run(`DELETE FROM DetallePresupuesto WHERE idPresupuesto=?`, [presupuesto.idPresupuesto])
-    for (const it of valid) {
-      const precio   = parseFloat(it.precioUnitario) || 0
-      const cantidad = parseInt(it.cantidad)
-      run(`INSERT INTO DetallePresupuesto (idPresupuesto, idProducto, medida, cantidad, precioUnitario, subtotal) VALUES (?,?,?,?,?,?)`,
-        [presupuesto.idPresupuesto, parseInt(it.idProducto), it.medida || null, cantidad, precio, cantidad * precio])
-    }
-
-    onSaved()
-    onClose()
-  }
-
-  const cell = `bg-surface-700 border border-surface-600 rounded-lg px-2 py-1.5 text-white text-sm
-                font-mono focus:outline-none focus:border-brand-500 transition-all w-full
-                [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none`
-
-  const subtotal = items.reduce((a, it) => a + (parseInt(it.cantidad)||0)*(parseFloat(it.precioUnitario)||0), 0)
-
-  return (
-    <Modal open={open} onClose={onClose} title={`Editar presupuesto #${presupuesto?.idPresupuesto}`} width="max-w-4xl">
-      <div className="space-y-5">
-        {/* Método de pago */}
-        <div>
-          <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-2">Método de pago</label>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-            {METODOS.map(m => (
-              <button key={m.value} onClick={() => setMetodoPago(m.value)}
-                className={`rounded-xl px-3 py-2.5 text-left border text-sm font-body transition-all
-                  ${metodoPago === m.value ? 'bg-brand-500/15 border-brand-500/50 text-white' : 'bg-surface-700 border-surface-600 text-surface-300 hover:border-surface-500'}`}>
-                {m.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Tabla de ítems */}
-        <div className="border border-surface-700 rounded-xl overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-surface-700 bg-surface-700/30">
-            <span className="text-white text-sm font-body font-medium">Productos</span>
-            <Button size="sm" variant="secondary" icon={Plus} onClick={addItem}>Agregar</Button>
-          </div>
-          <div className="overflow-x-auto max-h-72">
-            <table className="w-full text-xs font-body">
-              <thead><tr className="border-b border-surface-700 bg-surface-800">
-                {['ID','Producto','Medida','Cant.','Precio','Subtotal',''].map(h => (
-                  <th key={h} className="text-left text-surface-500 uppercase tracking-widest py-2 px-3">{h}</th>
-                ))}
-              </tr></thead>
-              <tbody>
-                {items.map((it, idx) => (
-                  <tr key={idx} className="border-b border-surface-700/40">
-                    <td className="py-2 px-2 w-24">
-                      <input type="text" inputMode="numeric" value={it.idProducto}
-                        onChange={e => handleIdChange(idx, e.target.value)}
-                        placeholder="ID" className={cell} />
-                    </td>
-                    <td className="py-2 px-2 min-w-[160px]">
-                      <input type="text" value={it.nombreProducto}
-                        onChange={e => updateItem(idx, 'nombreProducto', e.target.value)}
-                        placeholder="Nombre" className={cell} readOnly />
-                    </td>
-                    <td className="py-2 px-2 w-24">
-                      <input type="text" value={it.medida ?? ''}
-                        onChange={e => updateItem(idx, 'medida', e.target.value)}
-                        placeholder="—" className={cell} />
-                    </td>
-                    <td className="py-2 px-2 w-16">
-                      <input type="text" inputMode="numeric" value={it.cantidad}
-                        onChange={e => updateItem(idx, 'cantidad', e.target.value.replace(/\D/g,''))}
-                        className={cell + ' text-center'} />
-                    </td>
-                    <td className="py-2 px-2 w-28">
-                      <div className="bg-surface-800 border border-surface-700 rounded-lg px-2 py-1.5 text-surface-300 text-xs font-mono cursor-not-allowed">
-                        {fmt(parseFloat(it.precioUnitario)||0)}
-                      </div>
-                    </td>
-                    <td className="py-2 px-3 text-surface-200 font-mono text-right w-28">
-                      {fmt((parseInt(it.cantidad)||0)*(parseFloat(it.precioUnitario)||0))}
-                    </td>
-                    <td className="py-2 px-2 w-8">
-                      <button onClick={() => removeItem(idx)} className="text-surface-500 hover:text-red-400 transition-colors">
-                        <Trash2 size={13} />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {/* Totales */}
-          <div className="px-4 py-3 border-t border-surface-700 bg-surface-800/50 flex justify-end gap-8 text-xs font-body">
-            <span className="text-surface-400">Subtotal lista: <span className="text-white font-mono">{fmt(subtotal)}</span></span>
-            <span className="text-surface-400">Factor: <span className="text-white font-mono">{factor}</span></span>
-            <span className="text-surface-400 font-semibold">Total: <span className="text-brand-400 font-mono font-bold">{fmt(subtotal * factor)}</span></span>
-          </div>
-        </div>
-
-        {error && (
-          <div className="flex items-center gap-2 text-red-400 text-xs bg-red-500/10 border border-red-500/30 rounded-xl px-3 py-2">
-            <AlertCircle size={13} className="flex-shrink-0" />{error}
-          </div>
-        )}
-
-        <div className="flex gap-2">
-          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button className="flex-1" onClick={guardar}>Guardar Cambios</Button>
-        </div>
-      </div>
-    </Modal>
-  )
-}
-
 // ─── Vista detalle ─────────────────────────────────────────────────────────
 
 function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated }) {
@@ -259,7 +70,6 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated }) {
   const [loading,    setLoading]    = useState(true)
   const [modal,      setModal]      = useState(null)
   const [errorModal, setErrorModal] = useState('')
-  const [editOpen,   setEditOpen]   = useState(false)
   const [delConfirm, setDelConfirm] = useState(false)
 
   const reload = useCallback(() => {
@@ -288,7 +98,7 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated }) {
   const metodo      = METODOS_PAGO[pres.metodoPago] ?? { label: pres.metodoPago, badge: 'gray' }
   const ajuste      = pres.monto - pres.montoOriginal
   const puedeActuar = pres.estado === 'borrador' || pres.estado === 'aprobado'
-  const puedeEditar = pres.estado === 'borrador'
+
 
   // Factor real para mostrar:
   // - Excepción: usa factorAplicado guardado; si es 1 (default antiguo) lo recalcula de monto/montoOriginal
@@ -351,12 +161,7 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated }) {
             Presupuesto <span className="text-brand-400 font-mono">#{pres.idPresupuesto}</span>
           </span>
         </div>
-        {puedeEditar && (
-          <div className="flex gap-2">
-            <Button size="sm" variant="secondary" icon={Pencil} onClick={() => setEditOpen(true)}>Editar</Button>
-            <Button size="sm" variant="danger" icon={Trash2} onClick={() => setDelConfirm(true)}>Eliminar</Button>
-          </div>
-        )}
+
       </div>
 
       {/* Cabecera */}
@@ -388,9 +193,12 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated }) {
           </div>
           <div className="bg-surface-700 rounded-xl p-4">
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Método</p>
-            <p className="text-white text-sm font-body">{metodo.label}{esExcepcion ? ' (Excepción)' : ''}</p>
-            {/* Factor real del presupuesto — no el hardcodeado del método */}
-            <p className="text-surface-500 text-xs font-mono mt-0.5">{pctLabel(factorMostrado)}</p>
+            <p className="text-white text-sm font-body">
+              {esExcepcion ? `Excepción (base: ${metodo.label})` : metodo.label}
+            </p>
+            <p className="text-surface-500 text-xs font-mono mt-0.5">
+              {esExcepcion ? pctLabel(pres.factorAplicado ?? (pres.montoOriginal > 0 ? pres.monto / pres.montoOriginal : 1)) : pctLabel(factorMostrado)}
+            </p>
           </div>
         </div>
 
@@ -523,13 +331,6 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated }) {
         </div>
       </Modal>
 
-      {/* Modal editar */}
-      <EditarPresupuestoModal
-        open={editOpen}
-        onClose={()=>setEditOpen(false)}
-        presupuesto={pres}
-        onSaved={()=>{ reload(); onUpdated() }}
-      />
     </div>
   )
 }
@@ -574,7 +375,7 @@ export default function Historial() {
 
   const paginated  = presupuestos.slice((page-1)*PAGE_SIZE, page*PAGE_SIZE)
   const totalPages = Math.max(1, Math.ceil(presupuestos.length/PAGE_SIZE))
-  const totalMonto = presupuestos.reduce((a,p) => a+p.monto, 0)
+  const totalMonto = presupuestos.filter(p => p.estado === 'pagado' || (p.saldoEstado === 'pagado')).reduce((a,p) => a+p.monto, 0)
   const pendCobro  = presupuestos.filter(p => p.saldoEstado === 'pendiente').length
   const hasFilters = search || filterMetodo!=='all' || filterEstado!=='all' || soloExcepcion || filterFechaD || filterFechaH
 

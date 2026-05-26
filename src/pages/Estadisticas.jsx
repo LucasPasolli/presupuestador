@@ -354,6 +354,7 @@ function calcularMetricas(desde, hasta) {
   m.clientesUnicos = query(`
     SELECT COUNT(DISTINCT idCliente) as c FROM Presupuesto
     WHERE fecha >= ? AND fecha <= ?
+      AND estado IN ('pagado','aprobado')
   `, [desde, hasta])[0]?.c ?? 0
 
   // ── 9. Egresos (pedidos de compra del período) ───────────────────────────
@@ -465,7 +466,7 @@ export default function Estadisticas() {
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KpiCard icon={Users}       label="Clientes únicos"  value={m.clientesUnicos}               color="violet"
+        <KpiCard icon={Users}       label="Clientes únicos"  value={m.clientesUnicos}               color="blue"
           sub="en el período" />
         <KpiCard icon={Tag}         label="Descuentos dados" value={fmtCompacto(m.descuentosOtorgados)} color="yellow"
           sub={`${pct(m.descuentosOtorgados, m.facturadoTotal)} del facturado`} />

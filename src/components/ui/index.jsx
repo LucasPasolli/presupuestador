@@ -107,6 +107,7 @@ const badgeColors = {
   red:     'bg-red-500/15 text-red-400 border-red-500/30',
   yellow:  'bg-yellow-500/15 text-yellow-400 border-yellow-500/30',
   gray:    'bg-surface-600/30 text-surface-300 border-surface-600',
+  violet:  'bg-violet-500/15 text-violet-400 border-violet-500/30',
 }
 
 export function Badge({ children, color = 'gray' }) {
