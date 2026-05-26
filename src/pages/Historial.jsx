@@ -100,20 +100,12 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated }) {
   const puedeActuar = pres.estado === 'borrador' || pres.estado === 'aprobado'
 
 
-  // Factor real para mostrar:
-  // - Excepción: usa factorAplicado guardado; si es 1 (default antiguo) lo recalcula de monto/montoOriginal
-  // - Normal: usa el factor fijo del método
-  const factorMostrado = (() => {
-    if (esExcepcion) {
-      const guardado = pres.factorAplicado ?? 1
-      // Si factorAplicado es exactamente 1 pero hay una diferencia real de montos, recalcular
-      if (guardado === 1 && pres.montoOriginal > 0 && Math.abs(pres.monto - pres.montoOriginal) > 0.01) {
-        return pres.monto / pres.montoOriginal
-      }
-      return guardado
-    }
-    return { efectivo:0.95, transferencia:0.95, cc15:1.00, cc30:1.105 }[pres.metodoPago] ?? 1
-  })()
+  // Factor real aplicado — siempre se calcula de los montos reales guardados.
+  // Esto es la fuente de verdad: si montoOriginal=100 y monto=92, factor=0.92 = 8% descuento.
+  // Para CC15 (precio de lista) montoOriginal === monto, factor = 1.00.
+  const factorReal = pres.montoOriginal > 0 ? pres.monto / pres.montoOriginal : 1
+  // Texto descriptivo del ajuste, siempre derivado del factor real
+  const ajusteLabel = pctLabel(factorReal)
 
   function cambiarEstado(nuevoEstado) {
     setErrorModal('')
@@ -194,10 +186,11 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated }) {
           <div className="bg-surface-700 rounded-xl p-4">
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Método</p>
             <p className="text-white text-sm font-body">
-              {esExcepcion ? `Excepción (base: ${metodo.label})` : metodo.label}
+              {esExcepcion ? `Excepción (${metodo.label})` : metodo.label}
             </p>
-            <p className="text-surface-500 text-xs font-mono mt-0.5">
-              {esExcepcion ? pctLabel(pres.factorAplicado ?? (pres.montoOriginal > 0 ? pres.monto / pres.montoOriginal : 1)) : pctLabel(factorMostrado)}
+            {/* Siempre muestra el % real aplicado, calculado de los montos guardados */}
+            <p className={`text-xs font-mono mt-0.5 ${factorReal < 1 ? 'text-emerald-400' : factorReal > 1 ? 'text-red-400' : 'text-surface-500'}`}>
+              {ajusteLabel}
             </p>
           </div>
         </div>
@@ -280,7 +273,15 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated }) {
           </div>
           <div className="flex justify-between gap-12">
             <span className="text-surface-400">
-              {esExcepcion ? `Ajuste excepción (${pctLabel(factorMostrado)})` : 'Ajuste:'}
+              Ajuste
+              {ajuste !== 0 && (
+                <span className={`ml-1.5 text-xs font-mono ${factorReal < 1 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  ({ajusteLabel})
+                </span>
+              )}
+              {esExcepcion && ajuste !== 0 && (
+                <span className="ml-1 text-xs text-violet-400 font-body">[Excepción]</span>
+              )}
             </span>
             <span className={`font-mono font-medium ${ajuste<0?'text-emerald-400':ajuste>0?'text-red-400':'text-surface-400'}`}>
               {ajuste===0?'—':ajuste<0?`- ${fmt(Math.abs(ajuste))}`:`+ ${fmt(ajuste)}`}
