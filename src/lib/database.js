@@ -38,6 +38,7 @@ export async function initDB() {
   }
 
   runSchema()
+  runMigrations()
   return db
 }
 
@@ -99,6 +100,7 @@ function runSchema() {
       montoOriginal  REAL NOT NULL DEFAULT 0,
       monto          REAL NOT NULL DEFAULT 0,
       estado         TEXT NOT NULL DEFAULT 'borrador' CHECK(estado IN ('borrador','aprobado','pagado','rechazado')),
+      esExcepcion    INTEGER NOT NULL DEFAULT 0 CHECK(esExcepcion IN (0,1)),
       FOREIGN KEY (idCliente) REFERENCES Cliente(idCliente) ON DELETE RESTRICT
     );
   `)
@@ -175,7 +177,25 @@ function runSchema() {
   }
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+// ─── Migraciones ────────────────────────────────────────────────────────────
+// Cada migración es idempotente: usa try/catch porque SQLite no tiene
+// ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
+
+function runMigrations() {
+  // v5 → v6: agrega esExcepcion a Presupuesto.
+  // IMPORTANTE: ALTER TABLE en sql.js (WASM) NO soporta CHECK ni NOT NULL sin default en filas existentes.
+  // Se agrega solo con DEFAULT; la validación queda en la capa de aplicación.
+  const cols = db.exec(`PRAGMA table_info(Presupuesto)`)[0]?.values ?? []
+  const yaExiste = cols.some(row => row[1] === 'esExcepcion')
+  if (!yaExiste) {
+    db.run(`ALTER TABLE Presupuesto ADD COLUMN esExcepcion INTEGER DEFAULT 0`)
+    // Asegurar que filas existentes tengan 0 (por si acaso DEFAULT no se aplicó)
+    db.run(`UPDATE Presupuesto SET esExcepcion = 0 WHERE esExcepcion IS NULL`)
+    persistDB()
+  }
+}
+
+
 
 export function query(sql, params = []) {
   if (!db) throw new Error('DB no inicializada')

@@ -609,8 +609,8 @@ export default function Presupuestador() {
     const metodoDb = esExcepcion ? excepcionSubMetodo : metodoPago
 
     const idPresupuesto = run(
-      `INSERT INTO Presupuesto (idCliente, fecha, metodoPago, montoOriginal, monto, estado) VALUES (?,?,?,?,?,'borrador')`,
-      [cliente.idCliente, fecha, metodoDb, subtotalOriginal, totalFinal]
+      `INSERT INTO Presupuesto (idCliente, fecha, metodoPago, montoOriginal, monto, estado, esExcepcion) VALUES (?,?,?,?,?,'borrador',?)`,
+      [cliente.idCliente, fecha, metodoDb, subtotalOriginal, totalFinal, esExcepcion ? 1 : 0]
     )
     // Verificamos leyendo el ID real de la DB por si last_insert_rowid fue afectado
     const presupuestoReal = query('SELECT MAX(idPresupuesto) as id FROM Presupuesto WHERE idCliente = ? AND fecha = ?', [cliente.idCliente, fecha])[0]?.id ?? idPresupuesto
