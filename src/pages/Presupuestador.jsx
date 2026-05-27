@@ -511,12 +511,10 @@ async function generarPDFPresupuesto(idPresupuesto) {
   const ML   = 14
 
   // Encabezado naranja
-  doc.setFillColor(234, 88, 12)
+  doc.setFillColor(200, 200, 200)
   doc.rect(0, 0, PW, 18, 'F')
-  doc.setFontSize(13); doc.setFont('helvetica', 'bold'); doc.setTextColor(255,255,255)
-  doc.text('POWDER — Gestión', ML, 12)
-  doc.setFontSize(9); doc.setFont('helvetica', 'normal')
-  doc.text(`Presupuesto #${idPresupuesto}`, PW - ML, 12, { align: 'right' })
+  doc.setFontSize(13); doc.setFont('helvetica', 'bold'); doc.setTextColor(50,50,50)
+  doc.text('CLAUDIO RER GROUP', ML, 12)
 
   // Datos cabecera
   doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(50,50,50)
@@ -547,8 +545,8 @@ async function generarPDFPresupuesto(idPresupuesto) {
       fmt(d.subtotal),
     ]),
     styles:     { fontSize: 8, cellPadding: 2.5, textColor: [50,50,50] },
-    headStyles: { fillColor: [234,88,12], textColor: [255,255,255], fontStyle: 'bold' },
-    alternateRowStyles: { fillColor: [250,250,250] },
+    headStyles: { fillColor: [200,200,200], textColor: [60,60,60], fontStyle: 'bold' },
+    alternateRowStyles: { fillColor: [245,245,245] },
     columnStyles: {
       0: { cellWidth: 'auto' },
       1: { cellWidth: 22, halign: 'center' },
@@ -571,13 +569,13 @@ async function generarPDFPresupuesto(idPresupuesto) {
   if (ajuste !== 0) {
     doc.setFontSize(8.5); doc.setTextColor(100,100,100)
     doc.text('Ajuste:', PW - ML - 70, finalY + 13)
-    doc.setTextColor(ajuste < 0 ? 22 : 220, ajuste < 0 ? 163 : 38, ajuste < 0 ? 74 : 38)
+    doc.setTextColor(50,50,50)
     doc.text(`${ajuste < 0 ? '- ' : '+ '}${fmt(Math.abs(ajuste))}`, PW - ML, finalY + 13, { align: 'right' })
   }
 
-  doc.setFillColor(234,88,12)
+  doc.setFillColor(200,200,200)
   doc.roundedRect(ML, finalY + 18, PW - ML*2, 12, 2, 2, 'F')
-  doc.setFontSize(10); doc.setFont('helvetica','bold'); doc.setTextColor(255,255,255)
+  doc.setFontSize(10); doc.setFont('helvetica','bold'); doc.setTextColor(50,50,50)
   doc.text('TOTAL', ML + 4, finalY + 26)
   doc.text(fmt(pres.monto), PW - ML - 4, finalY + 26, { align: 'right' })
 
@@ -687,11 +685,6 @@ export default function Presupuestador() {
               <span className="text-surface-200 text-sm font-body">{guardado.metodoLabel}</span>
             </div>
           </div>
-          {guardado.esCuenta && (
-            <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3 text-yellow-300 text-sm font-body">
-              Se generó un <strong>Saldo pendiente</strong> por {fmt(guardado.totalFinal)} ({guardado.metodoLabel}).
-            </div>
-          )}
           <div className="flex flex-col gap-2 pt-2">
             <Button icon={Download} className="w-full" onClick={() => generarPDFPresupuesto(guardado.idPresupuesto)}>
               Descargar PDF del Presupuesto

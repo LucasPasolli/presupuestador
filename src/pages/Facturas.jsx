@@ -118,7 +118,7 @@ async function generarPDF(grupos, titulo, desde, hasta) {
     doc.setFontSize(14)
     doc.setFont('helvetica', 'bold')
     doc.setTextColor(255, 255, 255)
-    doc.text('POWDER — Gestión', ML, 12)
+    doc.text('CLAUDIO RER GROUP', ML, 12)
 
     doc.setFontSize(9)
     doc.setFont('helvetica', 'normal')
