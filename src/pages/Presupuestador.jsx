@@ -1,5 +1,6 @@
 // src/pages/Presupuestador.jsx
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { query, run } from '../lib/database'
 import { Button, Card, PageHeader, Modal, Input } from '../components/ui'
 import { Plus, Trash2, Search, UserPlus, CheckCircle2, AlertCircle, Download, FileText } from 'lucide-react'
@@ -193,63 +194,7 @@ function ClienteSelector({ value, onChange, onToast }) {
   )
 }
 
-// ─── Dropdown de productos con posición fija ────────────────────────────────
-// Usa un portal-like approach con position:fixed calculado desde getBoundingClientRect
-// para escapar de cualquier contenedor con overflow:hidden.
-
-function ProductoDropdown({ results, anchorRef, onSelect, query: searchText }) {
-  const [pos, setPos] = useState({ top: 0, left: 0, width: 0, realMaxH: 260 })
-
-  const recalc = useCallback(() => {
-    if (!anchorRef.current) return
-    const rect       = anchorRef.current.getBoundingClientRect()
-    const maxH       = 260
-    const spaceBelow = window.innerHeight - rect.bottom - 8
-    const spaceAbove = rect.top - 8
-    const openUp     = spaceBelow < maxH && spaceAbove > spaceBelow
-    const topFixed   = openUp
-      ? rect.top - Math.min(maxH, spaceAbove) - 4
-      : rect.bottom + 4
-    const realMaxH   = openUp
-      ? Math.min(maxH, spaceAbove)
-      : Math.min(maxH, spaceBelow)
-    setPos({ top: topFixed, left: rect.left, width: rect.width, realMaxH })
-  }, [])
-
-  useEffect(() => {
-    recalc()
-    // Recalculate on scroll and resize so dropdown stays anchored
-    window.addEventListener('scroll', recalc, true)
-    window.addEventListener('resize', recalc)
-    return () => {
-      window.removeEventListener('scroll', recalc, true)
-      window.removeEventListener('resize', recalc)
-    }
-  }, [recalc])
-
-  if (!anchorRef.current) return null
-
-  return (
-    <div
-      style={{ position: 'fixed', top: `${pos.top}px`, left: `${pos.left}px`, width: `${Math.max(pos.width, 320)}px`, zIndex: 9999, maxHeight: `${pos.realMaxH ?? 260}px`, overflowY: 'auto' }}
-      className="bg-surface-800 border border-surface-600 rounded-xl shadow-2xl"
-    >
-      {results.length === 0 ? (
-        <p className="px-4 py-3 text-surface-300 text-xs font-body">Sin resultados para "{searchText}"</p>
-      ) : (
-        results.map(p => (
-          <button key={p.idProducto} onClick={() => onSelect(p)}
-            className="w-full text-left px-3 py-2.5 hover:bg-surface-700 transition-colors border-b border-surface-700/60 last:border-0">
-            <p className="text-white text-xs font-body leading-tight">{p.nombre}</p>
-            <p className="text-surface-400 text-xs font-mono mt-0.5">
-              #{p.idProducto} · {fmt(p.precioUnitario)}{p.tieneMedidas ? ' · Con medidas' : ''}
-            </p>
-          </button>
-        ))
-      )}
-    </div>
-  )
-}
+// Dropdown renderizado inline — ver ItemRow
 
 // ─── Fila de ítem ───────────────────────────────────────────────────────────
 
@@ -257,16 +202,35 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError }) {
   const [nombreSearch,   setNombreSearch]   = useState(item.nombreProducto || '')
   const [nombreResults,  setNombreResults]  = useState([])
   const [showDrop,       setShowDrop]       = useState(false)
+  const [dropPos,        setDropPos]        = useState({ top: 0, left: 0, width: 0 })
   const [medidas,        setMedidas]        = useState([])
   const [idError,        setIdError]        = useState('')
-  const inputRef = useRef(null)
   const wrapRef  = useRef(null)
+  const inputRef = useRef(null)
 
   useEffect(() => {
-    const handler = e => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setShowDrop(false) }
+    const handler = e => {
+      if (
+        wrapRef.current && !wrapRef.current.contains(e.target) &&
+        !e.target.closest('[data-producto-drop]')
+      ) setShowDrop(false)
+    }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [])
+
+  // Recalcula posición del dropdown cuando se muestra o al hacer scroll/resize
+  useEffect(() => {
+    if (!showDrop || !inputRef.current) return
+    const update = () => {
+      const rect = inputRef.current.getBoundingClientRect()
+      setDropPos({ top: rect.bottom + window.scrollY + 4, left: rect.left + window.scrollX, width: Math.max(rect.width, 300) })
+    }
+    update()
+    window.addEventListener('scroll', update, true)
+    window.addEventListener('resize', update)
+    return () => { window.removeEventListener('scroll', update, true); window.removeEventListener('resize', update) }
+  }, [showDrop])
 
   // Cargar medidas cuando cambia el producto seleccionado
   useEffect(() => {
@@ -351,18 +315,35 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError }) {
           className={cell + ' w-full text-center'} />
       </td>
 
-      {/* Nombre — dropdown con scroll y posición fixed */}
+      {/* Nombre — dropdown renderizado via portal para escapar del overflow de la tabla */}
       <td className="py-2 px-2 min-w-[200px]" ref={wrapRef}>
         <input ref={inputRef} value={nombreSearch} onChange={e => buscarPorNombre(e.target.value)}
           placeholder="Nombre del producto..."
           className={cell + ' w-full'} />
-        {showDrop && (
-          <ProductoDropdown
-            results={nombreResults}
-            anchorRef={inputRef}
-            onSelect={seleccionarProducto}
-            query={nombreSearch}
-          />
+        {showDrop && createPortal(
+          <div
+            data-producto-drop
+            style={{ position: 'absolute', top: dropPos.top, left: dropPos.left, width: dropPos.width, zIndex: 9999 }}
+            className="bg-surface-800 border border-surface-600 rounded-xl shadow-2xl max-h-[260px] overflow-y-auto"
+          >
+            {nombreResults.length === 0 ? (
+              <p className="px-4 py-3 text-surface-300 text-xs font-body">
+                Sin resultados para "{nombreSearch}"
+              </p>
+            ) : (
+              nombreResults.map(p => (
+                <button key={p.idProducto} onClick={() => seleccionarProducto(p)}
+                  className="w-full text-left px-3 py-2.5 hover:bg-surface-700 transition-colors
+                             border-b border-surface-700/60 last:border-0">
+                  <p className="text-white text-xs font-body leading-tight">{p.nombre}</p>
+                  <p className="text-surface-400 text-xs font-mono mt-0.5">
+                    #{p.idProducto} · {fmt(p.precioUnitario)}{p.tieneMedidas ? ' · Con medidas' : ''}
+                  </p>
+                </button>
+              ))
+            )}
+          </div>,
+          document.body
         )}
       </td>
 
@@ -735,7 +716,7 @@ export default function Presupuestador() {
           <h2 className="font-body font-semibold text-white text-sm">Productos</h2>
           <Button size="sm" icon={Plus} onClick={addItem}>Agregar ítem</Button>
         </div>
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto overflow-y-visible">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-surface-700">
