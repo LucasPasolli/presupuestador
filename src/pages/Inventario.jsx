@@ -547,6 +547,116 @@ function StockModal({ open, onClose, producto, onSaved }) {
   )
 }
 
+function ActualizarPreciosModal({ open, onClose, onSaved }) {
+  const [margen, setMargen] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (!open) {
+      setMargen('')
+      setLoading(false)
+    }
+  }, [open])
+
+  async function actualizar() {
+    const mg = parseFloat(
+      String(margen).replace(',', '.')
+    )
+
+    if (isNaN(mg)) return
+
+    setLoading(true)
+
+    // Obtener productos con precio proveedor
+    const productos = query(`
+      SELECT idProducto, precioProveedor
+      FROM Producto
+      WHERE precioProveedor > 0
+    `)
+
+    for (const p of productos) {
+      const nuevoPrecio =
+        p.precioProveedor * (1 + mg / 100)
+
+      run(
+        `UPDATE Producto
+         SET precioUnitario = ?
+         WHERE idProducto = ?`,
+        [nuevoPrecio.toFixed(2), p.idProducto]
+      )
+    }
+
+    setLoading(false)
+
+    onSaved()
+    onClose()
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Actualizar Precios Masivamente"
+      width="max-w-md"
+    >
+      <div className="space-y-4">
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
+          <p className="text-amber-200 text-sm font-body">
+            Esta acción actualizará el precio de venta
+            de todos los productos utilizando el margen
+            indicado sobre el precio proveedor.
+          </p>
+        </div>
+
+        <div className="relative">
+          <TrendingUp
+            size={14}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none"
+          />
+
+          <input
+            type="text"
+            inputMode="decimal"
+            value={margen}
+            onChange={(e) => {
+              const v = e.target.value.replace(',', '.')
+
+              if (/^\d*\.?\d*$/.test(v)) {
+                setMargen(v)
+              }
+            }}
+            placeholder="Margen de ganancia (%)"
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-10 py-2 text-white
+                       text-sm font-mono focus:outline-none focus:border-brand-500 transition-all"
+          />
+
+          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 text-sm font-mono">
+            %
+          </span>
+        </div>
+
+        <div className="flex gap-2 pt-2">
+          <Button
+            variant="secondary"
+            className="flex-1"
+            onClick={onClose}
+          >
+            Cancelar
+          </Button>
+
+          <Button
+            className="flex-1"
+            onClick={actualizar}
+            disabled={!margen || loading}
+          >
+            {loading ? 'Actualizando...' : 'Actualizar'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
 // ─── Modal: nueva categoría ───────────────────────────────────────────────
 
 function CatModal({ open, onClose, onSaved }) {
@@ -594,6 +704,7 @@ export default function Inventario() {
   const [modalEditar,  setModalEditar]  = useState(false)
   const [modalStock,   setModalStock]   = useState(false)
   const [modalCat,     setModalCat]     = useState(false)
+  const [modalActualizarPrecios, setModalActualizarPrecios] = useState(false)
   const [selected,     setSelected]     = useState(null)
   const [deleteConfirm,setDeleteConfirm]= useState(null)
   const [toast,        setToast]        = useState('')
@@ -674,6 +785,12 @@ export default function Inventario() {
           <div className="flex gap-2">
             <Button variant="secondary" size="sm" onClick={() => setModalCat(true)}>
               + Categoría
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => setModalActualizarPrecios(true)}
+            >
+              Actualizar Precios
             </Button>
             <Button icon={PackagePlus} onClick={() => setModalNuevo(true)}>
               Nuevo Producto
@@ -899,7 +1016,14 @@ export default function Inventario() {
         onClose={() => setModalCat(false)}
         onSaved={() => { load(); setToast('Categoría creada ✓') }}
       />
-
+      <ActualizarPreciosModal
+        open={modalActualizarPrecios}
+        onClose={() => setModalActualizarPrecios(false)}
+        onSaved={() => {
+          load()
+          setToast('Precios actualizados correctamente ✓')
+        }}
+      />
       {/* Confirm delete */}
       <Modal open={!!deleteConfirm} onClose={() => setDeleteConfirm(null)} title="Confirmar eliminación" width="max-w-sm">
         <p className="text-surface-300 text-sm font-body mb-4">
