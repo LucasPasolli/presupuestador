@@ -51,7 +51,15 @@ function KpiCard({ icon: Icon, label, value, sub, color = 'brand', trend }) {
     violet:  'text-violet-400  bg-violet-500/10  border-violet-500/20',
   }
   return (
-    <div className="bg-surface-800 border border-surface-700 rounded-2xl p-5 flex flex-col gap-3">
+    <div className={`
+      rounded-2xl p-5 flex flex-col gap-3 border transition-all
+      ${label === 'Resultado operativo'
+        ? value.includes('-')
+          ? 'bg-red-500/10 border-red-500/40 shadow-[0_0_25px_rgba(239,68,68,0.15)]'
+          : 'bg-emerald-500/10 border-emerald-500/40 shadow-[0_0_25px_rgba(16,185,129,0.18)]'
+        : 'bg-surface-800 border-surface-700'
+      }
+    `}>
       <div className="flex items-center justify-between">
         <div className={`w-9 h-9 rounded-xl flex items-center justify-center border ${colors[color]}`}>
           <Icon size={17} />
@@ -73,7 +81,7 @@ function KpiCard({ icon: Icon, label, value, sub, color = 'brand', trend }) {
 
 // ─── Barra horizontal simple (sin librería) ────────────────────────────────
 
-function BarraH({ label, value, max, fmt: fmtFn = fmt, color = '#f97316', sublabel }) {
+function BarraH({ label, value, max, fmtFn = fmt, color = '#f97316', sublabel }) {
   const pct = max > 0 ? Math.max(2, (value / max) * 100) : 0
   return (
     <div className="space-y-1">
