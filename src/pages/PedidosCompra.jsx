@@ -426,6 +426,11 @@ function NuevoPedido({ onGuardado, onCancelar }) {
          VALUES (?,?,?,?,?,?)`,
         [pedidoReal, parseInt(it.idProducto), it.medida || null, cantidad, precio, cantidad * precio]
       )
+      // Actualizar precioProveedor en el producto con el precio del pedido
+      run(
+        `UPDATE Producto SET precioProveedor = ? WHERE idProducto = ?`,
+        [precio, parseInt(it.idProducto)]
+      )
     }
 
     onGuardado(pedidoReal)

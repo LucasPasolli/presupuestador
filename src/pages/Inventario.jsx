@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { query, run } from '../lib/database'
 import { Button, Card, PageHeader, Modal, Input, Select, Badge, Table, Tr, Td } from '../components/ui'
-import { Plus, Search, Pencil, Trash2, ChevronDown, ChevronUp, PackagePlus, X, CheckCircle2 } from 'lucide-react'
+import { Plus, Search, Pencil, Trash2, ChevronDown, ChevronUp, PackagePlus, X, CheckCircle2, TrendingUp } from 'lucide-react'
 
 // ─── Constantes ───────────────────────────────────────────────────────────
 
@@ -14,134 +14,104 @@ function fmt(n) {
 
 // ─── Toast ────────────────────────────────────────────────────────────────
 
-function Toast({ message, onDone }) {
+function Toast({ message, visible, onDone }) {
   useEffect(() => {
+    if (!visible) return
+
     const t = setTimeout(onDone, 3000)
     return () => clearTimeout(t)
-  }, [onDone])
+  }, [visible, onDone])
+
   return (
-    <div className="fixed top-5 right-5 z-[200] animate-slide-up pointer-events-none">
-      <div className="flex items-center gap-3 bg-emerald-900/95 border border-emerald-500/50 rounded-2xl px-5 py-3 shadow-2xl">
+    <div
+      className={`
+        fixed top-5 right-5 z-[9999]
+        transition-all duration-300 pointer-events-none
+        ${visible
+          ? 'opacity-100 translate-y-0'
+          : 'opacity-0 -translate-y-2'}
+      `}
+    >
+      <div className="flex items-center gap-3 bg-emerald-900/95 border border-emerald-500/50 rounded-2xl px-5 py-3 shadow-2xl backdrop-blur-sm">
         <CheckCircle2 size={18} className="text-emerald-400 flex-shrink-0" />
-        <span className="text-emerald-100 text-sm font-body">{message}</span>
+
+        <span className="text-emerald-100 text-sm font-body">
+          {message}
+        </span>
       </div>
     </div>
   )
 }
 
-// ─── Modal: crear / editar producto ──────────────────────────────────────
+// ─── Modal: editar producto ───────────────────────────────────────────────
+// Solo permite editar: nombre, categoría, precio proveedor y precio unitario.
+// El precio unitario puede calcularse automáticamente desde el margen.
 
-function ProductoModal({ open, onClose, producto, categorias, onSaved }) {
-  const esEdicion = !!producto
+function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
+  const [form, setForm] = useState({
+    nombre:          '',
+    idCategoria:     1,
+    precioProveedor: '',
+    precioUnitario:  '',
+  })
+  const [margen,  setMargen]  = useState('')   // porcentaje de ganancia
+  const [errors,  setErrors]  = useState({})
 
-  const emptyForm = { nombre: '', idCategoria: categorias[0]?.idCategoria ?? 1, precioUnitario: '', tieneMedidas: false }
-  const [form,        setForm]        = useState(emptyForm)
-  const [medidas,     setMedidas]     = useState([])   // [{ medida, cantidad }]
-  const [errors,      setErrors]      = useState({})
-  const [medidasUsed, setMedidasUsed] = useState([])
-
-  // Poblar al abrir en modo edición
   useEffect(() => {
-    if (!open) return
-    if (producto) {
-      setForm({
-        nombre:        producto.nombre,
-        idCategoria:   producto.idCategoria,
-        precioUnitario: producto.precioUnitario,
-        tieneMedidas:  producto.tieneMedidas === 1,
-      })
-      if (producto.tieneMedidas === 1) {
-        const rows = query('SELECT medida, cantidad FROM ProductoMedida WHERE idProducto = ? ORDER BY medida', [producto.idProducto])
-        setMedidas(rows)
-        setMedidasUsed(rows.map((r) => r.medida))
-      } else {
-        setMedidas([])
-        setMedidasUsed([])
-      }
-    } else {
-      setForm({ ...emptyForm, idCategoria: categorias[0]?.idCategoria ?? 1 })
-      setMedidas([])
-      setMedidasUsed([])
-    }
+    if (!open || !producto) return
+    setForm({
+      nombre:          producto.nombre,
+      idCategoria:     producto.idCategoria,
+      precioProveedor: producto.precioProveedor ?? '',
+      precioUnitario:  producto.precioUnitario ?? '',
+    })
+    setMargen('')
     setErrors({})
   }, [open, producto])
 
   function set(k, v) { setForm((p) => ({ ...p, [k]: v })) }
 
-  // Gestión de filas de medidas
-  function addMedida() {
-    const libre = MEDIDAS_VALIDAS.find((m) => !medidasUsed.includes(m))
-    if (!libre) return
-    const nueva = { medida: libre, cantidad: 0 }
-    setMedidas((p) => [...p, nueva])
-    setMedidasUsed((p) => [...p, libre])
-  }
-
-  function updateMedida(idx, key, val) {
-    setMedidas((prev) => {
-      const next = prev.map((r, i) => i === idx ? { ...r, [key]: val } : r)
-      setMedidasUsed(next.map((r) => r.medida))
-      return next
-    })
-  }
-
-  function removeMedida(idx) {
-    setMedidas((prev) => {
-      const next = prev.filter((_, i) => i !== idx)
-      setMedidasUsed(next.map((r) => r.medida))
-      return next
-    })
+  // Cuando cambia precio proveedor o margen, recalcular precio unitario
+  function aplicarMargen(margenVal, proveedorVal) {
+    const pp = parseFloat(String(proveedorVal ?? form.precioProveedor).replace(',', '.')) || 0
+    const mg = parseFloat(String(margenVal).replace(',', '.')) || 0
+    if (pp > 0 && mg > 0) {
+      const calculado = pp * (1 + mg / 100)
+      set('precioUnitario', calculado.toFixed(2))
+    }
   }
 
   function validate() {
     const e = {}
     if (!form.nombre.trim()) e.nombre = 'Requerido'
-    if (form.precioUnitario === '' || isNaN(parseFloat(form.precioUnitario))) e.precioUnitario = 'Ingresá un precio válido'
-    if (form.tieneMedidas && medidas.length === 0) e.medidas = 'Agregá al menos una medida'
+    const pp = parseFloat(String(form.precioProveedor).replace(',', '.'))
+    const pu = parseFloat(String(form.precioUnitario).replace(',', '.'))
+    if (form.precioProveedor !== '' && isNaN(pp)) e.precioProveedor = 'Precio inválido'
+    if (form.precioUnitario === '' || isNaN(pu)) e.precioUnitario = 'Ingresá un precio válido'
     setErrors(e)
     return Object.keys(e).length === 0
   }
 
   function guardar() {
     if (!validate()) return
-    const precio = parseFloat(String(form.precioUnitario).replace(',', '.'))
-    const tiene  = form.tieneMedidas ? 1 : 0
-
-    if (esEdicion) {
-      // Calcular stock total si no tiene medidas
-      const stockTotal = tiene ? 0 : (producto.cantidad ?? 0)
-      run(
-        `UPDATE Producto SET nombre=?, idCategoria=?, precioUnitario=?, tieneMedidas=?, cantidad=? WHERE idProducto=?`,
-        [form.nombre.trim(), form.idCategoria, precio, tiene, stockTotal, producto.idProducto]
-      )
-      if (tiene) {
-        run(`DELETE FROM ProductoMedida WHERE idProducto=?`, [producto.idProducto])
-        for (const m of medidas) {
-          run(`INSERT INTO ProductoMedida (idProducto, medida, cantidad) VALUES (?,?,?)`,
-            [producto.idProducto, m.medida, parseInt(m.cantidad) || 0])
-        }
-      } else {
-        run(`DELETE FROM ProductoMedida WHERE idProducto=?`, [producto.idProducto])
-      }
-    } else {
-      const idProducto = run(
-        `INSERT INTO Producto (idCategoria, nombre, precioUnitario, cantidad, tieneMedidas) VALUES (?,?,?,0,?)`,
-        [form.idCategoria, form.nombre.trim(), precio, tiene]
-      )
-      if (tiene) {
-        for (const m of medidas) {
-          run(`INSERT INTO ProductoMedida (idProducto, medida, cantidad) VALUES (?,?,?)`,
-            [idProducto, m.medida, parseInt(m.cantidad) || 0])
-        }
-      }
-    }
-
+    const pp = parseFloat(String(form.precioProveedor).replace(',', '.')) || 0
+    const pu = parseFloat(String(form.precioUnitario).replace(',', '.'))
+    run(
+      `UPDATE Producto SET nombre=?, idCategoria=?, precioProveedor=?, precioUnitario=? WHERE idProducto=?`,
+      [form.nombre.trim(), form.idCategoria, pp, pu, producto.idProducto]
+    )
     onSaved()
     onClose()
   }
 
+  const ppVal = parseFloat(String(form.precioProveedor).replace(',', '.')) || 0
+  const puVal = parseFloat(String(form.precioUnitario).replace(',', '.')) || 0
+  const margenCalculado = ppVal > 0 && puVal > 0
+    ? (((puVal - ppVal) / ppVal) * 100).toFixed(1)
+    : null
+
   return (
-    <Modal open={open} onClose={onClose} title={esEdicion ? 'Editar Producto' : 'Nuevo Producto'} width="max-w-xl">
+    <Modal open={open} onClose={onClose} title="Editar Producto" width="max-w-lg">
       <div className="space-y-4">
         {/* Nombre */}
         <Input
@@ -163,9 +133,149 @@ function ProductoModal({ open, onClose, producto, categorias, onSaved }) {
           ))}
         </Select>
 
-        {/* Precio */}
+        {/* Precio Proveedor */}
         <Input
-          label="Precio Unitario *"
+          label="Precio del Proveedor"
+          value={form.precioProveedor}
+          onChange={(e) => {
+            const v = e.target.value.replace(',', '.')
+            if (/^\d*\.?\d*$/.test(v)) {
+              set('precioProveedor', v)
+              if (margen) aplicarMargen(margen, v)
+            }
+          }}
+          error={errors.precioProveedor}
+          placeholder="0.00"
+        />
+
+        {/* Margen de ganancia */}
+        <div>
+          <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1.5">
+            Margen de Ganancia (%)
+          </label>
+          <div className="flex gap-2 items-center">
+            <div className="relative flex-1">
+              <TrendingUp size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
+              <input
+                type="text"
+                inputMode="decimal"
+                value={margen}
+                onChange={(e) => {
+                  const v = e.target.value.replace(',', '.')
+                  if (/^\d*\.?\d*$/.test(v)) {
+                    setMargen(v)
+                    aplicarMargen(v, form.precioProveedor)
+                  }
+                }}
+                placeholder="Ej: 40"
+                className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-10 py-2 text-white
+                           text-sm font-mono focus:outline-none focus:border-brand-500 transition-all"
+              />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 text-sm font-mono">%</span>
+            </div>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => aplicarMargen(margen, form.precioProveedor)}
+              disabled={!margen || !form.precioProveedor}
+            >
+              Aplicar
+            </Button>
+          </div>
+          {margenCalculado !== null && (
+            <p className="text-surface-400 text-xs font-body mt-1.5">
+              Margen actual:
+              <span className="text-brand-400 font-mono ml-1">+{margenCalculado}%</span>
+            </p>
+          )}
+        </div>
+
+        {/* Precio Unitario de Venta */}
+        <div>
+          <Input
+            label="Precio Unitario de Venta *"
+            value={form.precioUnitario}
+            onChange={(e) => {
+              const v = e.target.value.replace(',', '.')
+              if (/^\d*\.?\d*$/.test(v)) set('precioUnitario', v)
+            }}
+            error={errors.precioUnitario}
+            placeholder="0.00"
+          />
+          {ppVal > 0 && puVal > 0 && (
+            <p className="text-surface-500 text-xs font-body mt-1">
+              Ganancia por unidad:&nbsp;
+              <span className={`font-mono ${puVal >= ppVal ? 'text-emerald-400' : 'text-red-400'}`}>
+                {fmt(puVal - ppVal)}
+              </span>
+            </p>
+          )}
+        </div>
+
+        <div className="flex gap-2 pt-2">
+          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
+          <Button className="flex-1" onClick={guardar}>Guardar Cambios</Button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+// ─── Modal: nuevo producto ────────────────────────────────────────────────
+
+function NuevoProductoModal({ open, onClose, categorias, onSaved }) {
+  const emptyForm = { nombre: '', idCategoria: categorias[0]?.idCategoria ?? 1, precioUnitario: '' }
+  const [form,   setForm]   = useState(emptyForm)
+  const [errors, setErrors] = useState({})
+
+  useEffect(() => {
+    if (!open) return
+    setForm({ ...emptyForm, idCategoria: categorias[0]?.idCategoria ?? 1 })
+    setErrors({})
+  }, [open])
+
+  function set(k, v) { setForm((p) => ({ ...p, [k]: v })) }
+
+  function validate() {
+    const e = {}
+    if (!form.nombre.trim()) e.nombre = 'Requerido'
+    if (form.precioUnitario === '' || isNaN(parseFloat(form.precioUnitario))) e.precioUnitario = 'Ingresá un precio válido'
+    setErrors(e)
+    return Object.keys(e).length === 0
+  }
+
+  function guardar() {
+    if (!validate()) return
+    const precio = parseFloat(String(form.precioUnitario).replace(',', '.'))
+    run(
+      `INSERT INTO Producto (idCategoria, nombre, precioProveedor, precioUnitario, cantidad, tieneMedidas) VALUES (?,?,0,?,0,0)`,
+      [form.idCategoria, form.nombre.trim(), precio]
+    )
+    onSaved()
+    onClose()
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Nuevo Producto" width="max-w-md">
+      <div className="space-y-4">
+        <Input
+          label="Nombre del Producto *"
+          value={form.nombre}
+          onChange={(e) => set('nombre', e.target.value)}
+          error={errors.nombre}
+          placeholder="Ej: CADENA DE DISTRIBUCIÓN 25H-98L"
+        />
+        <Select
+          label="Categoría"
+          value={form.idCategoria}
+          onChange={(e) => set('idCategoria', parseInt(e.target.value))}
+        >
+          {categorias.map((c) => (
+            <option key={c.idCategoria} value={c.idCategoria}>{c.nombre}</option>
+          ))}
+        </Select>
+        <Input
+          label="Precio Unitario de Venta *"
           value={form.precioUnitario}
           onChange={(e) => {
             const v = e.target.value.replace(',', '.')
@@ -174,195 +284,112 @@ function ProductoModal({ open, onClose, producto, categorias, onSaved }) {
           error={errors.precioUnitario}
           placeholder="0.00"
         />
-
-        {/* Toggle medidas */}
-        <div>
-          <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-2">
-            Gestión de Stock
-          </label>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              onClick={() => set('tieneMedidas', false)}
-              className={`rounded-xl px-4 py-3 text-left border text-sm font-body transition-all
-                ${!form.tieneMedidas
-                  ? 'bg-brand-500/15 border-brand-500/50 text-white'
-                  : 'bg-surface-700 border-surface-600 text-surface-400 hover:border-surface-500'}`}
-            >
-              <p className="font-medium">Sin medidas</p>
-              <p className={`text-xs mt-0.5 ${!form.tieneMedidas ? 'text-brand-400' : 'text-surface-500'}`}>
-                Stock único general
-              </p>
-            </button>
-            <button
-              onClick={() => set('tieneMedidas', true)}
-              className={`rounded-xl px-4 py-3 text-left border text-sm font-body transition-all
-                ${form.tieneMedidas
-                  ? 'bg-brand-500/15 border-brand-500/50 text-white'
-                  : 'bg-surface-700 border-surface-600 text-surface-400 hover:border-surface-500'}`}
-            >
-              <p className="font-medium">Con medidas</p>
-              <p className={`text-xs mt-0.5 ${form.tieneMedidas ? 'text-brand-400' : 'text-surface-500'}`}>
-                Stock por medida
-              </p>
-            </button>
-          </div>
-        </div>
-
-        {/* Stock simple (sin medidas) */}
-        {!form.tieneMedidas && esEdicion && (
-          <Input
-            label="Stock actual"
-            type="text"
-            inputMode="numeric"
-            value={producto?.cantidad ?? 0}
-            readOnly
-            className="opacity-60 cursor-not-allowed"
-          />
-        )}
-
-        {/* Tabla de medidas */}
-        {form.tieneMedidas && (
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <label className="text-surface-300 text-xs tracking-widest uppercase font-body">
-                Medidas y Stock
-              </label>
-              <Button size="sm" variant="secondary" icon={Plus} onClick={addMedida}
-                disabled={medidasUsed.length >= MEDIDAS_VALIDAS.length}>
-                Agregar medida
-              </Button>
-            </div>
-
-            {errors.medidas && (
-              <p className="text-red-400 text-xs mb-2">{errors.medidas}</p>
-            )}
-
-            {medidas.length === 0 ? (
-              <p className="text-surface-500 text-sm font-body py-2">Sin medidas cargadas.</p>
-            ) : (
-              <div className="space-y-2">
-                {medidas.map((m, idx) => (
-                  <div key={idx} className="flex gap-2 items-center">
-                    <select
-                      value={m.medida}
-                      onChange={(e) => updateMedida(idx, 'medida', e.target.value)}
-                      className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
-                                 font-body focus:outline-none focus:border-brand-500 transition-all flex-1"
-                    >
-                      {MEDIDAS_VALIDAS.map((mv) => (
-                        <option key={mv} value={mv} disabled={medidasUsed.includes(mv) && mv !== m.medida}>
-                          {mv}
-                        </option>
-                      ))}
-                    </select>
-
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      value={m.cantidad}
-                      onChange={(e) => updateMedida(idx, 'cantidad', e.target.value.replace(/\D/g, ''))}
-                      placeholder="Stock"
-                      className="w-24 bg-surface-700 border border-surface-600 rounded-xl px-3 py-2
-                                 text-white text-sm font-mono focus:outline-none focus:border-brand-500 transition-all
-                                 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none"
-                    />
-
-                    <button onClick={() => removeMedida(idx)} className="text-surface-500 hover:text-red-400 transition-colors p-1.5">
-                      <X size={15} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
         <div className="flex gap-2 pt-2">
           <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button className="flex-1" onClick={guardar}>
-            {esEdicion ? 'Guardar Cambios' : 'Crear Producto'}
-          </Button>
+          <Button className="flex-1" onClick={guardar}>Crear Producto</Button>
         </div>
       </div>
     </Modal>
   )
 }
 
-// ─── Modal: actualizar stock (sin medidas) ────────────────────────────────
+// ─── Modal: actualizar stock (sin medidas o con medidas) ──────────────────
 
 function StockModal({ open, onClose, producto, onSaved }) {
-  const [delta, setDelta] = useState('')
-  const [modo,  setModo]  = useState('add')   // 'add' | 'set'
+  // 'sinMedidas' | 'conMedidas'
+  const [modo,          setModo]          = useState(null)
+  const [stockNuevo,    setStockNuevo]    = useState('')
 
-  useEffect(() => { if (open) { setDelta(''); setModo('add') } }, [open])
+  const [tipoFijado, setTipoFijado] = useState(false)
 
-  function guardar() {
-    const val = parseInt(delta) || 0
-    const nuevo = modo === 'set' ? val : Math.max(0, producto.cantidad + val)
-    run(`UPDATE Producto SET cantidad=? WHERE idProducto=?`, [nuevo, producto.idProducto])
+  // Estado para modo conMedidas
+  const [medidasStock,  setMedidasStock]  = useState([])   // rows existentes
+  const [editMedidas,   setEditMedidas]   = useState({})   // { idMedida: cantidad }
+  const [nuevaMedida,   setNuevaMedida]   = useState('')   // medida a agregar
+  const [medidasUsadas, setMedidasUsadas] = useState([])
+
+  useEffect(() => {
+    if (!open) {
+      setModo(null)
+      setStockNuevo('')
+      setEditMedidas({})
+      setTipoFijado(false)
+      return
+    }
+
+    // Producto ya definido como CON medidas
+    if (producto?.tieneMedidas === 1) {
+      setModo('conMedidas')
+      setTipoFijado(true)
+      cargarMedidas()
+      return
+    }
+
+    // Producto SIN medidas
+    setModo('sinMedidas')
+    setStockNuevo(String(producto?.cantidad ?? 0))
+
+    // Si ya tiene stock cargado, fijar tipo
+    if ((producto?.cantidad ?? 0) > 0) {
+      setTipoFijado(true)
+    } else {
+      setTipoFijado(false)
+    }
+  }, [open, producto])
+
+  function cargarMedidas(prevEditMedidas = editMedidas) {
+    const rows = query(
+      'SELECT * FROM ProductoMedida WHERE idProducto = ? ORDER BY medida',
+      [producto.idProducto]
+    )
+
+    setMedidasStock(rows)
+    setMedidasUsadas(rows.map(r => r.medida))
+
+    // Mantener valores ya escritos por el usuario
+    const nuevosEditados = {}
+
+    rows.forEach((r) => {
+      if (prevEditMedidas[r.idMedida] !== undefined) {
+        nuevosEditados[r.idMedida] = prevEditMedidas[r.idMedida]
+      }
+    })
+
+    setEditMedidas(nuevosEditados)
+    setNuevaMedida('')
+  }
+
+  function agregarMedida() {
+    if (!nuevaMedida || medidasUsadas.includes(nuevaMedida)) return
+
+    const editActual = { ...editMedidas }
+
+    // Marcar producto como "con medidas"
+    run(
+      `UPDATE Producto SET tieneMedidas = 1 WHERE idProducto = ?`,
+      [producto.idProducto]
+    )
+
+    run(
+      `INSERT INTO ProductoMedida (idProducto, medida, cantidad) VALUES (?,?,0)`,
+      [producto.idProducto, nuevaMedida]
+    )
+
+    // Actualizar objeto local
+    producto.tieneMedidas = 1
+
+    cargarMedidas(editActual)
+}
+
+  function guardarSinMedidas() {
+    const val = parseInt(stockNuevo) || 0
+    run(`UPDATE Producto SET cantidad=? WHERE idProducto=?`, [val, producto.idProducto])
     onSaved()
     onClose()
   }
 
-  if (!producto) return null
-  return (
-    <Modal open={open} onClose={onClose} title={`Stock: ${producto.nombre.slice(0, 40)}...`} width="max-w-sm">
-      <div className="space-y-4">
-        <div className="bg-surface-700 rounded-xl px-4 py-3 text-center">
-          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">Stock actual</p>
-          <p className="text-3xl font-display text-white tracking-widest mt-1">{producto.cantidad}</p>
-        </div>
-
-        <div className="grid grid-cols-2 gap-2">
-          {[['add', 'Sumar/Restar'], ['set', 'Fijar valor']].map(([v, l]) => (
-            <button key={v} onClick={() => setModo(v)}
-              className={`rounded-xl px-3 py-2 text-sm font-body border transition-all
-                ${modo === v
-                  ? 'bg-brand-500/15 border-brand-500/50 text-white'
-                  : 'bg-surface-700 border-surface-600 text-surface-400 hover:border-surface-500'}`}>
-              {l}
-            </button>
-          ))}
-        </div>
-
-        <Input
-          label={modo === 'add' ? 'Cantidad (negativo para restar)' : 'Nuevo valor'}
-          value={delta}
-          onChange={(e) => setDelta(e.target.value.replace(/[^-\d]/g, ''))}
-          placeholder={modo === 'add' ? 'Ej: +10 o -5' : 'Ej: 25'}
-        />
-
-        {modo === 'add' && delta !== '' && (
-          <p className="text-surface-400 text-xs font-body">
-            Resultado: <span className="text-white font-mono">{Math.max(0, producto.cantidad + (parseInt(delta) || 0))}</span>
-          </p>
-        )}
-
-        <div className="flex gap-2">
-          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button className="flex-1" onClick={guardar}>Aplicar</Button>
-        </div>
-      </div>
-    </Modal>
-  )
-}
-
-// ─── Modal: ver detalle / stock por medida ────────────────────────────────
-
-function DetalleModal({ open, onClose, producto, onSaved }) {
-  const [medidas, setMedidas] = useState([])
-  const [editing, setEditing] = useState({})  // { idMedida: cantidad }
-
-  useEffect(() => {
-    if (open && producto?.tieneMedidas) {
-      const rows = query('SELECT * FROM ProductoMedida WHERE idProducto = ? ORDER BY medida', [producto.idProducto])
-      setMedidas(rows)
-      setEditing({})
-    }
-  }, [open, producto])
-
-  function saveAll() {
-    for (const [idMedida, cantidad] of Object.entries(editing)) {
+  function guardarConMedidas() {
+    for (const [idMedida, cantidad] of Object.entries(editMedidas)) {
       run(`UPDATE ProductoMedida SET cantidad=? WHERE idMedida=?`, [parseInt(cantidad) || 0, idMedida])
     }
     onSaved()
@@ -370,30 +397,132 @@ function DetalleModal({ open, onClose, producto, onSaved }) {
   }
 
   if (!producto) return null
+
+  const medidasLibres = MEDIDAS_VALIDAS.filter(m => !medidasUsadas.includes(m))
+
   return (
-    <Modal open={open} onClose={onClose} title={`Stock por medida`} width="max-w-md">
+    <Modal open={open} onClose={onClose} title={`Actualizar Stock`} width="max-w-md">
       <p className="text-surface-400 text-xs font-body mb-4 truncate">{producto.nombre}</p>
-      <div className="space-y-2 mb-4">
-        {medidas.map((m) => (
-          <div key={m.idMedida} className="flex items-center gap-3 bg-surface-700 rounded-xl px-4 py-2.5">
-            <span className="text-white text-sm font-mono flex-1">{m.medida}</span>
-            <input
-              type="text"
-              inputMode="numeric"
-              value={editing[m.idMedida] !== undefined ? editing[m.idMedida] : m.cantidad}
-              onChange={(e) => setEditing((p) => ({ ...p, [m.idMedida]: e.target.value.replace(/\D/g, '') }))}
-              className="w-20 bg-surface-600 border border-surface-500 rounded-lg px-2 py-1 text-white
-                         text-sm font-mono text-center focus:outline-none focus:border-brand-500 transition-all
-                         [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none"
-            />
-            <span className="text-surface-400 text-xs font-body">und.</span>
+
+      {/* Selector de modo — solo si el producto no tiene medidas ya definidas */}
+      {!tipoFijado && (
+        <div className="grid grid-cols-2 gap-2 mb-5">
+          {[
+            { v: 'sinMedidas', label: 'Sin Medidas', sub: 'Stock único general' },
+            { v: 'conMedidas', label: 'Con Medidas', sub: 'Stock por medida' },
+          ].map(({ v, label, sub }) => (
+            <button
+              key={v}
+              onClick={() => {
+                setModo(v)
+                if (v === 'conMedidas') cargarMedidas()
+              }}
+              className={`rounded-xl px-4 py-3 text-left border text-sm font-body transition-all
+                ${modo === v
+                  ? 'bg-brand-500/15 border-brand-500/50 text-white'
+                  : 'bg-surface-700 border-surface-600 text-surface-400 hover:border-surface-500'}`}
+            >
+              <p className="font-medium">{label}</p>
+              <p className={`text-xs mt-0.5 ${modo === v ? 'text-brand-400' : 'text-surface-500'}`}>{sub}</p>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {tipoFijado && (
+        <div className="mb-5 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
+          <p className="text-amber-300 text-sm font-body">
+            PRODUCTO
+            <span className="font-semibold ml-1">
+              {modo === 'conMedidas' ? 'CON MEDIDAS' : 'SIN MEDIDAS'}
+            </span>
+          </p>
+        </div>
+      )}
+
+      {/* Sin medidas */}
+      {modo === 'sinMedidas' && (
+        <div className="space-y-4">
+          <div className="bg-surface-700 rounded-xl px-4 py-3 text-center">
+            <p className="text-surface-400 text-xs uppercase tracking-widest font-body">Stock actual</p>
+            <p className="text-3xl font-display text-white tracking-widest mt-1">{producto.cantidad}</p>
           </div>
-        ))}
-      </div>
-      <div className="flex gap-2">
-        <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-        <Button className="flex-1" onClick={saveAll}>Guardar Stock</Button>
-      </div>
+          <Input
+            label="Nuevo valor de stock"
+            type="text"
+            inputMode="numeric"
+            value={stockNuevo}
+            onChange={(e) => setStockNuevo(e.target.value.replace(/\D/g, ''))}
+            placeholder="Ej: 25"
+          />
+          <div className="flex gap-2">
+            <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
+            <Button className="flex-1" onClick={guardarSinMedidas}>Aplicar</Button>
+          </div>
+        </div>
+      )}
+
+      {/* Con medidas */}
+      {modo === 'conMedidas' && (
+        <div className="space-y-4">
+          {/* Agregar nueva medida */}
+          {medidasLibres.length > 0 && (
+            <div className="flex gap-2 items-end">
+              <div className="flex-1">
+                <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1.5">
+                  Agregar medida
+                </label>
+                <select
+                  value={nuevaMedida}
+                  onChange={(e) => setNuevaMedida(e.target.value)}
+                  className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white
+                             text-sm font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer"
+                >
+                  <option value="">— seleccionar —</option>
+                  {medidasLibres.map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+              </div>
+              <Button size="sm" icon={Plus} onClick={agregarMedida} disabled={!nuevaMedida}>
+                Agregar
+              </Button>
+            </div>
+          )}
+
+          {/* Lista de medidas con stock editable */}
+          {medidasStock.length === 0 ? (
+            <p className="text-surface-500 text-sm font-body py-2 text-center">
+              Sin medidas cargadas. Agregá una medida arriba.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {medidasStock.map((m) => (
+                <div key={m.idMedida} className="flex items-center gap-3 bg-surface-700 rounded-xl px-4 py-2.5">
+                  <span className="text-white text-sm font-mono flex-1">{m.medida}</span>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={editMedidas[m.idMedida] !== undefined ? editMedidas[m.idMedida] : m.cantidad}
+                    onChange={(e) => setEditMedidas((p) => ({ ...p, [m.idMedida]: e.target.value.replace(/\D/g, '') }))}
+                    className="w-20 bg-surface-600 border border-surface-500 rounded-lg px-2 py-1 text-white
+                               text-sm font-mono text-center focus:outline-none focus:border-brand-500 transition-all
+                               [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none"
+                  />
+                  <span className="text-surface-400 text-xs font-body">und.</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
+            <Button className="flex-1" onClick={guardarConMedidas} disabled={medidasStock.length === 0}>
+              Guardar Stock
+            </Button>
+          </div>
+        </div>
+      )}
     </Modal>
   )
 }
@@ -431,18 +560,19 @@ function CatModal({ open, onClose, onSaved }) {
 const PAGE_SIZE = 50
 
 export default function Inventario() {
-  const [productos,   setProductos]   = useState([])
-  const [categorias,  setCategorias]  = useState([])
-  const [search,      setSearch]      = useState('')
-  const [filterCat,   setFilterCat]   = useState('all')
-  const [filterStock, setFilterStock] = useState('all')
-  const [page,        setPage]        = useState(1)
-  const [sortKey,     setSortKey]     = useState('nombre')
-  const [sortDir,     setSortDir]     = useState('asc')
+  const [productos,    setProductos]    = useState([])
+  const [categorias,   setCategorias]   = useState([])
+  const [searchNombre, setSearchNombre] = useState('')
+  const [searchId,     setSearchId]     = useState('')  
+  const [filterCat,    setFilterCat]    = useState('all')
+  const [filterStock,  setFilterStock]  = useState('all')
+  const [page,         setPage]         = useState(1)
+  const [sortKey,      setSortKey]      = useState('nombre')
+  const [sortDir,      setSortDir]      = useState('asc')
 
-  const [modalProd,    setModalProd]    = useState(false)
+  const [modalNuevo,   setModalNuevo]   = useState(false)
+  const [modalEditar,  setModalEditar]  = useState(false)
   const [modalStock,   setModalStock]   = useState(false)
-  const [modalDetalle, setModalDetalle] = useState(false)
   const [modalCat,     setModalCat]     = useState(false)
   const [selected,     setSelected]     = useState(null)
   const [deleteConfirm,setDeleteConfirm]= useState(null)
@@ -463,9 +593,13 @@ export default function Inventario() {
       WHERE 1=1`
     const params = []
 
-    if (search.trim()) {
-      sql += ` AND (p.nombre LIKE ? OR p.idProducto=?)`
-      params.push(`%${search.trim()}%`, parseInt(search) || -1)
+    if (searchNombre.trim()) {
+      sql += ` AND p.nombre LIKE ?`
+      params.push(`%${searchNombre.trim()}%`)
+    }
+    if (searchId.trim()) {
+      sql += ` AND p.idProducto = ?`
+      params.push(parseInt(searchId) || -1)
     }
     if (filterCat !== 'all') {
       sql += ` AND p.idCategoria=?`
@@ -481,7 +615,7 @@ export default function Inventario() {
 
     setProductos(query(sql, params))
     setPage(1)
-  }, [search, filterCat, filterStock, sortKey, sortDir])
+  }, [searchNombre, searchId, filterCat, filterStock, sortKey, sortDir])
 
   useEffect(() => { load() }, [load])
 
@@ -502,12 +636,16 @@ export default function Inventario() {
     setToast(`"${p.nombre.slice(0, 30)}..." eliminado`)
   }
 
-  const paginated = productos.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const paginated  = productos.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const totalPages = Math.max(1, Math.ceil(productos.length / PAGE_SIZE))
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
-      {toast && <Toast message={toast} onDone={() => setToast('')} />}
+      <Toast
+        message={toast}
+        visible={!!toast}
+        onDone={() => setToast('')}
+      />
 
       <PageHeader
         title="Inventario"
@@ -517,7 +655,7 @@ export default function Inventario() {
             <Button variant="secondary" size="sm" onClick={() => setModalCat(true)}>
               + Categoría
             </Button>
-            <Button icon={PackagePlus} onClick={() => { setSelected(null); setModalProd(true) }}>
+            <Button icon={PackagePlus} onClick={() => setModalNuevo(true)}>
               Nuevo Producto
             </Button>
           </div>
@@ -542,18 +680,34 @@ export default function Inventario() {
       {/* Filtros */}
       <Card className="p-4">
         <div className="flex flex-wrap gap-3 items-center">
-          {/* Búsqueda */}
-          <div className="relative flex-1 min-w-[200px]">
-            <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
+        <div className="flex flex-1 gap-3 min-w-[320px]">
+          {/* Buscar por nombre */}
+          <div className="relative flex-1">
+            <Search
+              size={15}
+              className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none"
+            />
+
             <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Buscá por nombre o ID..."
+              value={searchNombre}
+              onChange={(e) => setSearchNombre(e.target.value)}
+              placeholder="Buscar por nombre..."
               className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2 text-white
-                         text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
+                        text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
             />
           </div>
 
+          {/* Buscar por ID */}
+          <div className="relative w-40">
+            <input
+              value={searchId}
+              onChange={(e) => setSearchId(e.target.value.replace(/\D/g, ''))}
+              placeholder="ID..."
+              className="w-full bg-surface-700 border border-surface-600 rounded-xl px-4 py-2 text-white
+                        text-sm font-mono placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
+            />
+          </div>
+        </div>
           {/* Filtro categoría */}
           <select
             value={filterCat}
@@ -595,11 +749,12 @@ export default function Inventario() {
                   Nombre <SortIcon col="nombre" />
                 </th>
                 <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">Categoría</th>
+                <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">P. Proveedor</th>
                 <th
                   className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
                   onClick={() => toggleSort('precio')}
                 >
-                  Precio <SortIcon col="precio" />
+                  P. Venta <SortIcon col="precio" />
                 </th>
                 <th
                   className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
@@ -608,7 +763,7 @@ export default function Inventario() {
                   Stock <SortIcon col="stock" />
                 </th>
                 <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">Tipo</th>
-                <th className="py-3 px-4 w-32"></th>
+                <th className="py-3 px-4 w-28"></th>
               </tr>
             </thead>
             <tbody>
@@ -621,7 +776,12 @@ export default function Inventario() {
                   <Td>
                     <Badge color="gray">{p.categoriaNombre}</Badge>
                   </Td>
-                  <Td className="font-mono">{p.precioUnitario > 0 ? fmt(p.precioUnitario) : <span className="text-surface-500">—</span>}</Td>
+                  <Td className="font-mono text-surface-400">
+                    {p.precioProveedor > 0 ? fmt(p.precioProveedor) : <span className="text-surface-600">—</span>}
+                  </Td>
+                  <Td className="font-mono">
+                    {p.precioUnitario > 0 ? fmt(p.precioUnitario) : <span className="text-surface-500">—</span>}
+                  </Td>
                   <Td>
                     <span className={`font-mono font-medium ${p.stockTotal === 0 ? 'text-red-400' : p.stockTotal < 5 ? 'text-yellow-400' : 'text-emerald-400'}`}>
                       {p.stockTotal}
@@ -635,27 +795,17 @@ export default function Inventario() {
                   </Td>
                   <td className="py-2 px-4">
                     <div className="flex items-center gap-1 justify-end">
-                      {/* Stock */}
-                      {p.tieneMedidas ? (
-                        <button
-                          onClick={() => { setSelected(p); setModalDetalle(true) }}
-                          title="Ver stock por medida"
-                          className="p-1.5 text-surface-400 hover:text-blue-400 transition-colors rounded-lg hover:bg-surface-700"
-                        >
-                          <PackagePlus size={15} />
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => { setSelected(p); setModalStock(true) }}
-                          title="Actualizar stock"
-                          className="p-1.5 text-surface-400 hover:text-emerald-400 transition-colors rounded-lg hover:bg-surface-700"
-                        >
-                          <PackagePlus size={15} />
-                        </button>
-                      )}
+                      {/* Actualizar stock (unificado) */}
+                      <button
+                        onClick={() => { setSelected(p); setModalStock(true) }}
+                        title="Actualizar stock"
+                        className="p-1.5 text-surface-400 hover:text-emerald-400 transition-colors rounded-lg hover:bg-surface-700"
+                      >
+                        <PackagePlus size={15} />
+                      </button>
                       {/* Editar */}
                       <button
-                        onClick={() => { setSelected(p); setModalProd(true) }}
+                        onClick={() => { setSelected(p); setModalEditar(true) }}
                         title="Editar"
                         className="p-1.5 text-surface-400 hover:text-brand-400 transition-colors rounded-lg hover:bg-surface-700"
                       >
@@ -701,27 +851,27 @@ export default function Inventario() {
         )}
       </Card>
 
-      {/* Modales */}
-      <ProductoModal
-        open={modalProd}
-        onClose={() => setModalProd(false)}
+      {/* ── Modales ── */}
+      <NuevoProductoModal
+        open={modalNuevo}
+        onClose={() => setModalNuevo(false)}
+        categorias={categorias}
+        onSaved={() => { load(); setToast('Producto creado correctamente ✓') }}
+      />
+
+      <EditarProductoModal
+        open={modalEditar}
+        onClose={() => setModalEditar(false)}
         producto={selected}
         categorias={categorias}
-        onSaved={() => { load(); setToast(selected ? 'Producto actualizado' : 'Producto creado correctamente ✓') }}
+        onSaved={() => { load(); setToast('Producto actualizado ✓') }}
       />
 
       <StockModal
         open={modalStock}
         onClose={() => setModalStock(false)}
         producto={selected}
-        onSaved={() => { load(); setToast('Stock actualizado') }}
-      />
-
-      <DetalleModal
-        open={modalDetalle}
-        onClose={() => setModalDetalle(false)}
-        producto={selected}
-        onSaved={() => { load(); setToast('Stock actualizado') }}
+        onSaved={() => { load(); setToast('Stock actualizado ✓') }}
       />
 
       <CatModal

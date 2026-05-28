@@ -68,12 +68,13 @@ function runSchema() {
   // tieneMedidas=0 significa stock único en columna "cantidad".
   db.run(`
     CREATE TABLE IF NOT EXISTS Producto (
-      idProducto     INTEGER PRIMARY KEY AUTOINCREMENT,
-      idCategoria    INTEGER NOT NULL DEFAULT 1,
-      nombre         TEXT NOT NULL,
-      precioUnitario REAL NOT NULL DEFAULT 0,
-      cantidad       INTEGER NOT NULL DEFAULT 0,
-      tieneMedidas   INTEGER NOT NULL DEFAULT 0 CHECK(tieneMedidas IN (0,1)),
+      idProducto      INTEGER PRIMARY KEY AUTOINCREMENT,
+      idCategoria     INTEGER NOT NULL DEFAULT 1,
+      nombre          TEXT NOT NULL,
+      precioProveedor REAL NOT NULL DEFAULT 0,
+      precioUnitario  REAL NOT NULL DEFAULT 0,
+      cantidad        INTEGER NOT NULL DEFAULT 0,
+      tieneMedidas    INTEGER NOT NULL DEFAULT 0 CHECK(tieneMedidas IN (0,1)),
       FOREIGN KEY (idCategoria) REFERENCES Categoria(idCategoria) ON DELETE RESTRICT
     );
   `)
@@ -183,14 +184,20 @@ function runSchema() {
 
 function runMigrations() {
   // v5 → v6: agrega esExcepcion a Presupuesto.
-  // IMPORTANTE: ALTER TABLE en sql.js (WASM) NO soporta CHECK ni NOT NULL sin default en filas existentes.
-  // Se agrega solo con DEFAULT; la validación queda en la capa de aplicación.
   const cols = db.exec(`PRAGMA table_info(Presupuesto)`)[0]?.values ?? []
   const yaExiste = cols.some(row => row[1] === 'esExcepcion')
   if (!yaExiste) {
     db.run(`ALTER TABLE Presupuesto ADD COLUMN esExcepcion INTEGER DEFAULT 0`)
-    // Asegurar que filas existentes tengan 0 (por si acaso DEFAULT no se aplicó)
     db.run(`UPDATE Presupuesto SET esExcepcion = 0 WHERE esExcepcion IS NULL`)
+    persistDB()
+  }
+
+  // v6 → v7: agrega precioProveedor a Producto.
+  const colsProd = db.exec(`PRAGMA table_info(Producto)`)[0]?.values ?? []
+  const yaExistePP = colsProd.some(row => row[1] === 'precioProveedor')
+  if (!yaExistePP) {
+    db.run(`ALTER TABLE Producto ADD COLUMN precioProveedor REAL DEFAULT 0`)
+    db.run(`UPDATE Producto SET precioProveedor = 0 WHERE precioProveedor IS NULL`)
     persistDB()
   }
 }
