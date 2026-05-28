@@ -73,12 +73,20 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
 
   // Cuando cambia precio proveedor o margen, recalcular precio unitario
   function aplicarMargen(margenVal, proveedorVal) {
-    const pp = parseFloat(String(proveedorVal ?? form.precioProveedor).replace(',', '.')) || 0
-    const mg = parseFloat(String(margenVal).replace(',', '.')) || 0
-    if (pp > 0 && mg > 0) {
-      const calculado = pp * (1 + mg / 100)
-      set('precioUnitario', calculado.toFixed(2))
-    }
+    const pp = parseFloat(
+      String(proveedorVal ?? form.precioProveedor).replace(',', '.')
+    )
+
+    const mg = parseFloat(
+      String(margenVal).replace(',', '.')
+    )
+
+    // Evitar cálculos inválidos
+    if (isNaN(pp) || isNaN(mg)) return
+
+    const calculado = pp * (1 + mg / 100)
+
+    set('precioUnitario', calculado.toFixed(2))
   }
 
   function validate() {
@@ -153,34 +161,46 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
           <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1.5">
             Margen de Ganancia (%)
           </label>
-          <div className="flex gap-2 items-center">
-            <div className="relative flex-1">
-              <TrendingUp size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
-              <input
-                type="text"
-                inputMode="decimal"
-                value={margen}
-                onChange={(e) => {
-                  const v = e.target.value.replace(',', '.')
-                  if (/^\d*\.?\d*$/.test(v)) {
-                    setMargen(v)
-                    aplicarMargen(v, form.precioProveedor)
+          <div className="relative">
+            <TrendingUp
+              size={14}
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none"
+            />
+
+            <input
+              type="text"
+              inputMode="decimal"
+              value={margen}
+              onChange={(e) => {
+                const v = e.target.value.replace(',', '.')
+
+                if (!/^\d*\.?\d*$/.test(v)) return
+
+                setMargen(v)
+
+                // Si se vacía el margen → quitar recargo
+                if (v.trim() === '') {
+                  const proveedor = parseFloat(
+                    String(form.precioProveedor).replace(',', '.')
+                  )
+
+                  if (!isNaN(proveedor)) {
+                    set('precioUnitario', proveedor.toFixed(2))
                   }
-                }}
-                placeholder="Ej: 40"
-                className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-10 py-2 text-white
-                           text-sm font-mono focus:outline-none focus:border-brand-500 transition-all"
-              />
-              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 text-sm font-mono">%</span>
-            </div>
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => aplicarMargen(margen, form.precioProveedor)}
-              disabled={!margen || !form.precioProveedor}
-            >
-              Aplicar
-            </Button>
+
+                  return
+                }
+
+                aplicarMargen(v, form.precioProveedor)
+              }}
+              placeholder="Ej: 40"
+              className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-10 py-2 text-white
+                        text-sm font-mono focus:outline-none focus:border-brand-500 transition-all"
+            />
+
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 text-sm font-mono">
+              %
+            </span>
           </div>
           {margenCalculado !== null && (
             <p className="text-surface-400 text-xs font-body mt-1.5">
