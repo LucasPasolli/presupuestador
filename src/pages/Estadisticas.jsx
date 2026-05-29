@@ -109,7 +109,7 @@ function GraficoMensual({ datos }) {
     </div>
   )
 
-  const maxVal   = Math.max(...datos.map(d => d.monto), 1)
+  const maxVal   = Math.max(...datos.flatMap(d => [d.cobrado, d.egreso]),1)
   const W        = 100 / datos.length   // ancho porcentual por barra
   const H        = 180
   const PAD      = 4
@@ -118,31 +118,45 @@ function GraficoMensual({ datos }) {
     <div className="relative">
       <svg viewBox={`0 0 ${datos.length * 60} ${H + 30}`} className="w-full" style={{ height: 220 }}>
         {datos.map((d, i) => {
-          const barH   = Math.max(4, (d.monto / maxVal) * (H - 20))
-          const x      = i * 60 + PAD
-          const y      = H - barH
-          const isCc   = false   // todas las barras son ingresos totales
+          const cobradoH = Math.max(4, (d.cobrado / maxVal) * (H - 20))
+          const egresoH  = Math.max(4, (d.egreso  / maxVal) * (H - 20))
+
+          const x = i * 60 + PAD
+
           return (
             <g key={d.mes}>
-              {/* Barra */}
-              <rect x={x} y={y} width={52} height={barH}
-                rx="4" fill="#f97316" fillOpacity="0.85" />
-              {/* Barra cobrado (saldos pagados incluidos) */}
-              {d.cobrado < d.monto && (
-                <rect x={x} y={y} width={52} height={Math.max(2, (d.cobrado / maxVal) * (H - 20))}
-                  rx="4" fill="#10b981" fillOpacity="0.9"
-                  y={H - Math.max(2, (d.cobrado / maxVal) * (H - 20))} />
-              )}
+
+              {/* Cobrado */}
+              <rect
+                x={x}
+                y={H - cobradoH}
+                width={24}
+                height={cobradoH}
+                rx="4"
+                fill="#10b981"
+                fillOpacity="0.9"
+              />
+
+              {/* Egreso */}
+              <rect
+                x={x + 28}
+                y={H - egresoH}
+                width={24}
+                height={egresoH}
+                rx="4"
+                fill="#ef4444"
+                fillOpacity="0.9"
+              />
               {/* Label mes */}
               <text x={x + 26} y={H + 16} textAnchor="middle"
                 fontSize="9" fill="#737373" fontFamily="DM Sans, sans-serif">
                 {mesLabel(d.mes)}
               </text>
               {/* Valor encima */}
-              {barH > 16 && (
-                <text x={x + 26} y={y - 4} textAnchor="middle"
+              {cobradoH  > 16 && (
+                <text x={x + 26} y={H - cobradoH - 4} textAnchor="middle"
                   fontSize="8" fill="#e2e2e2" fontFamily="JetBrains Mono, monospace">
-                  {fmtCompacto(d.monto)}
+                  {fmtCompacto(d.cobrado)}
                 </text>
               )}
             </g>
@@ -153,12 +167,12 @@ function GraficoMensual({ datos }) {
       </svg>
       <div className="flex items-center gap-4 mt-1 text-xs font-body text-surface-500">
         <span className="flex items-center gap-1.5">
-          <span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#f97316' }} />
-          Facturado
+          <span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#297a03' }} />
+          Cobrado
         </span>
         <span className="flex items-center gap-1.5">
-          <span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#10b981' }} />
-          Cobrado
+          <span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#ef4444' }} />
+          Egresos
         </span>
       </div>
     </div>
@@ -321,16 +335,34 @@ function calcularMetricas(desde, hasta) {
 
   // Agregar "cobrado" por mes (efectivo+transf inmediato + CC pagado en ese mes)
   m.evolucionMensual = mesesData.map(row => {
+
     const cobradoMes = query(`
-      SELECT COALESCE(SUM(p.monto),0) as v FROM Presupuesto p
+      SELECT COALESCE(SUM(p.monto),0) as v
+      FROM Presupuesto p
       WHERE strftime('%Y-%m', p.fecha) = ?
-        AND (p.metodoPago IN ('efectivo','transferencia')
-             OR p.idPresupuesto IN (
-               SELECT idPresupuesto FROM Saldo WHERE estado = 'pagado'
-               AND strftime('%Y-%m', fechaFin) = ?
-             ))
+        AND (
+          p.metodoPago IN ('efectivo','transferencia')
+          OR p.idPresupuesto IN (
+            SELECT idPresupuesto
+            FROM Saldo
+            WHERE estado = 'pagado'
+              AND strftime('%Y-%m', fechaFin) = ?
+          )
+        )
     `, [row.mes, row.mes])[0]?.v ?? 0
-    return { ...row, cobrado: cobradoMes }
+
+    const egresoMes = query(`
+      SELECT COALESCE(SUM(monto),0) as v
+      FROM PedidoCompra
+      WHERE estado = 'pagado'
+        AND strftime('%Y-%m', fecha) = ?
+    `, [row.mes])[0]?.v ?? 0
+
+    return {
+      ...row,
+      cobrado: cobradoMes,
+      egreso: egresoMes
+    }
   })
 
   // ── 6. Top 10 productos más vendidos ─────────────────────────────────────
@@ -395,6 +427,7 @@ const RANGOS = [
 ]
 
 export default function Estadisticas() {
+  const [mostrarExacto, setMostrarExacto] = useState(false)
   const [rangoIdx,  setRangoIdx]  = useState(1)
   const [desdeCustom, setDesdeCustom] = useState('')
   const [hastaCustom, setHastaCustom] = useState(today())
@@ -421,6 +454,7 @@ export default function Estadisticas() {
   )
 
   const m = metricas
+  const formatoMonto = mostrarExacto ? fmt : fmtCompacto
   const maxProducto = m.topProductos[0]?.unidades ?? 1
   const maxCliente  = m.topClientes[0]?.monto ?? 1
 
@@ -428,9 +462,14 @@ export default function Estadisticas() {
     <div className="max-w-6xl mx-auto space-y-6">
       <PageHeader title="Estadísticas" subtitle="Panel de métricas"
         actions={
-          <Button size="sm" variant="secondary" icon={RefreshCw} onClick={cargar}>
-            Actualizar
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => setMostrarExacto(v => !v)}
+            >
+              {mostrarExacto ? 'Ver montos resumidos' : 'Ver montos exactos'}
+            </Button>
+          </div>
         }
       />
 
@@ -463,25 +502,25 @@ export default function Estadisticas() {
 
       {/* ── KPIs principales ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KpiCard icon={TrendingUp}  label="Presupuestado"       value={fmtCompacto(m.facturadoTotal)}   color="brand"
+        <KpiCard icon={TrendingUp}  label="Presupuestado"       value={formatoMonto(m.facturadoTotal)}   color="brand"
           sub={`${m.totalPresupuestos} presupuesto${m.totalPresupuestos!==1?'s':''}`} />
-        <KpiCard icon={Wallet}      label="Cobrado real"    value={fmtCompacto(m.cobradoReal)}       color="green"
+        <KpiCard icon={Wallet}      label="Cobrado real"    value={formatoMonto(m.cobradoReal)}       color="green"
           sub={`${pct(m.cobradoReal, m.facturadoTotal)} del total`} />
-        <KpiCard icon={Clock}       label="Pendiente CC"    value={fmtCompacto(m.pendienteCC)}       color="yellow"
+        <KpiCard icon={Clock}       label="Pendiente CC"    value={formatoMonto(m.pendienteCC)}       color="yellow"
           sub="Saldos sin cobrar" />
-        <KpiCard icon={BarChart2}   label="Ticket promedio" value={fmtCompacto(m.ticketPromedio)}    color="blue"
+        <KpiCard icon={BarChart2}   label="Ticket promedio" value={formatoMonto(m.ticketPromedio)}    color="blue"
           sub="por presupuesto" />
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <KpiCard icon={Users}       label="Clientes únicos"  value={m.clientesUnicos}               color="blue"
           sub="en el período" />
-        <KpiCard icon={Tag}         label="Descuentos dados" value={fmtCompacto(m.descuentosOtorgados)} color="yellow"
+        <KpiCard icon={Tag}         label="Descuentos dados" value={formatoMonto(m.descuentosOtorgados)} color="yellow"
           sub={`${pct(m.descuentosOtorgados, m.facturadoTotal)} del facturado`} />
-        <KpiCard icon={TrendingDown} label="Egresos pagados" value={fmtCompacto(m.egresosPedidos)} color="red"
+        <KpiCard icon={TrendingDown} label="Egresos pagados" value={formatoMonto(m.egresosPedidos)} color="red"
           sub="pedidos de compra" />
         <KpiCard icon={m.resultadoEstimado >= 0 ? TrendingUp : TrendingDown}
-          label="Resultado operativo" value={fmtCompacto(m.resultadoEstimado)}
+          label="Resultado operativo" value={formatoMonto(m.resultadoEstimado)}
           color={m.resultadoEstimado >= 0 ? 'green' : 'red'}
           sub="cobrado − egresos" />
       </div>
@@ -504,7 +543,7 @@ export default function Estadisticas() {
       <Card className="p-6">
         <h3 className="font-body font-semibold text-white text-sm mb-4 flex items-center gap-2">
           <BarChart2 size={15} className="text-brand-500" />
-          Evolución mensual — Facturado vs. Cobrado
+          Evolución mensual — Cobrado vs. Egresos
         </h3>
         {m.evolucionMensual.length === 0 ? (
           <p className="text-surface-500 text-sm font-body py-8 text-center">Sin datos en el período.</p>
