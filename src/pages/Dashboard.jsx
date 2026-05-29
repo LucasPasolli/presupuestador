@@ -98,9 +98,6 @@ export default function Dashboard() {
         <h1 className="font-display text-6xl text-white tracking-widest leading-none">
           POWDER
         </h1>
-        <p className="text-surface-400 mt-2 font-body">
-          Sistema de gestión y presupuestos para repuestos de motos
-        </p>
       </div>
 
       {/* Quick stats */}

@@ -29,14 +29,15 @@ function Toast({ message, onDone }) {
     const t = setTimeout(onDone, 3500)
     return () => clearTimeout(t)
   }, [onDone])
-  return (
+  return createPortal(
     <div className="fixed top-5 right-5 z-[9999] pointer-events-none">
       <div className="flex items-center gap-3 bg-emerald-900/95 border border-emerald-500/50
                       rounded-2xl px-5 py-3 shadow-2xl animate-slide-up">
         <CheckCircle2 size={18} className="text-emerald-400 flex-shrink-0" />
         <span className="text-emerald-100 text-sm font-body">{message}</span>
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
@@ -198,13 +199,17 @@ function ClienteSelector({ value, onChange, onToast }) {
 
 // ─── Fila de ítem ───────────────────────────────────────────────────────────
 
-function ItemRow({ item, index, onUpdate, onRemove, onClearError }) {
+function ItemRow({ item, index, onUpdate, onRemove, onClearError, onStockError }) {
   const [nombreSearch,   setNombreSearch]   = useState(item.nombreProducto || '')
   const [nombreResults,  setNombreResults]  = useState([])
   const [showDrop,       setShowDrop]       = useState(false)
   const [dropPos,        setDropPos]        = useState({ top: 0, left: 0, width: 0 })
   const [medidas,        setMedidas]        = useState([])
   const [idError,        setIdError]        = useState('')
+  const [stockWarning,   setStockWarning]   = useState('')
+  const [tooltipPos,     setTooltipPos]     = useState({ top: 0, left: 0 })
+  const [showTooltip,    setShowTooltip]    = useState(false)
+  const cantRef  = useRef(null)
   const wrapRef  = useRef(null)
   const inputRef = useRef(null)
 
@@ -245,6 +250,31 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError }) {
     }
   }, [item.idProducto])
 
+  function checkStock(idProducto, medida, cantidad) {
+    if (!idProducto || !cantidad || parseInt(cantidad) <= 0) {
+      setStockWarning(''); onStockError(index, false); return
+    }
+    const prod = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(idProducto)])[0]
+    if (!prod) { setStockWarning(''); onStockError(index, false); return }
+    let stockDisp = 0
+    if (prod.tieneMedidas && medida) {
+      const pm = query('SELECT cantidad FROM ProductoMedida WHERE idProducto = ? AND medida = ?', [parseInt(idProducto), medida])[0]
+      stockDisp = pm?.cantidad ?? 0
+    } else if (!prod.tieneMedidas) {
+      stockDisp = prod.cantidad ?? 0
+    } else {
+      setStockWarning(''); onStockError(index, false); return
+    }
+    const pedido = parseInt(cantidad) || 0
+    if (pedido > stockDisp) {
+      setStockWarning(`Stock Disponible: ${stockDisp}.`)
+      onStockError(index, true)
+    } else {
+      setStockWarning('')
+      onStockError(index, false)
+    }
+  }
+
   function buscarPorNombre(text) {
     setNombreSearch(text)
     onClearError()
@@ -264,6 +294,7 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError }) {
     onUpdate(index, 'nombreProducto', p.nombre)
     onUpdate(index, 'precioUnitario', p.precioUnitario)
     onUpdate(index, 'medida',         null)
+    checkStock(p.idProducto, null, item.cantidad)
   }
 
   function handleIdChange(val) {
@@ -278,6 +309,7 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError }) {
         onUpdate(index, 'precioUnitario', p.precioUnitario)
         onUpdate(index, 'medida', null)
         setIdError('')
+        checkStock(p.idProducto, null, item.cantidad)
       } else {
         // ID no existe — limpiamos nombre y precio, no rellenamos nada
         setNombreSearch('')
@@ -302,17 +334,33 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError }) {
 
       {/* Cantidad */}
       <td className="py-2 px-2 w-20">
-        <input type="text" inputMode="numeric" value={item.cantidad}
-          onChange={e => {
-            onClearError()
-            const raw = e.target.value.replace(/\D/g, '')
-            onUpdate(index, 'cantidad', raw)
-          }}
-          onBlur={e => {
-            // Al salir del campo, si quedó vacío ponemos 1
-            if (!e.target.value || parseInt(e.target.value) < 1) onUpdate(index, 'cantidad', '1')
-          }}
-          className={cell + ' w-full text-center'} />
+        <div className="relative">
+          <input ref={cantRef} type="text" inputMode="numeric" value={item.cantidad}
+            onChange={e => {
+              onClearError()
+              const raw = e.target.value.replace(/\D/g, '')
+              onUpdate(index, 'cantidad', raw)
+              checkStock(item.idProducto, item.medida, raw)
+            }}
+            onBlur={e => {
+              const val = (!e.target.value || parseInt(e.target.value) < 1) ? '1' : e.target.value
+              if (!e.target.value || parseInt(e.target.value) < 1) onUpdate(index, 'cantidad', '1')
+              checkStock(item.idProducto, item.medida, val)
+              setShowTooltip(false)
+            }}
+            onFocus={() => { if (stockWarning) { const r = cantRef.current?.getBoundingClientRect(); if(r) setTooltipPos({ top: r.top + window.scrollY - 36, left: r.left + window.scrollX }); setShowTooltip(true) } }}
+            onMouseEnter={() => { if (stockWarning) { const r = cantRef.current?.getBoundingClientRect(); if(r) setTooltipPos({ top: r.top + window.scrollY - 36, left: r.left + window.scrollX }); setShowTooltip(true) } }}
+            onMouseLeave={() => setShowTooltip(false)}
+            className={cell + ' w-full text-center' + (stockWarning ? ' !border-yellow-500 !text-yellow-300' : '')} />
+        </div>
+        {stockWarning && showTooltip && createPortal(
+          <div style={{ position: 'absolute', top: tooltipPos.top, left: tooltipPos.left, zIndex: 9999, pointerEvents: 'none' }}
+               className="bg-yellow-900/95 border border-yellow-500/60 text-yellow-200 text-[11px] font-body
+                          rounded-lg px-2.5 py-1.5 shadow-xl whitespace-nowrap flex items-center gap-1.5">
+            <span>⚠</span><span>{stockWarning}</span>
+          </div>,
+          document.body
+        )}
       </td>
 
       {/* Nombre — dropdown renderizado via portal para escapar del overflow de la tabla */}
@@ -360,7 +408,10 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError }) {
       <td className="py-2 px-2 w-32">
         {medidas.length > 0 ? (
           <select value={item.medida || ''}
-            onChange={e => onUpdate(index, 'medida', e.target.value)}
+            onChange={e => {
+              onUpdate(index, 'medida', e.target.value)
+              checkStock(item.idProducto, e.target.value, item.cantidad)
+            }}
             className="w-full bg-surface-700 border border-surface-600 rounded-lg px-2 py-1.5
                        text-white text-sm font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer">
             <option value="">— medida —</option>
@@ -548,8 +599,14 @@ async function generarPDFPresupuesto(idPresupuesto) {
 
   const ajuste = pres.monto - pres.montoOriginal
   if (ajuste !== 0) {
+    // Calcular el porcentaje real a partir del factor aplicado
+    const factorAplicado = pres.montoOriginal > 0 ? pres.monto / pres.montoOriginal : 1
+    const pctDiff = ((factorAplicado - 1) * 100)
+    const pctLabel = pctDiff < 0
+      ? `${Math.abs(pctDiff).toFixed(1)}% descuento`
+      : `${pctDiff.toFixed(1)}% recargo`
     doc.setFontSize(8.5); doc.setTextColor(100,100,100)
-    doc.text('Ajuste:', PW - ML - 70, finalY + 13)
+    doc.text(`Ajuste (${pctLabel}):`, PW - ML - 70, finalY + 13)
     doc.setTextColor(50,50,50)
     doc.text(`${ajuste < 0 ? '- ' : '+ '}${fmt(Math.abs(ajuste))}`, PW - ML, finalY + 13, { align: 'right' })
   }
@@ -571,9 +628,10 @@ export default function Presupuestador() {
   const [excepcionFactor,    setExcepcionFactor]     = useState(1)
   const [excepcionSubMetodo, setExcepcionSubMetodo]  = useState('efectivo')
   const [items,              setItems]               = useState([ITEM_EMPTY()])
-  const [guardado,           setGuardado]            = useState(null)   // { idPresupuesto, esCuenta, totalFinal, metodoLabel }
+  const [guardado,           setGuardado]            = useState(null)
   const [error,              setError]               = useState('')
   const [toast,              setToast]               = useState('')
+  const [stockErrors,        setStockErrors]         = useState({})  // { idx: bool }
 
   const esExcepcion = metodoPago === 'excepcion'
   const factorReal  = esExcepcion
@@ -586,10 +644,16 @@ export default function Presupuestador() {
 
   function updateItem(idx, key, val) {
     setItems(prev => prev.map((it, i) => i === idx ? { ...it, [key]: val } : it))
-    setError('')   // limpiar error al editar cualquier campo
+    setError('')
   }
-  function addItem()       { setItems(prev => [...prev, ITEM_EMPTY()]) }
-  function removeItem(idx) { setItems(prev => prev.filter((_, i) => i !== idx)) }
+  function addItem() { setItems(prev => [...prev, ITEM_EMPTY()]) }
+  function removeItem(idx) {
+    setItems(prev => prev.filter((_, i) => i !== idx))
+    setStockErrors(prev => { const n = { ...prev }; delete n[idx]; return n })
+  }
+  function handleStockError(idx, hasError) {
+    setStockErrors(prev => ({ ...prev, [idx]: hasError }))
+  }
 
   function guardar() {
     setError('')
@@ -602,6 +666,23 @@ export default function Presupuestador() {
       const existe = query('SELECT idProducto, tieneMedidas FROM Producto WHERE idProducto = ?', [parseInt(it.idProducto)])[0]
       if (!existe) { setError(`El producto ID ${it.idProducto} no existe en el inventario.`); return }
       if (existe.tieneMedidas && !it.medida) { setError(`Seleccioná una medida para el producto ID ${it.idProducto}.`); return }
+    }
+
+    // Verificar stock suficiente para todos los ítems
+    for (const it of validItems) {
+      const prod = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(it.idProducto)])[0]
+      if (!prod) continue
+      let stockDisp = 0
+      if (prod.tieneMedidas && it.medida) {
+        const pm = query('SELECT cantidad FROM ProductoMedida WHERE idProducto = ? AND medida = ?', [parseInt(it.idProducto), it.medida])[0]
+        stockDisp = pm?.cantidad ?? 0
+      } else if (!prod.tieneMedidas) {
+        stockDisp = prod.cantidad ?? 0
+      } else continue
+      if (parseInt(it.cantidad) > stockDisp) {
+        setError(`Stock insuficiente de algun producto.`)
+        return
+      }
     }
 
     const fecha = today()
@@ -727,7 +808,7 @@ export default function Presupuestador() {
             </thead>
             <tbody>
               {items.map((item, idx) => (
-                <ItemRow key={idx} item={item} index={idx} onUpdate={updateItem} onRemove={removeItem} onClearError={() => setError('')} />
+                <ItemRow key={idx} item={item} index={idx} onUpdate={updateItem} onRemove={removeItem} onClearError={() => setError('')} onStockError={handleStockError} />
               ))}
             </tbody>
           </table>
