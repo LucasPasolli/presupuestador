@@ -1082,48 +1082,74 @@ export default function Inventario() {
       {/* Tabla */}
       <Card className="overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm font-body">
+          <table className="w-full table-fixed text-sm font-body">
             <thead>
               <tr className="border-b border-surface-700">
-                <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body w-16">ID</th>
+                <th className="w-16 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">
+                  ID
+                </th>
+
                 <th
-                  className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
+                  className="w-[32%] text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
                   onClick={() => toggleSort('nombre')}
                 >
-                  Nombre <SortIcon col="nombre" />
+                  <div className="flex items-center gap-1">
+                    <span>NOMBRE</span>
+                    <SortIcon col="nombre" />
+                  </div>
                 </th>
-                <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">Categoría</th>
-                <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">P. Proveedor</th>
+
+                <th className="w-44 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">
+                  CATEGORÍA
+                </th>
+
+                <th className="w-36 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">
+                  P. PROVEEDOR
+                </th>
+
                 <th
-                  className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
+                  className="w-36 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
                   onClick={() => toggleSort('precio')}
                 >
-                  P. Venta <SortIcon col="precio" />
+                  <div className="flex items-center gap-1">
+                    <span>P. VENTA</span>
+                    <SortIcon col="precio" />
+                  </div>
                 </th>
+
                 <th
-                  className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
+                  className="w-24 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
                   onClick={() => toggleSort('stock')}
                 >
-                  Stock <SortIcon col="stock" />
+                  <div className="flex items-center gap-1">
+                    <span>STOCK</span>
+                    <SortIcon col="stock" />
+                  </div>
                 </th>
-                <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">Tipo</th>
-                <th className="py-3 px-4 w-28"></th>
+
+                <th className="w-32 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">
+                  TIPO
+                </th>
+
+                <th className="w-28 py-3 px-4"></th>
               </tr>
             </thead>
             <tbody>
               {paginated.map((p) => (
                 <tr key={p.idProducto} className="border-b border-surface-700/50 hover:bg-surface-700/30 transition-colors">
-                  <Td className="font-mono text-surface-400">#{p.idProducto}</Td>
+                  <Td className="font-mono text-surface-400 whitespace-nowrap">#{p.idProducto}</Td>
                   <Td>
                     <span className="text-white font-body">{p.nombre}</span>
                   </Td>
                   <Td>
-                    <Badge color="gray">{p.categoriaNombre}</Badge>
+                    <div className="truncate">
+                      <Badge color="gray">{p.categoriaNombre}</Badge>
+                    </div>
                   </Td>
-                  <Td className="font-mono text-surface-400">
+                  <Td className="font-mono text-surface-400 whitespace-nowrap">
                     {p.precioProveedor > 0 ? fmt(p.precioProveedor) : <span className="text-surface-600">—</span>}
                   </Td>
-                  <Td className="font-mono">
+                  <Td className="font-mono whitespace-nowrap">
                     {p.precioUnitario > 0 ? fmt(p.precioUnitario) : <span className="text-surface-500">—</span>}
                   </Td>
                   <Td>
