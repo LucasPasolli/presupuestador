@@ -2,7 +2,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { query, run } from '../lib/database'
 import { Button, Card, PageHeader, Modal, Input, Select, Badge, Table, Tr, Td } from '../components/ui'
-import { Plus, Search, Pencil, Trash2, ChevronDown, ChevronUp, PackagePlus, X, CheckCircle2, TrendingUp } from 'lucide-react'
+import { Plus, Search, Pencil, Trash2, ChevronDown, ChevronUp, PackagePlus, X, CheckCircle2, TrendingUp, FileSpreadsheet } from 'lucide-react'
+import * as XLSX from 'xlsx'
 
 // ─── Constantes ───────────────────────────────────────────────────────────
 
@@ -60,10 +61,18 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
   useEffect(() => {
     if (!open || !producto) return
     setForm({
-      nombre:          producto.nombre,
-      idCategoria:     producto.idCategoria,
-      precioProveedor: producto.precioProveedor ?? '',
-      precioUnitario:  producto.precioUnitario ?? '',
+      nombre: producto.nombre,
+      idCategoria: producto.idCategoria,
+
+      precioProveedor:
+        producto.precioProveedor && producto.precioProveedor > 0
+          ? String(producto.precioProveedor)
+          : '',
+
+      precioUnitario:
+        producto.precioUnitario && producto.precioUnitario > 0
+          ? String(producto.precioUnitario)
+          : '',
     })
     setMargen('')
     setErrors({})
@@ -91,19 +100,47 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
 
   function validate() {
     const e = {}
-    if (!form.nombre.trim()) e.nombre = 'Requerido'
-    const pp = parseFloat(String(form.precioProveedor).replace(',', '.'))
-    const pu = parseFloat(String(form.precioUnitario).replace(',', '.'))
-    if (form.precioProveedor !== '' && isNaN(pp)) e.precioProveedor = 'Precio inválido'
-    if (form.precioUnitario === '' || isNaN(pu)) e.precioUnitario = 'Ingresá un precio válido'
+
+    if (!form.nombre.trim()) {
+      e.nombre = 'Requerido'
+    }
+
+    const pp = parseFloat(
+      String(form.precioProveedor).replace(',', '.')
+    )
+
+    const pu = parseFloat(
+      String(form.precioUnitario).replace(',', '.')
+    )
+
+    if (
+      form.precioProveedor !== '' &&
+      isNaN(pp)
+    ) {
+      e.precioProveedor = 'Precio inválido'
+    }
+
+    if (
+      form.precioUnitario !== '' &&
+      isNaN(pu)
+    ) {
+      e.precioUnitario = 'Precio inválido'
+    }
+
     setErrors(e)
+
     return Object.keys(e).length === 0
   }
 
   function guardar() {
     if (!validate()) return
     const pp = parseFloat(String(form.precioProveedor).replace(',', '.')) || 0
-    const pu = parseFloat(String(form.precioUnitario).replace(',', '.'))
+    const pu =
+    form.precioUnitario === ''
+      ? 0
+      : parseFloat(
+          String(form.precioUnitario).replace(',', '.')
+        )
     run(
       `UPDATE Producto SET nombre=?, idCategoria=?, precioProveedor=?, precioUnitario=? WHERE idProducto=?`,
       [form.nombre.trim(), form.idCategoria, pp, pu, producto.idProducto]
@@ -137,7 +174,7 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
           onChange={(e) => set('idCategoria', parseInt(e.target.value))}
         >
           {categorias.map((c) => (
-            <option key={c.idCategoria} value={c.idCategoria}>{c.nombre}</option>
+            <option key={c.idCategoria} value={c.idCategoria} className="font-body">{c.nombre}</option>
           ))}
         </Select>
 
@@ -193,12 +230,13 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
 
                 aplicarMargen(v, form.precioProveedor)
               }}
-              placeholder="Ej: 40"
+              placeholder="Ej: 42.5"
               className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-10 py-2 text-white
-                        text-sm font-mono focus:outline-none focus:border-brand-500 transition-all"
+                        text-sm font-body placeholder-surface-500
+                        focus:outline-none focus:border-brand-500 transition-all"
             />
 
-            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 text-sm font-mono">
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 text-sm font-body">
               %
             </span>
           </div>
@@ -213,7 +251,7 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
         {/* Precio Unitario de Venta */}
         <div>
           <Input
-            label="Precio Unitario de Venta *"
+            label="Precio Unitario de Venta"
             value={form.precioUnitario}
             onChange={(e) => {
               const v = e.target.value.replace(',', '.')
@@ -291,7 +329,7 @@ function NuevoProductoModal({ open, onClose, categorias, onSaved }) {
           onChange={(e) => set('idCategoria', parseInt(e.target.value))}
         >
           {categorias.map((c) => (
-            <option key={c.idCategoria} value={c.idCategoria}>{c.nombre}</option>
+            <option key={c.idCategoria} value={c.idCategoria} className="font-body">{c.nombre}</option>
           ))}
         </Select>
         <Input
@@ -358,15 +396,35 @@ function StockModal({ open, onClose, producto, onSaved }) {
   }, [open, producto])
 
   function cargarMedidas(prevEditMedidas = editMedidas) {
-    const rows = query(
-      'SELECT * FROM ProductoMedida WHERE idProducto = ? ORDER BY medida',
+    // Obtener medidas existentes
+    const existentes = query(
+      'SELECT * FROM ProductoMedida WHERE idProducto = ?',
       [producto.idProducto]
     )
 
-    setMedidasStock(rows)
-    setMedidasUsadas(rows.map(r => r.medida))
+    // Crear mapa rápido
+    const existentesMap = {}
 
-    // Mantener valores ya escritos por el usuario
+    existentes.forEach((m) => {
+      existentesMap[m.medida] = m
+    })
+
+    // Generar TODAS las medidas válidas
+    const rows = MEDIDAS_VALIDAS.map((medida) => {
+      if (existentesMap[medida]) {
+        return existentesMap[medida]
+      }
+
+      return {
+        idMedida: `nuevo-${medida}`,
+        medida,
+        cantidad: '',
+        esNueva: true,
+      }
+    })
+
+    setMedidasStock(rows)
+
     const nuevosEditados = {}
 
     rows.forEach((r) => {
@@ -376,7 +434,6 @@ function StockModal({ open, onClose, producto, onSaved }) {
     })
 
     setEditMedidas(nuevosEditados)
-    setNuevaMedida('')
   }
 
   function agregarMedida() {
@@ -409,9 +466,46 @@ function StockModal({ open, onClose, producto, onSaved }) {
   }
 
   function guardarConMedidas() {
-    for (const [idMedida, cantidad] of Object.entries(editMedidas)) {
-      run(`UPDATE ProductoMedida SET cantidad=? WHERE idMedida=?`, [parseInt(cantidad) || 0, idMedida])
+    // Marcar producto como con medidas
+    run(
+      `UPDATE Producto
+      SET tieneMedidas = 1
+      WHERE idProducto = ?`,
+      [producto.idProducto]
+    )
+
+    for (const medida of medidasStock) {
+      const valor =
+        editMedidas[medida.idMedida] !== undefined
+          ? editMedidas[medida.idMedida]
+          : medida.cantidad
+
+      // Si está vacío → ignorar
+      if (valor === '' || valor === null || valor === undefined) {
+        continue
+      }
+
+      const cantidad = parseInt(valor) || 0
+
+      // Si la medida ya existe → update
+      if (!medida.esNueva) {
+        run(
+          `UPDATE ProductoMedida
+          SET cantidad = ?
+          WHERE idMedida = ?`,
+          [cantidad, medida.idMedida]
+        )
+      } else {
+        // Si no existe → insert
+        run(
+          `INSERT INTO ProductoMedida
+          (idProducto, medida, cantidad)
+          VALUES (?, ?, ?)`,
+          [producto.idProducto, medida.medida, cantidad]
+        )
+      }
     }
+
     onSaved()
     onClose()
   }
@@ -485,31 +579,6 @@ function StockModal({ open, onClose, producto, onSaved }) {
       {/* Con medidas */}
       {modo === 'conMedidas' && (
         <div className="space-y-4">
-          {/* Agregar nueva medida */}
-          {medidasLibres.length > 0 && (
-            <div className="flex gap-2 items-end">
-              <div className="flex-1">
-                <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1.5">
-                  Agregar medida
-                </label>
-                <select
-                  value={nuevaMedida}
-                  onChange={(e) => setNuevaMedida(e.target.value)}
-                  className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white
-                             text-sm font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer"
-                >
-                  <option value="">— seleccionar —</option>
-                  {medidasLibres.map(m => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
-                </select>
-              </div>
-              <Button size="sm" icon={Plus} onClick={agregarMedida} disabled={!nuevaMedida}>
-                Agregar
-              </Button>
-            </div>
-          )}
-
           {/* Lista de medidas con stock editable */}
           {medidasStock.length === 0 ? (
             <p className="text-surface-500 text-sm font-body py-2 text-center">
@@ -523,6 +592,7 @@ function StockModal({ open, onClose, producto, onSaved }) {
                   <input
                     type="text"
                     inputMode="numeric"
+                    placeholder="—"
                     value={editMedidas[m.idMedida] !== undefined ? editMedidas[m.idMedida] : m.cantidad}
                     onChange={(e) => setEditMedidas((p) => ({ ...p, [m.idMedida]: e.target.value.replace(/\D/g, '') }))}
                     className="w-20 bg-surface-600 border border-surface-500 rounded-lg px-2 py-1 text-white
@@ -659,13 +729,29 @@ function ActualizarPreciosModal({ open, onClose, onSaved }) {
 
 // ─── Modal: nueva categoría ───────────────────────────────────────────────
 
-function CatModal({ open, onClose, onSaved }) {
+function CatModal({ open, onClose, onSaved, categorias }) {
   const [nombre, setNombre] = useState('')
-  const [error,  setError]  = useState('')
+  const [error, setError] = useState('')
+
+  const nombreNormalizado = nombre.trim().toLowerCase()
+
+  const categoriaExistente = categorias.some(
+    (c) => c.nombre.trim().toLowerCase() === nombreNormalizado
+  )
 
   function guardar() {
-    if (!nombre.trim()) { setError('Requerido'); return }
+    if (!nombre.trim()) {
+      setError('Requerido')
+      return
+    }
+
+    if (categoriaExistente) {
+      setError('Ya existe una categoría con ese nombre')
+      return
+    }
+
     run(`INSERT INTO Categoria (nombre) VALUES (?)`, [nombre.trim()])
+
     onSaved()
     setNombre('')
     setError('')
@@ -673,12 +759,57 @@ function CatModal({ open, onClose, onSaved }) {
   }
 
   return (
-    <Modal open={open} onClose={() => { setNombre(''); setError(''); onClose() }} title="Nueva Categoría" width="max-w-sm">
+    <Modal
+      open={open}
+      onClose={() => {
+        setNombre('')
+        setError('')
+        onClose()
+      }}
+      title="Nueva Categoría"
+      width="max-w-sm"
+    >
       <div className="space-y-4">
-        <Input label="Nombre" value={nombre} onChange={(e) => setNombre(e.target.value)} error={error} placeholder="Ej: Transmisión" />
+        <div>
+          <Input
+            label="Nombre"
+            value={nombre}
+            onChange={(e) => {
+              setNombre(e.target.value)
+
+              const nuevoValor = e.target.value.trim().toLowerCase()
+
+              const existe = categorias.some(
+                (c) => c.nombre.trim().toLowerCase() === nuevoValor
+              )
+
+              if (existe) {
+                setError('Ya existe una categoría con ese nombre')
+              } else {
+                setError('')
+              }
+            }}
+            error={error}
+            placeholder="Ej: Transmisión"
+          />
+        </div>
+
         <div className="flex gap-2">
-          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button className="flex-1" onClick={guardar}>Crear</Button>
+          <Button
+            variant="secondary"
+            className="flex-1"
+            onClick={onClose}
+          >
+            Cancelar
+          </Button>
+
+          <Button
+            className="flex-1"
+            onClick={guardar}
+            disabled={categoriaExistente || !nombre.trim()}
+          >
+            Crear
+          </Button>
         </div>
       </div>
     </Modal>
@@ -767,6 +898,70 @@ export default function Inventario() {
     setToast(`"${p.nombre.slice(0, 30)}..." eliminado`)
   }
 
+  function exportarExcel() {
+    const data = productos.map((p) => ({
+      Codigo: p.idProducto,
+      Producto: p.nombre,
+      Precio: p.precioUnitario || '',
+    }))
+
+    // Crear hoja
+    const worksheet = XLSX.utils.json_to_sheet(data)
+
+    // Anchos automáticos prolijos
+    worksheet['!cols'] = [
+      { wch: 12 }, // Codigo
+      { wch: 55 }, // Producto
+      { wch: 15 }, // Precio
+    ]
+
+    // Estilo encabezados
+    const range = XLSX.utils.decode_range(worksheet['!ref'])
+
+    for (let C = range.s.c; C <= range.e.c; ++C) {
+      const cellAddress = XLSX.utils.encode_cell({ r: 0, c: C })
+
+      if (!worksheet[cellAddress]) continue
+
+      worksheet[cellAddress].s = {
+        font: {
+          bold: true,
+          color: { rgb: 'FFFFFF' },
+        },
+        fill: {
+          fgColor: { rgb: '1F2937' },
+        },
+        alignment: {
+          horizontal: 'center',
+          vertical: 'center',
+        },
+      }
+    }
+
+    // Formato columna precio
+    for (let R = 1; R <= range.e.r; ++R) {
+      const priceCell = XLSX.utils.encode_cell({ r: R, c: 2 })
+
+      if (worksheet[priceCell]) {
+        worksheet[priceCell].z = '$ #,##0.00'
+      }
+    }
+
+    // Crear workbook
+    const workbook = XLSX.utils.book_new()
+
+    XLSX.utils.book_append_sheet(
+      workbook,
+      worksheet,
+      'Lista Productos'
+    )
+
+    XLSX.writeFile(
+      workbook,
+      `Lista_Productos_${new Date().toISOString().slice(0, 10)}.xlsx`
+    )
+  }
+
   const paginated  = productos.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const totalPages = Math.max(1, Math.ceil(productos.length / PAGE_SIZE))
 
@@ -792,7 +987,19 @@ export default function Inventario() {
             >
               Actualizar Precios
             </Button>
-            <Button icon={PackagePlus} onClick={() => setModalNuevo(true)}>
+
+            <Button
+              variant="secondary"
+              icon={FileSpreadsheet}
+              onClick={exportarExcel}
+            >
+              Exportar Lista
+            </Button>
+
+            <Button
+              icon={PackagePlus}
+              onClick={() => setModalNuevo(true)}
+            >
               Nuevo Producto
             </Button>
           </div>
@@ -852,9 +1059,9 @@ export default function Inventario() {
             className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
                        font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer"
           >
-            <option value="all">Todas las categorías</option>
+            <option value="all" className="font-body">Todas las categorías</option>
             {categorias.map((c) => (
-              <option key={c.idCategoria} value={c.idCategoria}>{c.nombre}</option>
+              <option key={c.idCategoria} value={c.idCategoria} className="font-body">{c.nombre}</option>
             ))}
           </select>
 
@@ -865,9 +1072,9 @@ export default function Inventario() {
             className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
                        font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer"
           >
-            <option value="all">Todo el stock</option>
-            <option value="con">Con stock</option>
-            <option value="sin">Sin stock</option>
+            <option value="all" className="font-body">Todo el stock</option>
+            <option value="con" className="font-body">Con stock</option>
+            <option value="sin" className="font-body">Sin stock</option>
           </select>
         </div>
       </Card>
@@ -1014,6 +1221,7 @@ export default function Inventario() {
       <CatModal
         open={modalCat}
         onClose={() => setModalCat(false)}
+        categorias={categorias}
         onSaved={() => { load(); setToast('Categoría creada ✓') }}
       />
       <ActualizarPreciosModal

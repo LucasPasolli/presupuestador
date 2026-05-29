@@ -463,7 +463,7 @@ export default function Estadisticas() {
 
       {/* ── KPIs principales ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KpiCard icon={TrendingUp}  label="Facturado"       value={fmtCompacto(m.facturadoTotal)}   color="brand"
+        <KpiCard icon={TrendingUp}  label="Presupuestado"       value={fmtCompacto(m.facturadoTotal)}   color="brand"
           sub={`${m.totalPresupuestos} presupuesto${m.totalPresupuestos!==1?'s':''}`} />
         <KpiCard icon={Wallet}      label="Cobrado real"    value={fmtCompacto(m.cobradoReal)}       color="green"
           sub={`${pct(m.cobradoReal, m.facturadoTotal)} del total`} />
