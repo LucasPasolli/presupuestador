@@ -1,10 +1,11 @@
 // src/pages/Historial.jsx
 import { useState, useEffect, useCallback } from 'react'
+import Presupuestador from './Presupuestador'
 import { query, run } from '../lib/database'
 import { Card, PageHeader, Button, Badge, Modal } from '../components/ui'
 import {
   Search, ChevronDown, ChevronUp, ArrowLeft, FileText,
-  Clock, CheckCircle2, XCircle, ThumbsUp, AlertCircle, Trash2, Download
+  Clock, CheckCircle2, XCircle, ThumbsUp, AlertCircle, Trash2, Download, Pencil
 } from 'lucide-react'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -160,7 +161,7 @@ function descontarStock(idPresupuesto) {
 
 // ─── Vista detalle ─────────────────────────────────────────────────────────
 
-function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated }) {
+function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar }) {
   const [pres,       setPres]       = useState(presInit)
   const [detalles,   setDetalles]   = useState([])
   const [cliente,    setCliente]    = useState(null)
@@ -251,10 +252,18 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated }) {
             Presupuesto <span className="text-brand-400 font-mono">#{pres.idPresupuesto}</span>
           </span>
         </div>
-        <Button size="sm" variant="secondary" icon={Download}
-          onClick={() => generarPDFPresupuesto(pres.idPresupuesto)}>
-          Descargar PDF
-        </Button>
+        <div className="flex items-center gap-2">
+          {pres.estado === 'borrador' && (
+            <Button size="sm" variant="secondary" icon={Pencil}
+              onClick={() => onEditar(pres.idPresupuesto)}>
+              Editar
+            </Button>
+          )}
+          <Button size="sm" variant="secondary" icon={Download}
+            onClick={() => generarPDFPresupuesto(pres.idPresupuesto)}>
+            Descargar PDF
+          </Button>
+        </div>
       </div>
 
       {/* Cabecera */}
@@ -450,6 +459,7 @@ export default function Historial() {
   const [sortDir,      setSortDir]      = useState('desc')
   const [page,         setPage]         = useState(1)
   const [selected,     setSelected]     = useState(null)
+  const [editando,     setEditando]     = useState(null)  // idPresupuesto being edited
 
   const load = useCallback(() => {
     let sql = `
@@ -490,11 +500,33 @@ export default function Historial() {
   const hasFilters = search || filterMetodo!=='all' || filterEstado!=='all' || filterFechaD || filterFechaH
   const hasAnyFilter = hasFilters || soloExcepcion
 
+  // ── Modo edición: muestra el Presupuestador con datos cargados ──
+  if (editando) return (
+    <Presupuestador
+      presupuestoEditar={editando}
+      onEditarVolver={(id) => {
+        setEditando(null)
+        // Recarga y vuelve al detalle del presupuesto actualizado
+        const pActualizado = query(
+          `SELECT p.*, c.nombre AS clienteNombre, c.apellido AS clienteApellido, s.estado AS saldoEstado
+           FROM Presupuesto p
+           LEFT JOIN Cliente c ON c.idCliente = p.idCliente
+           LEFT JOIN Saldo   s ON s.idPresupuesto = p.idPresupuesto
+           WHERE p.idPresupuesto = ?`,
+          [id]
+        )[0]
+        if (pActualizado) setSelected(pActualizado)
+        load()
+      }}
+    />
+  )
+
   if (selected) return (
     <PresupuestoDetalle
       presupuesto={selected}
       onBack={()=>{ setSelected(null); load() }}
       onUpdated={load}
+      onEditar={(id) => { setEditando(id); setSelected(null) }}
     />
   )
 

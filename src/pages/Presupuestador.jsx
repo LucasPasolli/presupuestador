@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { query, run } from '../lib/database'
 import { Button, Card, PageHeader, Modal, Input } from '../components/ui'
-import { Plus, Trash2, Search, UserPlus, CheckCircle2, AlertCircle, Download, FileText } from 'lucide-react'
+import { Plus, Trash2, Search, UserPlus, CheckCircle2, AlertCircle, Download, FileText, ArrowLeft } from 'lucide-react'
 
 // ─── Constantes ────────────────────────────────────────────────────────────
 
@@ -449,8 +449,8 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError, onStockError }
 
 // ─── Selector método de pago ────────────────────────────────────────────────
 
-function MetodoPagoSelector({ metodoPago, onMetodoPago, excepcionFactor, onExcepcionFactor, excepcionSubMetodo, onExcepcionSubMetodo }) {
-  const [pct, setPct] = useState('')
+function MetodoPagoSelector({ metodoPago, onMetodoPago, excepcionFactor, onExcepcionFactor, excepcionSubMetodo, onExcepcionSubMetodo, initialPct }) {
+  const [pct, setPct] = useState(initialPct ?? '')
   const esExcepcion = metodoPago === 'excepcion'
 
   useEffect(() => {
@@ -622,12 +622,66 @@ async function generarPDFPresupuesto(idPresupuesto) {
 
 const ITEM_EMPTY = () => ({ idProducto: '', nombreProducto: '', cantidad: 1, precioUnitario: 0, medida: null })
 
-export default function Presupuestador() {
-  const [cliente,            setCliente]            = useState(null)
-  const [metodoPago,         setMetodoPago]          = useState('efectivo')
-  const [excepcionFactor,    setExcepcionFactor]     = useState(1)
-  const [excepcionSubMetodo, setExcepcionSubMetodo]  = useState('efectivo')
-  const [items,              setItems]               = useState([ITEM_EMPTY()])
+export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
+  // ── Modo edición: cargar datos existentes ──
+  const modoEdicion = !!presupuestoEditar
+
+  function cargarDatosEdicion() {
+    if (!presupuestoEditar) return {}
+    const pres = query(
+      'SELECT p.*, c.nombre, c.apellido, c.cuit, c.domicilio, c.telefono, c.mail FROM Presupuesto p JOIN Cliente c ON c.idCliente = p.idCliente WHERE p.idPresupuesto = ?',
+      [presupuestoEditar]
+    )[0]
+    if (!pres) return {}
+
+    const detalles = query(
+      `SELECT dp.*, pr.nombre AS nombreProducto FROM DetallePresupuesto dp
+       LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
+       WHERE dp.idPresupuesto = ? ORDER BY dp.idDetalle`,
+      [presupuestoEditar]
+    )
+
+    const clienteObj = {
+      idCliente: pres.idCliente,
+      nombre: pres.nombre,
+      apellido: pres.apellido,
+      cuit: pres.cuit,
+      domicilio: pres.domicilio,
+      telefono: pres.telefono,
+      mail: pres.mail,
+    }
+
+    const esExcepcionDB = pres.esExcepcion === 1
+    const factorDB = pres.montoOriginal > 0 ? pres.monto / pres.montoOriginal : 1
+    // Convertir factor → porcentaje para el campo de excepción: factor=0.92 → pct='8'
+    const pctDB = esExcepcionDB ? String(((1 - factorDB) * 100).toFixed(4).replace(/\.?0+$/, '')) : ''
+
+    const itemsDB = detalles.map(d => ({
+      idProducto: String(d.idProducto),
+      nombreProducto: d.nombreProducto ?? '',
+      cantidad: String(d.cantidad),
+      precioUnitario: d.precioUnitario,
+      medida: d.medida ?? null,
+    }))
+
+    return {
+      clienteObj,
+      metodoPagoInit: esExcepcionDB ? 'excepcion' : pres.metodoPago,
+      excepcionSubMetodoInit: esExcepcionDB ? pres.metodoPago : 'efectivo',
+      excepcionFactorInit: factorDB,
+      pctInit: pctDB,
+      itemsInit: itemsDB.length ? itemsDB : [ITEM_EMPTY()],
+    }
+  }
+
+  const init = cargarDatosEdicion()
+
+  const [cliente,            setCliente]            = useState(init.clienteObj ?? null)
+  const [metodoPago,         setMetodoPago]          = useState(init.metodoPagoInit ?? 'efectivo')
+  const [excepcionFactor,    setExcepcionFactor]     = useState(init.excepcionFactorInit ?? 1)
+  const [excepcionSubMetodo, setExcepcionSubMetodo]  = useState(init.excepcionSubMetodoInit ?? 'efectivo')
+  const [items,              setItems]               = useState(init.itemsInit ?? [ITEM_EMPTY()])
+  const [pctInit]                                    = useState(init.pctInit ?? '')
   const [guardado,           setGuardado]            = useState(null)
   const [error,              setError]               = useState('')
   const [toast,              setToast]               = useState('')
@@ -689,20 +743,44 @@ export default function Presupuestador() {
     // Para excepción guardamos el sub-método base en la columna metodoPago de la DB
     const metodoDb = esExcepcion ? excepcionSubMetodo : metodoPago
 
-    const idPresupuesto = run(
-      `INSERT INTO Presupuesto (idCliente, fecha, metodoPago, montoOriginal, monto, estado, esExcepcion) VALUES (?,?,?,?,?,'borrador',?)`,
-      [cliente.idCliente, fecha, metodoDb, subtotalOriginal, totalFinal, esExcepcion ? 1 : 0]
-    )
-    // Verificamos leyendo el ID real de la DB por si last_insert_rowid fue afectado
-    const presupuestoReal = query('SELECT MAX(idPresupuesto) as id FROM Presupuesto WHERE idCliente = ? AND fecha = ?', [cliente.idCliente, fecha])[0]?.id ?? idPresupuesto
+    let presupuestoReal
 
-    for (const it of validItems) {
-      const precio   = parseFloat(it.precioUnitario) || 0
-      const cantidad = parseInt(it.cantidad)
+    if (modoEdicion) {
+      // ── UPDATE: sobreescribir el presupuesto existente ──
       run(
-        `INSERT INTO DetallePresupuesto (idPresupuesto, idProducto, medida, cantidad, precioUnitario, subtotal) VALUES (?,?,?,?,?,?)`,
-        [idPresupuesto, parseInt(it.idProducto), it.medida || null, cantidad, precio, cantidad * precio]
+        `UPDATE Presupuesto SET idCliente=?, metodoPago=?, montoOriginal=?, monto=?, esExcepcion=? WHERE idPresupuesto=?`,
+        [cliente.idCliente, metodoDb, subtotalOriginal, totalFinal, esExcepcion ? 1 : 0, presupuestoEditar]
       )
+      // Reemplazar todos los detalles
+      run(`DELETE FROM DetallePresupuesto WHERE idPresupuesto = ?`, [presupuestoEditar])
+      for (const it of validItems) {
+        const precio   = parseFloat(it.precioUnitario) || 0
+        const cantidad = parseInt(it.cantidad)
+        run(
+          `INSERT INTO DetallePresupuesto (idPresupuesto, idProducto, medida, cantidad, precioUnitario, subtotal) VALUES (?,?,?,?,?,?)`,
+          [presupuestoEditar, parseInt(it.idProducto), it.medida || null, cantidad, precio, cantidad * precio]
+        )
+      }
+      presupuestoReal = presupuestoEditar
+      // Volver al historial/detalle directamente
+      if (onEditarVolver) { onEditarVolver(presupuestoReal); return }
+    } else {
+      // ── INSERT: presupuesto nuevo ──
+      const idPresupuesto = run(
+        `INSERT INTO Presupuesto (idCliente, fecha, metodoPago, montoOriginal, monto, estado, esExcepcion) VALUES (?,?,?,?,?,'borrador',?)`,
+        [cliente.idCliente, fecha, metodoDb, subtotalOriginal, totalFinal, esExcepcion ? 1 : 0]
+      )
+      // Verificamos leyendo el ID real de la DB por si last_insert_rowid fue afectado
+      presupuestoReal = query('SELECT MAX(idPresupuesto) as id FROM Presupuesto WHERE idCliente = ? AND fecha = ?', [cliente.idCliente, fecha])[0]?.id ?? idPresupuesto
+
+      for (const it of validItems) {
+        const precio   = parseFloat(it.precioUnitario) || 0
+        const cantidad = parseInt(it.cantidad)
+        run(
+          `INSERT INTO DetallePresupuesto (idPresupuesto, idProducto, medida, cantidad, precioUnitario, subtotal) VALUES (?,?,?,?,?,?)`,
+          [idPresupuesto, parseInt(it.idProducto), it.medida || null, cantidad, precio, cantidad * precio]
+        )
+      }
     }
 
     // El saldo CC se crea solo cuando el presupuesto sea APROBADO desde Historial
@@ -765,7 +843,19 @@ export default function Presupuestador() {
   return (
     <div className="max-w-5xl mx-auto space-y-6">
       {toast && <Toast message={toast} onDone={() => setToast('')} />}
-      <PageHeader title="Presupuestador" subtitle="Nuevo presupuesto" />
+      {modoEdicion && (
+        <div className="flex items-center gap-3">
+          <button onClick={() => onEditarVolver && onEditarVolver(presupuestoEditar)}
+            className="flex items-center gap-2 text-surface-400 hover:text-white text-sm font-body transition-colors">
+            <ArrowLeft size={16} />Volver al historial
+          </button>
+          <span className="text-surface-600">/</span>
+          <span className="text-surface-300 text-sm font-body">
+            Editando presupuesto <span className="text-brand-400 font-mono">#{presupuestoEditar}</span>
+          </span>
+        </div>
+      )}
+      <PageHeader title={modoEdicion ? 'Editar Presupuesto' : 'Presupuestador'} subtitle={modoEdicion ? `Modificando #${presupuestoEditar}` : 'Nuevo presupuesto'} />
 
       {/* Cabecera */}
       <Card className="p-6">
@@ -788,6 +878,7 @@ export default function Presupuestador() {
           onExcepcionFactor={setExcepcionFactor}
           excepcionSubMetodo={excepcionSubMetodo}
           onExcepcionSubMetodo={setExcepcionSubMetodo}
+          initialPct={pctInit}
         />
       </Card>
 
@@ -852,7 +943,7 @@ export default function Presupuestador() {
                 </div>
               )}
             </div>
-            <Button size="lg" onClick={guardar} className="w-full md:w-auto">Guardar Presupuesto</Button>
+            <Button size="lg" onClick={guardar} className="w-full md:w-auto">{modoEdicion ? 'Guardar Cambios' : 'Guardar Presupuesto'}</Button>
           </div>
         </div>
       </Card>
