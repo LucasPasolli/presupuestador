@@ -73,12 +73,54 @@ function cargarDatos(desde, hasta) {
           totalCliente:  0,
         }
       }
-      const items = (detallesPorPresupuesto[p.idPresupuesto] || []).map(d => ({
-        ...d,
-        // precio unitario neto = precio / 1.21 (sin IVA)
-        precioNeto: d.precioUnitario / 1.21,
-        subtotalNeto: d.subtotal / 1.21,
-      }))
+      const agrupados = {}
+
+      for (const d of (detallesPorPresupuesto[p.idPresupuesto] || [])) {
+        const key = d.idProducto
+
+        if (!agrupados[key]) {
+          agrupados[key] = {
+            ...d,
+            cantidad: 0,
+            subtotal: 0,
+          }
+        }
+
+        agrupados[key].cantidad += d.cantidad
+        agrupados[key].subtotal += d.subtotal
+      }
+
+      // Detectar porcentaje de ajuste aplicado al presupuesto
+      const subtotalBase = Object.values(agrupados)
+        .reduce((acc, d) => acc + d.subtotal, 0)
+
+      const factorAjuste =
+        subtotalBase > 0
+          ? p.monto / subtotalBase
+          : 1
+
+      const items = Object.values(agrupados).map(d => {
+        const subtotalAjustado = d.subtotal * factorAjuste
+
+        const precioUnitarioAjustado =
+          d.cantidad > 0
+            ? subtotalAjustado / d.cantidad
+            : 0
+
+        return {
+          ...d,
+
+          precioUnitario: precioUnitarioAjustado,
+
+          precioNeto: precioUnitarioAjustado / 1.21,
+
+          subtotalNeto: subtotalAjustado / 1.21,
+
+          subtotal: subtotalAjustado,
+
+          medida: '—',
+        }
+      })
       porCliente[key].presupuestos.push({ ...p, items })
       porCliente[key].totalCliente += p.monto
     }
@@ -111,7 +153,7 @@ async function generarPDF(grupos, titulo, desde, hasta) {
   const BORDE   = [220, 220, 220]
 
   // ── Encabezado de página ──────────────────────────────────────────────
-  function header(pageNum) {
+  function header() {
     doc.setFillColor(...NARANJA)
     doc.rect(0, 0, PW, 18, 'F')
 
@@ -122,7 +164,7 @@ async function generarPDF(grupos, titulo, desde, hasta) {
 
     doc.setFontSize(9)
     doc.setFont('helvetica', 'normal')
-    doc.text(`Pág. ${pageNum}`, PW - MR, 12, { align: 'right' })
+    doc.text(`Pág. ${doc.getNumberOfPages()}`, PW - MR, 12, { align: 'right' })
 
     // Título del documento
     doc.setFontSize(11)
@@ -138,14 +180,12 @@ async function generarPDF(grupos, titulo, desde, hasta) {
     return 38   // Y inicial del contenido
   }
 
-  let y       = header(1)
-  let pageNum = 1
+  let y = header()
 
   function checkPage(needed = 30) {
     if (y + needed > 280) {
       doc.addPage()
-      pageNum++
-      y = header(pageNum)
+      y = header()
     }
   }
 
@@ -227,10 +267,6 @@ async function generarPDF(grupos, titulo, desde, hasta) {
           2: { cellWidth: 14, halign: 'center' },
           3: { cellWidth: 36, halign: 'right' },
           4: { cellWidth: 36, halign: 'right' },
-        },
-        didDrawPage: () => {
-          pageNum++
-          y = header(pageNum)
         },
       })
 
