@@ -4,10 +4,108 @@ import { query, run } from '../lib/database'
 import { Card, PageHeader, Button, Badge, Modal } from '../components/ui'
 import {
   Search, ChevronDown, ChevronUp, ArrowLeft, FileText,
-  Clock, CheckCircle2, XCircle, ThumbsUp, AlertCircle, Trash2
+  Clock, CheckCircle2, XCircle, ThumbsUp, AlertCircle, Trash2, Download
 } from 'lucide-react'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
+
+// ─── Generador PDF (compartido con Presupuestador) ──────────────────────────
+
+async function generarPDFPresupuesto(idPresupuesto) {
+  const { default: jsPDF }     = await import('jspdf')
+  const { default: autoTable } = await import('jspdf-autotable')
+
+  const pres = query('SELECT p.*, c.nombre AS cNombre, c.apellido AS cApellido, c.cuit, c.telefono, c.mail FROM Presupuesto p JOIN Cliente c ON c.idCliente = p.idCliente WHERE p.idPresupuesto = ?', [idPresupuesto])[0]
+  if (!pres) return
+
+  const detalles = query(`
+    SELECT dp.*, pr.nombre AS nombreProducto
+    FROM DetallePresupuesto dp
+    LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
+    WHERE dp.idPresupuesto = ?
+    ORDER BY dp.idDetalle
+  `, [idPresupuesto])
+
+  const metodoLabel = { efectivo:'Efectivo', transferencia:'Transferencia', cc15:'CC 15 días', cc30:'CC 30 días' }
+  const fmtFechaLocal = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${d}/${m}/${y}` }
+
+  const doc  = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+  const PW   = 210
+  const ML   = 14
+
+  doc.setFillColor(200, 200, 200)
+  doc.rect(0, 0, PW, 18, 'F')
+  doc.setFontSize(13); doc.setFont('helvetica', 'bold'); doc.setTextColor(50,50,50)
+  doc.text('CLAUDIO RER GROUP', ML, 12)
+
+  doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(50,50,50)
+  doc.text(`PRESUPUESTO #${idPresupuesto}`, ML, 28)
+  doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(100,100,100)
+  doc.text(`Fecha: ${fmtFechaLocal(pres.fecha)}`, ML, 34)
+  doc.text(`Método de pago: ${metodoLabel[pres.metodoPago] ?? pres.metodoPago}`, ML, 39)
+
+  doc.setFontSize(9); doc.setFont('helvetica','bold'); doc.setTextColor(50,50,50)
+  doc.text('CLIENTE', PW - ML - 70, 26)
+  doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(100,100,100)
+  doc.text(`${pres.cNombre} ${pres.cApellido}`, PW - ML - 70, 32)
+  if (pres.cuit)     doc.text(`CUIT: ${pres.cuit}`,    PW - ML - 70, 37)
+  if (pres.telefono) doc.text(`Tel: ${pres.telefono}`, PW - ML - 70, 42)
+  if (pres.mail)     doc.text(pres.mail,               PW - ML - 70, 47)
+
+  autoTable(doc, {
+    startY: 55,
+    margin: { left: ML, right: ML },
+    head: [['Producto', 'Medida', 'Cant.', 'Precio Unit.', 'Subtotal']],
+    body: detalles.map(d => [
+      d.nombreProducto ?? `#${d.idProducto}`,
+      d.medida ?? '—',
+      d.cantidad,
+      fmt(d.precioUnitario),
+      fmt(d.subtotal),
+    ]),
+    styles:     { fontSize: 8, cellPadding: 2.5, textColor: [50,50,50] },
+    headStyles: { fillColor: [200,200,200], textColor: [60,60,60], fontStyle: 'bold' },
+    alternateRowStyles: { fillColor: [245,245,245] },
+    columnStyles: {
+      0: { cellWidth: 'auto' },
+      1: { cellWidth: 22, halign: 'center' },
+      2: { cellWidth: 16, halign: 'center' },
+      3: { cellWidth: 34, halign: 'right' },
+      4: { cellWidth: 34, halign: 'right' },
+    },
+  })
+
+  const finalY = doc.lastAutoTable.finalY + 6
+
+  doc.setDrawColor(220,220,220); doc.line(ML, finalY, PW - ML, finalY)
+  doc.setFontSize(8.5); doc.setFont('helvetica','normal'); doc.setTextColor(100,100,100)
+  doc.text('Subtotal (precio lista):', PW - ML - 70, finalY + 7)
+  doc.setFont('helvetica','normal'); doc.setTextColor(50,50,50)
+  doc.text(fmt(pres.montoOriginal), PW - ML, finalY + 7, { align: 'right' })
+
+  const ajuste = pres.monto - pres.montoOriginal
+  if (ajuste !== 0) {
+    const factorAplicado = pres.montoOriginal > 0 ? pres.monto / pres.montoOriginal : 1
+    const pctDiff = ((factorAplicado - 1) * 100)
+    const pctLbl  = pctDiff < 0
+      ? `${Math.abs(pctDiff).toFixed(1)}% descuento`
+      : `${pctDiff.toFixed(1)}% recargo`
+    doc.setFontSize(8.5); doc.setTextColor(100,100,100)
+    doc.text(`Ajuste (${pctLbl}):`, PW - ML - 70, finalY + 13)
+    doc.setTextColor(50,50,50)
+    doc.text(`${ajuste < 0 ? '- ' : '+ '}${fmt(Math.abs(ajuste))}`, PW - ML, finalY + 13, { align: 'right' })
+  }
+
+  doc.setFillColor(200,200,200)
+  doc.roundedRect(ML, finalY + 18, PW - ML*2, 12, 2, 2, 'F')
+  doc.setFontSize(10); doc.setFont('helvetica','bold'); doc.setTextColor(50,50,50)
+  doc.text('TOTAL', ML + 4, finalY + 26)
+  doc.text(fmt(pres.monto), PW - ML - 4, finalY + 26, { align: 'right' })
+
+  doc.save(`Presupuesto_${idPresupuesto}_${pres.cNombre}_${pres.cApellido}.pdf`)
+}
+
+
 
 const METODOS_PAGO = {
   efectivo:      { label: 'Efectivo',         badge: 'green'  },
@@ -153,7 +251,10 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated }) {
             Presupuesto <span className="text-brand-400 font-mono">#{pres.idPresupuesto}</span>
           </span>
         </div>
-
+        <Button size="sm" variant="secondary" icon={Download}
+          onClick={() => generarPDFPresupuesto(pres.idPresupuesto)}>
+          Descargar PDF
+        </Button>
       </div>
 
       {/* Cabecera */}
@@ -359,8 +460,16 @@ export default function Historial() {
       WHERE 1=1`
     const params = []
     if (search.trim()) {
-      sql += ` AND (p.idPresupuesto=? OR c.nombre LIKE ? OR c.apellido LIKE ?)`
-      params.push(parseInt(search)||-1, `%${search.trim()}%`, `%${search.trim()}%`)
+      const parts = search.trim().split(/\s+/)
+      if (parts.length >= 2) {
+        // Con espacios: intentar buscar por nombre + apellido en ambos órdenes
+        const p1 = parts[0], p2 = parts.slice(1).join(' ')
+        sql += ` AND (p.idPresupuesto=? OR (c.nombre LIKE ? AND c.apellido LIKE ?) OR (c.nombre LIKE ? AND c.apellido LIKE ?) OR c.nombre LIKE ? OR c.apellido LIKE ?)`
+        params.push(parseInt(search)||-1, `%${p1}%`, `%${p2}%`, `%${p2}%`, `%${p1}%`, `%${search.trim()}%`, `%${search.trim()}%`)
+      } else {
+        sql += ` AND (p.idPresupuesto=? OR c.nombre LIKE ? OR c.apellido LIKE ?)`
+        params.push(parseInt(search)||-1, `%${search.trim()}%`, `%${search.trim()}%`)
+      }
     }
     if (filterMetodo !== 'all') { sql += ` AND p.metodoPago=?`; params.push(filterMetodo) }
     if (filterEstado !== 'all') { sql += ` AND p.estado=?`;     params.push(filterEstado) }
@@ -378,7 +487,8 @@ export default function Historial() {
   const totalPages = Math.max(1, Math.ceil(presupuestos.length/PAGE_SIZE))
   const totalMonto = presupuestos.filter(p => p.estado === 'pagado' || (p.saldoEstado === 'pagado')).reduce((a,p) => a+p.monto, 0)
   const pendCobro  = presupuestos.filter(p => p.saldoEstado === 'pendiente').length
-  const hasFilters = search || filterMetodo!=='all' || filterEstado!=='all' || soloExcepcion || filterFechaD || filterFechaH
+  const hasFilters = search || filterMetodo!=='all' || filterEstado!=='all' || filterFechaD || filterFechaH
+  const hasAnyFilter = hasFilters || soloExcepcion
 
   if (selected) return (
     <PresupuestoDetalle
@@ -417,17 +527,38 @@ export default function Historial() {
                          text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all" />
           </div>
 
-          <select value={filterEstado} onChange={e=>setFilterEstado(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer">
-            <option value="all">Todos los estados</option>
-            {Object.entries(ESTADOS).map(([v,s]) => <option key={v} value={v}>{s.label}</option>)}
-          </select>
+          {(() => {
+            const metodosFiltrados = Object.entries(METODOS_PAGO).filter(([v]) => {
+              const esCC = v === 'cc15' || v === 'cc30'
+              if (filterEstado === 'pagado'   && esCC)  return false
+              if (filterEstado === 'aprobado' && !esCC) return false
+              return true
+            })
+            return (
+              <select value={filterMetodo} onChange={e=>{ setFilterMetodo(e.target.value); setFilterEstado('all') }}
+                className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer">
+                <option value="all">Todos los métodos</option>
+                {metodosFiltrados.map(([v,m]) => <option key={v} value={v}>{m.label}</option>)}
+              </select>
+            )
+          })()}
 
-          <select value={filterMetodo} onChange={e=>setFilterMetodo(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer">
-            <option value="all">Todos los métodos</option>
-            {Object.entries(METODOS_PAGO).map(([v,m]) => <option key={v} value={v}>{m.label}</option>)}
-          </select>
+          {(() => {
+            const esCC = filterMetodo === 'cc15' || filterMetodo === 'cc30'
+            const esEfectTransf = filterMetodo === 'efectivo' || filterMetodo === 'transferencia'
+            const estadosFiltrados = Object.entries(ESTADOS).filter(([v]) => {
+              if (v === 'pagado'   && esCC)          return false
+              if (v === 'aprobado' && esEfectTransf) return false
+              return true
+            })
+            return (
+              <select value={filterEstado} onChange={e=>{ setFilterEstado(e.target.value); setFilterMetodo('all') }}
+                className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer">
+                <option value="all">Todos los estados</option>
+                {estadosFiltrados.map(([v,s]) => <option key={v} value={v}>{s.label}</option>)}
+              </select>
+            )
+          })()}
 
           {/* Checkbox excepción */}
           <label className="flex items-center gap-2 cursor-pointer select-none bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 transition-all hover:border-surface-500">
@@ -452,12 +583,7 @@ export default function Historial() {
             {sortDir==='desc'?<><ChevronDown size={15}/>Más recientes</>:<><ChevronUp size={15}/>Más antiguos</>}
           </button>
 
-          {hasFilters && (
-            <button onClick={()=>{setSearch('');setFilterMetodo('all');setFilterEstado('all');setSoloExcepcion(false);setFilterFechaD('');setFilterFechaH('')}}
-              className="text-surface-400 hover:text-red-400 text-xs font-body transition-colors">
-              × Limpiar
-            </button>
-          )}
+
         </div>
       </Card>
 
