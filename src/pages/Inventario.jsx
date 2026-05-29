@@ -978,7 +978,7 @@ export default function Inventario() {
         subtitle="Gestión de productos"
         actions={
           <div className="flex gap-2">
-            <Button variant="secondary" size="sm" onClick={() => setModalCat(true)}>
+            <Button variant="secondary" onClick={() => setModalCat(true)}>
               + Categoría
             </Button>
             <Button

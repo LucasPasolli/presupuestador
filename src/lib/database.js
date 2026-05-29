@@ -127,6 +127,7 @@ function runSchema() {
       idCliente      INTEGER NOT NULL,
       fechaInicio    TEXT NOT NULL,
       fechaFin       TEXT NOT NULL,
+      fechaPago      TEXT,
       monto          REAL NOT NULL,
       estado         TEXT NOT NULL DEFAULT 'pendiente' CHECK(estado IN ('pendiente','pagado')),
       FOREIGN KEY (idPresupuesto) REFERENCES Presupuesto(idPresupuesto) ON DELETE CASCADE,
@@ -198,6 +199,14 @@ function runMigrations() {
   if (!yaExistePP) {
     db.run(`ALTER TABLE Producto ADD COLUMN precioProveedor REAL DEFAULT 0`)
     db.run(`UPDATE Producto SET precioProveedor = 0 WHERE precioProveedor IS NULL`)
+    persistDB()
+  }
+
+  // v7 → v8: agrega fechaPago a Saldo (fecha efectiva de cobro, distinta de fechaFin que es el vencimiento).
+  const colsSaldo = db.exec(`PRAGMA table_info(Saldo)`)[0]?.values ?? []
+  const yaExisteFP = colsSaldo.some(row => row[1] === 'fechaPago')
+  if (!yaExisteFP) {
+    db.run(`ALTER TABLE Saldo ADD COLUMN fechaPago TEXT`)
     persistDB()
   }
 }

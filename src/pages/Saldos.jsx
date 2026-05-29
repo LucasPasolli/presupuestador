@@ -86,7 +86,9 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
   }, [saldo.idPresupuesto, saldo.idCliente])
 
   function marcarPagado() {
-    run(`UPDATE Saldo SET estado = 'pagado' WHERE idSaldo = ?`, [saldo.idSaldo])
+    const hoy = new Date().toISOString().slice(0, 10)
+    run(`UPDATE Saldo SET estado = 'pagado', fechaPago = ? WHERE idSaldo = ?`, [hoy, saldo.idSaldo])
+    run(`UPDATE Presupuesto SET estado = 'pagado' WHERE idPresupuesto = ?`, [saldo.idPresupuesto])
     setConfirmPago(false)
     onUpdated('Saldo marcado como pagado ✓ — ingreso registrado')
     onBack()

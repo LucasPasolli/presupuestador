@@ -30,26 +30,39 @@ const METODOS_EFECTIVO    = ['efectivo']
 // ─── Lógica de datos ───────────────────────────────────────────────────────
 
 function cargarDatos(desde, hasta) {
-  // Traemos todos los presupuestos del período con su cliente y detalles
+  // Solo presupuestos con estado 'pagado' cuyo Saldo tiene estado 'pagado' (cobrado)
+  // y cuya fechaPago (fecha efectiva de cobro) cae dentro del período seleccionado.
+  // Presupuestos a facturar:
+  // - Con Saldo (CC/transferencia con CC): p.estado='pagado', s.estado='pagado', fecha = s.fechaPago
+  // - Sin Saldo (efectivo/transferencia directa): p.estado='pagado', fecha = p.fecha
   const presupuestos = query(`
     SELECT p.idPresupuesto, p.idCliente, p.fecha, p.metodoPago, p.monto, p.montoOriginal,
-           c.nombre AS clienteNombre, c.apellido AS clienteApellido, c.cuit
+           c.nombre AS clienteNombre, c.apellido AS clienteApellido, c.cuit,
+           s.fechaPago,
+           COALESCE(s.fechaPago, p.fecha) AS fechaFacturacion
     FROM Presupuesto p
     JOIN Cliente c ON c.idCliente = p.idCliente
-    WHERE p.fecha >= ? AND p.fecha <= ?
-      AND p.estado IN ('pagado','aprobado')
+    LEFT JOIN Saldo s ON s.idPresupuesto = p.idPresupuesto
+    WHERE p.estado = 'pagado'
+      AND (
+        (s.idSaldo IS NOT NULL AND s.estado = 'pagado' AND s.fechaPago >= ? AND s.fechaPago <= ?)
+        OR
+        (s.idSaldo IS NULL AND p.fecha >= ? AND p.fecha <= ?)
+      )
     ORDER BY p.idCliente, p.idPresupuesto
-  `, [desde, hasta])
+  `, [desde, hasta, desde, hasta])
 
+  const ids = presupuestos.map(p => p.idPresupuesto)
+  if (ids.length === 0) return { noEfectivo: [], efectivo: [] }
+
+  const placeholders = ids.map(() => '?').join(',')
   const detalles = query(`
     SELECT dp.idPresupuesto, dp.idProducto, dp.cantidad, dp.precioUnitario, dp.subtotal, dp.medida,
            pr.nombre AS nombreProducto
     FROM DetallePresupuesto dp
-    JOIN Presupuesto p  ON p.idPresupuesto = dp.idPresupuesto
-    JOIN Producto   pr ON pr.idProducto    = dp.idProducto
-    WHERE p.fecha >= ? AND p.fecha <= ?
-      AND p.estado IN ('pagado','aprobado')
-  `, [desde, hasta])
+    JOIN Producto pr ON pr.idProducto = dp.idProducto
+    WHERE dp.idPresupuesto IN (${placeholders})
+  `, ids)
 
   // Indexar detalles por presupuesto
   const detallesPorPresupuesto = {}
@@ -228,7 +241,7 @@ async function generarPDF(grupos, titulo, desde, hasta) {
       doc.setTextColor(120, 120, 120)
       const metodoLabel = { efectivo: 'Efectivo', transferencia: 'Transferencia', cc15: 'CC 15d', cc30: 'CC 30d' }
       doc.text(
-        `Presupuesto #${pres.idPresupuesto} — ${fmtFecha(pres.fecha)} — ${metodoLabel[pres.metodoPago] ?? pres.metodoPago}`,
+        `Presupuesto #${pres.idPresupuesto} — ${fmtFecha(pres.fechaFacturacion)} — ${metodoLabel[pres.metodoPago] ?? pres.metodoPago}`,
         ML + 4, y
       )
       y += 5
@@ -245,16 +258,15 @@ async function generarPDF(grupos, titulo, desde, hasta) {
       autoTable(doc, {
         startY: y,
         margin: { left: ML, right: MR },
-        head: [['Producto', 'Medida', 'Cant.', 'P. Unit. (sin IVA)', 'Subtotal (sin IVA)']],
+        head: [['Producto', 'Cant.', 'P. Unit. (sin IVA)', 'Subtotal (sin IVA)']],
         body: pres.items.map(it => [
           it.nombreProducto ?? `#${it.idProducto}`,
-          it.medida ?? '—',
           it.cantidad,
           fmt(it.precioNeto),
           fmt(it.subtotalNeto),
         ]),
         foot: [[
-          { content: 'Total con IVA', colSpan: 4, styles: { halign: 'right', fontStyle: 'bold' } },
+          { content: 'Total con IVA', colSpan: 3, styles: { halign: 'right', fontStyle: 'bold' } },
           { content: fmt(pres.monto), styles: { fontStyle: 'bold', textColor: NARANJA } },
         ]],
         styles:     { fontSize: 7.5, cellPadding: 2.5, textColor: GRIS },
@@ -263,10 +275,9 @@ async function generarPDF(grupos, titulo, desde, hasta) {
         alternateRowStyles: { fillColor: [252, 252, 252] },
         columnStyles: {
           0: { cellWidth: 'auto' },
-          1: { cellWidth: 20, halign: 'center' },
-          2: { cellWidth: 14, halign: 'center' },
+          1: { cellWidth: 14, halign: 'center' },
+          2: { cellWidth: 36, halign: 'right' },
           3: { cellWidth: 36, halign: 'right' },
-          4: { cellWidth: 36, halign: 'right' },
         },
       })
 
@@ -337,7 +348,7 @@ function VistaPrevia({ grupos, titulo }) {
             <div key={pres.idPresupuesto} className="border-b border-surface-700/50 last:border-0">
               <div className="px-4 py-2 bg-surface-800/60 flex items-center gap-3">
                 <span className="text-surface-400 text-xs font-mono">#{pres.idPresupuesto}</span>
-                <span className="text-surface-400 text-xs font-body">{fmtFecha(pres.fecha)}</span>
+                <span className="text-surface-400 text-xs font-body">{fmtFecha(pres.fechaFacturacion)}</span>
                 <Badge color={
                   pres.metodoPago === 'efectivo' ? 'green' :
                   pres.metodoPago === 'transferencia' ? 'blue' : 'yellow'
@@ -351,7 +362,6 @@ function VistaPrevia({ grupos, titulo }) {
                   <thead>
                     <tr className="border-b border-surface-700/30">
                       <th className="text-left text-surface-500 py-1.5 px-4 font-body">Producto</th>
-                      <th className="text-center text-surface-500 py-1.5 px-2 font-body">Med.</th>
                       <th className="text-center text-surface-500 py-1.5 px-2 font-body">Cant.</th>
                       <th className="text-right text-surface-500 py-1.5 px-2 font-body">P.Unit s/IVA</th>
                       <th className="text-right text-surface-500 py-1.5 px-4 font-body">Subtotal s/IVA</th>
@@ -361,7 +371,6 @@ function VistaPrevia({ grupos, titulo }) {
                     {pres.items.map((it, i) => (
                       <tr key={i} className="border-b border-surface-700/20 last:border-0">
                         <td className="py-1.5 px-4 text-surface-200">{it.nombreProducto ?? `#${it.idProducto}`}</td>
-                        <td className="py-1.5 px-2 text-center text-surface-400">{it.medida ?? '—'}</td>
                         <td className="py-1.5 px-2 text-center text-surface-200 font-mono">{it.cantidad}</td>
                         <td className="py-1.5 px-2 text-right text-surface-200 font-mono">{fmt(it.precioNeto)}</td>
                         <td className="py-1.5 px-4 text-right text-surface-200 font-mono">{fmt(it.subtotalNeto)}</td>
@@ -370,7 +379,7 @@ function VistaPrevia({ grupos, titulo }) {
                   </tbody>
                   <tfoot>
                     <tr className="bg-surface-700/20">
-                      <td colSpan={4} className="py-1.5 px-4 text-right text-surface-400 text-xs">Total c/IVA:</td>
+                      <td colSpan={3} className="py-1.5 px-4 text-right text-surface-400 text-xs">Total c/IVA:</td>
                       <td className="py-1.5 px-4 text-right text-brand-400 font-mono font-bold">{fmt(pres.monto)}</td>
                     </tr>
                   </tfoot>
