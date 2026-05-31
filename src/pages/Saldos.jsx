@@ -175,7 +175,7 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
           </div>
 
           {/* Cliente */}
-          <div className="bg-surface-700 rounded-xl p-4 col-span-2">
+          <div className={`bg-surface-700 rounded-xl p-4 ${esPendiente ? 'col-span-2' : ''}`}>
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1 flex items-center gap-1">
               <User size={11} />Cliente
             </p>
@@ -194,6 +194,19 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
               <p className="text-surface-400 text-sm font-mono">ID #{saldo.idCliente}</p>
             )}
           </div>
+
+          {/* Fecha de pago — solo visible cuando el saldo está pagado */}
+          {!esPendiente && (
+            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4">
+              <p className="text-emerald-400 text-xs uppercase tracking-widest font-body mb-1 flex items-center gap-1">
+                <CheckCircle2 size={11} />Fecha de pago
+              </p>
+              <p className="text-emerald-300 text-sm font-mono font-semibold">
+                {fmtFecha(saldo.fechaPago)}
+              </p>
+              <p className="text-emerald-600 text-xs font-body mt-0.5">Cobro efectivizado</p>
+            </div>
+          )}
         </div>
       </Card>
 
@@ -310,9 +323,9 @@ export default function Saldos() {
     if (filterEst !== 'all') { sql += ` AND s.estado = ?`; params.push(filterEst) }
 
     if (search.trim()) {
-      sql += ` AND (c.nombre LIKE ? OR c.apellido LIKE ? OR CAST(s.idPresupuesto AS TEXT) = ? OR CAST(s.idSaldo AS TEXT) = ?)`
+      sql += ` AND (c.nombre LIKE ? OR c.apellido LIKE ? OR (c.nombre || ' ' || c.apellido) LIKE ? OR CAST(s.idPresupuesto AS TEXT) = ? OR CAST(s.idSaldo AS TEXT) = ?)`
       const s = search.trim()
-      params.push(`%${s}%`, `%${s}%`, s, s)
+      params.push(`%${s}%`, `%${s}%`, `%${s}%`, s, s)
     }
 
     // Orden: pendientes por urgencia (días restantes ASC = más urgente primero), pagados por fecha DESC
