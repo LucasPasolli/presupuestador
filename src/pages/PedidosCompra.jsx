@@ -1,5 +1,6 @@
 // src/pages/PedidosCompra.jsx
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { query, run } from '../lib/database'
 import { Card, PageHeader, Button, Badge, Modal } from '../components/ui'
 import {
@@ -28,53 +29,62 @@ function Toast({ message, onDone }) {
     const t = setTimeout(onDone, 3500)
     return () => clearTimeout(t)
   }, [onDone])
-  return (
+  return createPortal(
     <div className="fixed top-5 right-5 z-[9999] pointer-events-none">
       <div className="flex items-center gap-3 bg-emerald-900/95 border border-emerald-500/50
                       rounded-2xl px-5 py-3 shadow-2xl animate-slide-up">
         <CheckCircle2 size={18} className="text-emerald-400 flex-shrink-0" />
         <span className="text-emerald-100 text-sm font-body">{message}</span>
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
 // ─── Dropdown de productos con posición fixed ───────────────────────────────
 
-function ProductoDropdown({ results, anchorRef, onSelect, searchText }) {
-  const [pos, setPos] = useState({ top: 0, left: 0, width: 320, realMaxH: 260 })
+function ProductoDropdown({ results, anchorRef, dropRef, onSelect, searchText }) {
+  const [pos, setPos] = useState(null)
 
-  const recalc = useCallback(() => {
-    if (!anchorRef.current) return
-    const rect       = anchorRef.current.getBoundingClientRect()
-    const maxH       = 260
-    const spaceBelow = window.innerHeight - rect.bottom - 8
-    const spaceAbove = rect.top - 8
-    const openUp     = spaceBelow < maxH && spaceAbove > spaceBelow
-    const topFixed   = openUp ? rect.top - Math.min(maxH, spaceAbove) - 4 : rect.bottom + 4
-    const realMaxH   = openUp ? Math.min(maxH, spaceAbove) : Math.min(maxH, spaceBelow)
-    setPos({ top: topFixed, left: rect.left, width: Math.max(rect.width, 320), realMaxH })
-  }, [])
-
-  useEffect(() => {
-    recalc()
-    window.addEventListener('scroll', recalc, true)
-    window.addEventListener('resize', recalc)
-    return () => {
-      window.removeEventListener('scroll', recalc, true)
-      window.removeEventListener('resize', recalc)
+  useLayoutEffect(() => {
+    const calc = () => {
+      if (!anchorRef.current) return
+      const rect       = anchorRef.current.getBoundingClientRect()
+      const maxH       = 260
+      const spaceBelow = window.innerHeight - rect.bottom - 8
+      const spaceAbove = rect.top - 8
+      const openUp     = spaceBelow < maxH && spaceAbove > spaceBelow
+      const top        = openUp ? rect.top - Math.min(maxH, spaceAbove) - 4 : rect.bottom + 4
+      const realMaxH   = openUp ? Math.min(maxH, spaceAbove) : Math.min(maxH, spaceBelow)
+      setPos({ top, left: rect.left, width: Math.max(rect.width, 320), maxH: realMaxH })
     }
-  }, [recalc])
+    const id = requestAnimationFrame(calc)
+    window.addEventListener('scroll', calc, true)
+    window.addEventListener('resize', calc)
+    return () => {
+      cancelAnimationFrame(id)
+      window.removeEventListener('scroll', calc, true)
+      window.removeEventListener('resize', calc)
+    }
+  }, [anchorRef, results])
 
-  return (
-    <div style={{
-      position: 'fixed', top: `${pos.top}px`, left: `${pos.left}px`,
-      width: `${pos.width}px`, zIndex: 9999, maxHeight: `${pos.realMaxH}px`, overflowY: 'auto'
-    }} className="bg-surface-800 border border-surface-600 rounded-xl shadow-2xl">
+  if (!pos) return null
+
+  return createPortal(
+    <div
+      ref={dropRef}
+      style={{
+        position: 'fixed', top: pos.top, left: pos.left,
+        width: pos.width, zIndex: 9999, maxHeight: pos.maxH, overflowY: 'auto'
+      }}
+      className="bg-surface-800 border border-surface-600 rounded-xl shadow-2xl"
+    >
       {results.length === 0
         ? <p className="px-4 py-3 text-surface-300 text-xs font-body">Sin resultados para "{searchText}"</p>
         : results.map(p => (
-          <button key={p.idProducto} onClick={() => onSelect(p)}
+          <button key={p.idProducto}
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => onSelect(p)}
             className="w-full text-left px-3 py-2.5 hover:bg-surface-700 transition-colors border-b border-surface-700/60 last:border-0">
             <p className="text-white text-xs font-body leading-tight">{p.nombre}</p>
             <p className="text-surface-400 text-xs font-mono mt-0.5">
@@ -83,7 +93,8 @@ function ProductoDropdown({ results, anchorRef, onSelect, searchText }) {
           </button>
         ))
       }
-    </div>
+    </div>,
+    document.body
   )
 }
 
@@ -96,10 +107,13 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
   const [medidas,        setMedidas]        = useState([])
   const inputRef = useRef(null)
   const wrapRef  = useRef(null)
+  const dropRef  = useRef(null)
 
   useEffect(() => {
     const handler = e => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target)) setShowDrop(false)
+      const inWrap = wrapRef.current && wrapRef.current.contains(e.target)
+      const inDrop = dropRef.current && dropRef.current.contains(e.target)
+      if (!inWrap && !inDrop) setShowDrop(false)
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
@@ -174,7 +188,7 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
           placeholder="Nombre del producto..."
           className={cell + ' w-full'} />
         {showDrop && (
-          <ProductoDropdown results={nombreResults} anchorRef={inputRef}
+          <ProductoDropdown results={nombreResults} anchorRef={inputRef} dropRef={dropRef}
             onSelect={seleccionarProducto} searchText={nombreSearch} />
         )}
       </td>
@@ -514,21 +528,26 @@ function NuevoPedido({ onGuardado, onCancelar }) {
 const PAGE_SIZE = 20
 
 export default function PedidosCompra() {
-  const [pedidos,    setPedidos]    = useState([])
-  const [vista,      setVista]      = useState('lista')   // 'lista' | 'nuevo' | 'detalle'
-  const [selected,   setSelected]   = useState(null)
-  const [filterEst,  setFilterEst]  = useState('all')
-  const [page,       setPage]       = useState(1)
-  const [toast,      setToast]      = useState('')
+  const [pedidos,      setPedidos]      = useState([])
+  const [vista,        setVista]        = useState('lista')   // 'lista' | 'nuevo' | 'detalle'
+  const [selected,     setSelected]     = useState(null)
+  const [filterEst,    setFilterEst]    = useState('all')
+  const [filterProv,   setFilterProv]   = useState('')
+  const [filterDesde,  setFilterDesde]  = useState('')
+  const [filterHasta,  setFilterHasta]  = useState('')
+  const [page,         setPage]         = useState(1)
+  const [toast,        setToast]        = useState('')
 
   const load = useCallback(() => {
     let sql = `SELECT * FROM PedidoCompra WHERE 1=1`
     const params = []
-    if (filterEst !== 'all') { sql += ` AND estado = ?`; params.push(filterEst) }
+    if (filterEst !== 'all') { sql += ` AND estado = ?`;    params.push(filterEst) }
+    if (filterDesde)         { sql += ` AND fecha >= ?`;    params.push(filterDesde) }
+    if (filterHasta)         { sql += ` AND fecha <= ?`;    params.push(filterHasta) }
     sql += ` ORDER BY idPedido DESC`
     setPedidos(query(sql, params))
     setPage(1)
-  }, [filterEst])
+  }, [filterEst, filterDesde, filterHasta])
 
   useEffect(() => { load() }, [load])
 
@@ -536,8 +555,16 @@ export default function PedidosCompra() {
   const totalPendiente = pedidos.filter(p => p.estado === 'pendiente').reduce((a, p) => a + p.monto, 0)
   const totalPagado    = pedidos.filter(p => p.estado === 'pagado').reduce((a, p) => a + p.monto, 0)
 
-  const paginated  = pedidos.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
-  const totalPages = Math.max(1, Math.ceil(pedidos.length / PAGE_SIZE))
+  // Client-side filter by proveedor name or ID (stored in notes/proveedor field if present, else filter by idPedido text)
+  const filteredPedidos = filterProv.trim()
+    ? pedidos.filter(p =>
+        String(p.idPedido).includes(filterProv.trim()) ||
+        (p.proveedor && p.proveedor.toLowerCase().includes(filterProv.trim().toLowerCase()))
+      )
+    : pedidos
+
+  const paginated  = filteredPedidos.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const totalPages = Math.max(1, Math.ceil(filteredPedidos.length / PAGE_SIZE))
 
   function abrirDetalle(p) { setSelected(p); setVista('detalle') }
   function volverLista()   { setSelected(null); setVista('lista'); load() }
@@ -558,6 +585,7 @@ export default function PedidosCompra() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
+      {/* Toast rendered as fixed overlay — no layout impact */}
       {toast && <Toast message={toast} onDone={() => setToast('')} />}
 
       <PageHeader
@@ -582,22 +610,103 @@ export default function PedidosCompra() {
         ))}
       </div>
 
-      {/* Filtro estado */}
+      {/* Filtros */}
       <Card className="p-4">
-        <div className="flex gap-2">
-          {[
-            { value: 'all',       label: 'Todos' },
-            { value: 'pendiente', label: 'Pendientes de pago' },
-            { value: 'pagado',    label: 'Pagados' },
-          ].map(({ value, label }) => (
-            <button key={value} onClick={() => setFilterEst(value)}
-              className={`px-4 py-2 rounded-xl text-sm font-body border transition-all
-                ${filterEst === value
-                  ? 'bg-brand-500/15 border-brand-500/40 text-white'
-                  : 'bg-surface-700 border-surface-600 text-surface-400 hover:border-surface-500'}`}>
-              {label}
-            </button>
-          ))}
+        <div className="flex items-end gap-2 flex-nowrap overflow-x-auto">
+
+          {/* Buscador */}
+          <div className="w-[300px] flex-shrink-0">
+
+            <div className="relative">
+              <Search
+                size={13}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-500 pointer-events-none"
+              />
+
+              <input
+                type="text"
+                value={filterProv}
+                onChange={e => {
+                  setFilterProv(e.target.value)
+                  setPage(1)
+                }}
+                placeholder="Buscar por proveedor o ID de pedido..."
+                className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2 text-white
+                        text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
+              />
+            </div>
+          </div>
+
+          {/* Filtros */}
+          <div className="flex flex-wrap gap-2 flex-1 items-end">
+
+            {[
+              { value: 'all', label: 'Todos' },
+              { value: 'pendiente', label: 'Pendientes' },
+              { value: 'pagado', label: 'Pagados' },
+            ].map(({ value, label }) => (
+              <button
+                key={value}
+                onClick={() => setFilterEst(value)}
+                className={`px-4 py-2.5 rounded-xl text-sm font-body border transition-all whitespace-nowrap flex items-center justify-center
+                ${
+                  filterEst === value
+                    ? 'bg-brand-500/15 border-brand-500/40 text-white'
+                    : 'bg-surface-700 border-surface-600 text-surface-400 hover:border-surface-500'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+
+            <div className="flex flex-col gap-1 min-w-[150px]">
+              <span className="text-surface-400 text-xs font-body px-1">
+                DESDE
+              </span>
+
+              <input
+                type="date"
+                value={filterDesde}
+                onChange={e => setFilterDesde(e.target.value)}
+                className="w-full bg-surface-700 border border-surface-600 rounded-xl
+                          px-3 py-2.5 text-white text-sm font-mono
+                          focus:outline-none focus:border-brand-500 transition-all"
+              />
+            </div>
+
+            <div className="flex flex-col gap-1 min-w-[150px]">
+              <span className="text-surface-400 text-xs font-body px-1">
+                HASTA
+              </span>
+
+              <input
+                type="date"
+                value={filterHasta}
+                onChange={e => setFilterHasta(e.target.value)}
+                className="w-full bg-surface-700 border border-surface-600 rounded-xl
+                          px-3 py-2.5 text-white text-sm font-mono
+                          focus:outline-none focus:border-brand-500 transition-all"
+              />
+            </div>
+
+            {(filterProv || filterDesde || filterHasta) && (
+              <button
+                onClick={() => {
+                  setFilterProv('')
+                  setFilterDesde('')
+                  setFilterHasta('')
+                  setPage(1)
+                }}
+                className="px-3 py-2 rounded-xl text-xs font-body
+                          border border-surface-600 text-surface-400
+                          hover:text-white hover:border-surface-500
+                          transition-all bg-surface-700 whitespace-nowrap"
+              >
+                Limpiar
+              </button>
+            )}
+
+          </div>
         </div>
       </Card>
 
@@ -634,18 +743,19 @@ export default function PedidosCompra() {
           </table>
         </div>
 
-        {pedidos.length === 0 && (
+        {filteredPedidos.length === 0 && (
           <div className="flex flex-col items-center py-16 gap-3 text-surface-500">
             <ShoppingCart size={32} className="opacity-30" />
-            <p className="font-body text-sm">Sin pedidos registrados.</p>
-            <Button size="sm" onClick={() => setVista('nuevo')}>Crear el primero</Button>
+            <p className="font-body text-sm">
+              {pedidos.length === 0 ? 'Sin pedidos registrados.' : 'No hay pedidos que coincidan con los filtros.'}
+            </p>
           </div>
         )}
 
         {totalPages > 1 && (
           <div className="flex items-center justify-between px-6 py-3 border-t border-surface-700">
             <p className="text-surface-400 text-xs font-body">
-              {(page-1)*PAGE_SIZE+1}–{Math.min(page*PAGE_SIZE, pedidos.length)} de {pedidos.length}
+              {(page-1)*PAGE_SIZE+1}–{Math.min(page*PAGE_SIZE, filteredPedidos.length)} de {filteredPedidos.length}
             </p>
             <div className="flex gap-2">
               <Button size="sm" variant="secondary" onClick={() => setPage(p => Math.max(1,p-1))} disabled={page===1}>← Ant.</Button>
