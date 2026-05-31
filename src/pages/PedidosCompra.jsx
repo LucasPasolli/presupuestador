@@ -2,10 +2,11 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { query, run } from '../lib/database'
-import { Card, PageHeader, Button, Badge, Modal } from '../components/ui'
+import { Card, PageHeader, Button, Badge, Modal, Input } from '../components/ui'
 import {
   Plus, Trash2, Search, CheckCircle2, AlertCircle,
-  ArrowLeft, ShoppingCart, Package, Clock, BadgeCheck
+  ArrowLeft, ShoppingCart, Package, Clock, BadgeCheck,
+  Pencil, Truck, RotateCcw, UserPlus, Building2, CalendarCheck
 } from 'lucide-react'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -21,6 +22,22 @@ function fmtFecha(iso) {
 }
 
 function today() { return new Date().toISOString().slice(0, 10) }
+
+// Calcula el próximo día 30 a partir de hoy
+function proximoDia30() {
+  const now = new Date()
+  const year  = now.getMonth() === 11 ? now.getFullYear() + 1 : now.getFullYear()
+  const month = now.getMonth() === 11 ? 0 : now.getMonth() + 1
+  const d30 = new Date(year, month, 30)
+  const [y, m, dd] = d30.toISOString().slice(0, 10).split('-')
+  return `${dd}/${m}/${y}`
+}
+
+// Estado visual del pedido (logístico)
+const ESTADO_CONFIG = {
+  encargado: { label: 'Encargado', color: 'yellow', icon: Clock },
+  recibido:  { label: 'Recibido',  color: 'green',  icon: CheckCircle2 },
+}
 
 // ─── Toast ─────────────────────────────────────────────────────────────────
 
@@ -38,6 +55,176 @@ function Toast({ message, onDone }) {
       </div>
     </div>,
     document.body
+  )
+}
+
+// ─── Modal Nuevo Proveedor ──────────────────────────────────────────────────
+
+function NuevoProveedorModal({ open, onClose, onCreated }) {
+  const empty = { nombreFiscal: '', nombreComercial: '', identificacionTributaria: '', telefono: '', email: '' }
+  const [form,   setForm]   = useState(empty)
+  const [errors, setErrors] = useState({})
+
+  useEffect(() => { if (!open) { setForm(empty); setErrors({}) } }, [open])
+
+  function set(k, v) { setForm(p => ({ ...p, [k]: v })) }
+
+  function guardar() {
+    const e = {}
+    if (!form.nombreFiscal.trim()) e.nombreFiscal = 'Requerido'
+    setErrors(e)
+    if (Object.keys(e).length) return
+
+    const id = run(
+      `INSERT INTO Proveedor (nombreFiscal, nombreComercial, identificacionTributaria, telefono, email)
+       VALUES (?,?,?,?,?)`,
+      [form.nombreFiscal.trim(), form.nombreComercial.trim(), form.identificacionTributaria.trim(),
+       form.telefono.trim(), form.email.trim()]
+    )
+    const prov = query('SELECT * FROM Proveedor WHERE idProveedor = ?', [id])[0]
+    onClose()
+    setTimeout(() => onCreated(prov), 0)
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Nuevo Proveedor">
+      <div className="space-y-4">
+        <Input label="Nombre fiscal *" value={form.nombreFiscal}
+          onChange={e => set('nombreFiscal', e.target.value)}
+          error={errors.nombreFiscal} placeholder="Razón social" />
+        <Input label="Nombre comercial" value={form.nombreComercial}
+          onChange={e => set('nombreComercial', e.target.value)}
+          placeholder="Nombre por el que se lo conoce" />
+        <Input label="Identificación tributaria (CUIT)" value={form.identificacionTributaria}
+          onChange={e => set('identificacionTributaria', e.target.value)}
+          placeholder="20-12345678-9" />
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Teléfono" value={form.telefono}
+            onChange={e => set('telefono', e.target.value)} placeholder="351 000-0000" />
+          <Input label="Email" value={form.email}
+            onChange={e => set('email', e.target.value)} placeholder="proveedor@email.com" />
+        </div>
+        <div className="flex gap-2 pt-2">
+          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
+          <Button className="flex-1" onClick={guardar}>Crear Proveedor</Button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+// ─── Selector de Proveedor ──────────────────────────────────────────────────
+
+function ProveedorSelector({ value, onChange, onToast }) {
+  const [search,   setSearch]   = useState('')
+  const [results,  setResults]  = useState([])
+  const [showDrop, setShowDrop] = useState(false)
+  const [showNew,  setShowNew]  = useState(false)
+  const wrapRef = useRef(null)
+
+  useEffect(() => {
+    const handler = e => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setShowDrop(false) }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  // Populate search text when editing an existing order with a provider
+  useEffect(() => {
+    if (value && !search) {
+      setSearch(value.nombreComercial || value.nombreFiscal)
+    }
+  }, [value])
+
+  function buscar(text) {
+    setSearch(text)
+    if (!text.trim()) { setResults([]); setShowDrop(false); return }
+    const rows = query(
+      `SELECT * FROM Proveedor WHERE nombreFiscal LIKE ? OR nombreComercial LIKE ? OR CAST(idProveedor AS TEXT) = ? LIMIT 8`,
+      [`%${text}%`, `%${text}%`, text.trim()]
+    )
+    setResults(rows)
+    setShowDrop(true)
+  }
+
+  function seleccionar(p) {
+    onChange(p)
+    setSearch(p.nombreComercial || p.nombreFiscal)
+    setShowDrop(false)
+  }
+
+  function limpiar() { onChange(null); setSearch(''); setResults([]) }
+
+  function abrirNuevo() {
+    setShowDrop(false)
+    setTimeout(() => setShowNew(true), 50)
+  }
+
+  function handleCreated(prov) {
+    seleccionar(prov)
+    onToast('Proveedor creado correctamente ✓')
+  }
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1">
+        Proveedor <span className="text-surface-500 normal-case">(opcional)</span>
+      </label>
+
+      {value ? (
+        <div className="flex items-center gap-3 bg-surface-700 border border-brand-500/40 rounded-xl px-4 py-2.5">
+          <Building2 size={15} className="text-brand-400 flex-shrink-0" />
+          <div className="flex-1">
+            <p className="text-white text-sm font-body">{value.nombreComercial || value.nombreFiscal}</p>
+            <p className="text-surface-400 text-xs font-mono">
+              #{value.idProveedor} · {value.nombreFiscal}
+              {value.identificacionTributaria ? ` · CUIT ${value.identificacionTributaria}` : ''}
+            </p>
+          </div>
+          <button onClick={limpiar} className="text-surface-400 hover:text-red-400 transition-colors text-xl leading-none">×</button>
+        </div>
+      ) : (
+        <>
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-500 pointer-events-none" />
+              <input value={search} onChange={e => buscar(e.target.value)}
+                onFocus={() => search && setShowDrop(true)}
+                placeholder="Buscar proveedor..."
+                className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2.5 text-white
+                           text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all" />
+            </div>
+            <Button size="sm" variant="secondary" icon={UserPlus} onClick={abrirNuevo}>Nuevo</Button>
+          </div>
+
+          {showDrop && (
+            <div className="absolute top-full left-0 right-0 mt-1 bg-surface-800 border border-surface-600
+                            rounded-xl shadow-2xl z-50 overflow-hidden">
+              {results.length === 0 ? (
+                <div className="px-4 py-3">
+                  <p className="text-surface-300 text-xs font-body mb-2">Sin resultados para "{search}"</p>
+                  <button onClick={abrirNuevo}
+                    className="text-brand-400 text-xs font-body hover:underline flex items-center gap-1">
+                    <UserPlus size={12} /> Crear proveedor "{search}"
+                  </button>
+                </div>
+              ) : (
+                results.map(p => (
+                  <button key={p.idProveedor} onClick={() => seleccionar(p)}
+                    className="w-full text-left px-4 py-2.5 hover:bg-surface-700 transition-colors border-b border-surface-700/60 last:border-0">
+                    <p className="text-white text-sm font-body">{p.nombreComercial || p.nombreFiscal}</p>
+                    <p className="text-surface-400 text-xs font-mono">
+                      #{p.idProveedor} · {p.nombreFiscal}
+                    </p>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+        </>
+      )}
+
+      <NuevoProveedorModal open={showNew} onClose={() => setShowNew(false)} onCreated={handleCreated} />
+    </div>
   )
 }
 
@@ -89,6 +276,7 @@ function ProductoDropdown({ results, anchorRef, dropRef, onSelect, searchText })
             <p className="text-white text-xs font-body leading-tight">{p.nombre}</p>
             <p className="text-surface-400 text-xs font-mono mt-0.5">
               #{p.idProducto}{p.tieneMedidas ? ' · Con medidas' : ''}
+              {p.precioProveedor > 0 ? ` · Último precio: ${fmt(p.precioProveedor)}` : ''}
             </p>
           </button>
         ))
@@ -119,6 +307,13 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
+  // Sync nombre search when item changes externally (edit mode load)
+  useEffect(() => {
+    if (item.nombreProducto && item.nombreProducto !== nombreSearch) {
+      setNombreSearch(item.nombreProducto)
+    }
+  }, [item.nombreProducto])
+
   // Cargar medidas si el producto las tiene
   useEffect(() => {
     if (!item.idProducto) { setMedidas([]); return }
@@ -146,7 +341,12 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
     setShowDrop(false)
     onUpdate(index, 'idProducto',     p.idProducto)
     onUpdate(index, 'nombreProducto', p.nombre)
-    // precio NO se rellena automáticamente — es precio del proveedor, lo carga el usuario
+    // Autocompletar con el último precio del proveedor si existe
+    if (p.precioProveedor > 0) {
+      onUpdate(index, 'precioUnitario', p.precioProveedor)
+    } else {
+      onUpdate(index, 'precioUnitario', '')
+    }
     onUpdate(index, 'medida', null)
   }
 
@@ -158,6 +358,9 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
       if (p) {
         setNombreSearch(p.nombre)
         onUpdate(index, 'nombreProducto', p.nombre)
+        if (p.precioProveedor > 0) {
+          onUpdate(index, 'precioUnitario', p.precioProveedor)
+        }
         onUpdate(index, 'medida', null)
       }
     }
@@ -167,7 +370,7 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
                 font-mono focus:outline-none focus:border-brand-500 transition-all
                 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none`
 
-  const subtotal = (parseInt(item.cantidad) || 0) * (parseFloat(item.precioUnitario) || 0)
+  const subtotal = (parseInt(item.cantidad) || 0) * (parseFloat(String(item.precioUnitario).replace(',', '.')) || 0)
 
   return (
     <tr className="border-b border-surface-700/50">
@@ -216,7 +419,7 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
         )}
       </td>
 
-      {/* Precio proveedor — EDITABLE (diferencia clave con presupuestador) */}
+      {/* Precio proveedor */}
       <td className="py-2 px-2 w-36">
         <input
           type="text"
@@ -228,7 +431,7 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
           }}
           onBlur={e => {
             const parsed = parseFloat(e.target.value) || 0
-            onUpdate(index, 'precioUnitario', parsed)
+            onUpdate(index, 'precioUnitario', parsed === 0 ? '' : parsed)
           }}
           placeholder="0.00"
           className={cell + ' w-full'}
@@ -251,11 +454,13 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
   )
 }
 
-// ─── Vista detalle de un pedido (read-only + acción pagar) ─────────────────
+// ─── Vista detalle de un pedido ─────────────────────────────────────────────
 
-function PedidoDetalle({ pedido, onBack, onUpdated }) {
-  const [detalles, setDetalles] = useState([])
-  const [confirmPagar, setConfirmPagar] = useState(false)
+function PedidoDetalle({ pedido, onBack, onUpdated, onEditar }) {
+  const [detalles,      setDetalles]      = useState([])
+  const [confirmPagar,  setConfirmPagar]  = useState(false)
+  const [confirmEstado, setConfirmEstado] = useState(null) // 'recibido'
+  const [proveedor,     setProveedor]     = useState(null)
 
   useEffect(() => {
     const rows = query(`
@@ -266,16 +471,81 @@ function PedidoDetalle({ pedido, onBack, onUpdated }) {
       ORDER BY dc.idDetallePedido
     `, [pedido.idPedido])
     setDetalles(rows)
+
+    if (pedido.idProveedor) {
+      const prov = query('SELECT * FROM Proveedor WHERE idProveedor = ?', [pedido.idProveedor])[0]
+      setProveedor(prov || null)
+    }
   }, [pedido.idPedido])
 
   function marcarPagado() {
-    run(`UPDATE PedidoCompra SET estado = 'pagado' WHERE idPedido = ?`, [pedido.idPedido])
+    run(`UPDATE PedidoCompra SET estadoPago = 'pagado' WHERE idPedido = ?`, [pedido.idPedido])
     setConfirmPagar(false)
     onUpdated()
     onBack()
   }
 
-  const esPendiente = pedido.estado === 'pendiente'
+  function cambiarEstadoLogistico(nuevoEstado) {
+    const fechaRecepcion = nuevoEstado === 'recibido' ? today() : null
+
+    if (nuevoEstado === 'recibido') {
+      // Sumar stock al inventario
+      for (const d of detalles) {
+        const prod = query('SELECT tieneMedidas FROM Producto WHERE idProducto = ?', [d.idProducto])[0]
+        if (!prod) continue
+
+        if (prod.tieneMedidas && d.medida) {
+          // Stock por medida
+          const existeMedida = query(
+            'SELECT idMedida FROM ProductoMedida WHERE idProducto = ? AND medida = ?',
+            [d.idProducto, d.medida]
+          )[0]
+          if (existeMedida) {
+            run(`UPDATE ProductoMedida SET cantidad = cantidad + ? WHERE idProducto = ? AND medida = ?`,
+              [d.cantidad, d.idProducto, d.medida])
+          } else {
+            run(`INSERT INTO ProductoMedida (idProducto, medida, cantidad) VALUES (?,?,?)`,
+              [d.idProducto, d.medida, d.cantidad])
+          }
+          // Recalcular cantidad total del producto como suma de medidas
+          const total = query(
+            'SELECT COALESCE(SUM(cantidad),0) as t FROM ProductoMedida WHERE idProducto = ?',
+            [d.idProducto]
+          )[0]?.t ?? 0
+          run(`UPDATE Producto SET cantidad = ? WHERE idProducto = ?`, [total, d.idProducto])
+        } else {
+          run(`UPDATE Producto SET cantidad = cantidad + ? WHERE idProducto = ?`,
+            [d.cantidad, d.idProducto])
+        }
+
+        // Actualizar precioProveedor: para productos con medidas, usar el precio más alto
+        if (prod.tieneMedidas) {
+          const maxPrecio = query(
+            `SELECT MAX(precioUnitario) as maxP FROM DetallePedidoCompra
+             WHERE idPedido = ? AND idProducto = ?`,
+            [pedido.idPedido, d.idProducto]
+          )[0]?.maxP ?? d.precioUnitario
+          run(`UPDATE Producto SET precioProveedor = ? WHERE idProducto = ?`, [maxPrecio, d.idProducto])
+        } else {
+          run(`UPDATE Producto SET precioProveedor = ? WHERE idProducto = ?`, [d.precioUnitario, d.idProducto])
+        }
+      }
+    }
+
+    run(
+      `UPDATE PedidoCompra SET estadoLogistico = ?, fechaRecepcion = ? WHERE idPedido = ?`,
+      [nuevoEstado, fechaRecepcion, pedido.idPedido]
+    )
+    setConfirmEstado(null)
+    onUpdated()
+    onBack()
+  }
+
+  const esPendientePago   = pedido.estadoPago === 'pendiente'
+  const estadoLog         = pedido.estadoLogistico ?? 'encargado'
+  const cfg               = ESTADO_CONFIG[estadoLog] ?? ESTADO_CONFIG.encargado
+  const esEcheck          = pedido.metodoPago === 'echeck'
+  const dia30             = proximoDia30()
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 animate-slide-up">
@@ -293,37 +563,85 @@ function PedidoDetalle({ pedido, onBack, onUpdated }) {
 
       {/* Cabecera */}
       <Card className="p-6">
-        <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
           <div>
             <p className="text-surface-400 text-xs tracking-widest uppercase font-body mb-1">Pedido de Compra</p>
             <h2 className="font-display text-4xl text-white tracking-widest">#{pedido.idPedido}</h2>
           </div>
-          <div className="flex items-center gap-3">
-            <Badge color={esPendiente ? 'yellow' : 'green'}>
-              {esPendiente ? 'Pendiente de pago' : 'Pagado'}
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Badges de estado */}
+            <Badge color={cfg.color}>
+              <cfg.icon size={11} className="inline mr-1" />{cfg.label}
             </Badge>
-            {esPendiente && (
-              <Button icon={BadgeCheck} onClick={() => setConfirmPagar(true)}>
-                Marcar como pagado
+            <Badge color={esPendientePago ? 'yellow' : 'green'}>
+              {esPendientePago ? <Clock size={11} className="inline mr-1" /> : <CheckCircle2 size={11} className="inline mr-1" />}
+              {esPendientePago ? 'Pago pendiente' : 'Pagado'}
+            </Badge>
+            {/* Botones de cabecera: solo Editar */}
+            {estadoLog === 'encargado' && (
+              <Button size="sm" variant="secondary" icon={Pencil} onClick={onEditar}>
+                Editar pedido
               </Button>
             )}
           </div>
         </div>
+        {/* Aviso echeck */}
+        {esEcheck && (
+          <div className="mt-4 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3 flex items-start gap-3">
+            <CalendarCheck size={16} className="text-amber-400 mt-0.5 flex-shrink-0" />
+            <p className="text-amber-300 text-sm font-body">
+              <strong>E-Check (CC30):</strong> Este monto será debitado automáticamente el día <strong>{dia30}</strong>.
+            </p>
+          </div>
+        )}
 
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mt-6">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
           <div className="bg-surface-700 rounded-xl p-4">
-            <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Fecha</p>
+            <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Fecha pedido</p>
             <p className="text-white text-sm font-mono">{fmtFecha(pedido.fecha)}</p>
           </div>
+          {pedido.fechaRecepcion && (
+            <div className="bg-surface-700 rounded-xl p-4">
+              <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Fecha recepción</p>
+              <p className="text-white text-sm font-mono">{fmtFecha(pedido.fechaRecepcion)}</p>
+            </div>
+          )}
           <div className="bg-surface-700 rounded-xl p-4">
-            <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Estado</p>
-            <p className="text-white text-sm font-body">{esPendiente ? 'Pendiente de pago' : 'Pagado'}</p>
+            <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Método de pago</p>
+            <p className="text-white text-sm font-body capitalize">
+              {pedido.metodoPago === 'echeck' ? 'E-Check (CC30)' : (pedido.metodoPago || '—')}
+            </p>
           </div>
+          {proveedor && (
+            <div className="bg-surface-700 rounded-xl p-4">
+              <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Proveedor</p>
+              <p className="text-white text-sm font-body">{proveedor.nombreComercial || proveedor.nombreFiscal}</p>
+            </div>
+          )}
           <div className="bg-surface-700 rounded-xl p-4">
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Total</p>
             <p className="text-brand-400 font-mono font-bold text-lg">{fmt(pedido.monto)}</p>
           </div>
         </div>
+        {/* Acciones de estado */}
+        {(estadoLog === 'encargado' || esPendientePago) && (
+          <div className="pt-5 border-t border-surface-700">
+            <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-3">Cambiar estado</p>
+            <div className="flex flex-wrap gap-2">
+              {estadoLog === 'encargado' && (
+                <Button size="sm" icon={CheckCircle2} onClick={() => setConfirmEstado('recibido')}
+                  className="bg-emerald-600 hover:bg-emerald-500 border-emerald-500 text-white">
+                  Marcar Recibido
+                </Button>
+              )}
+              {esPendientePago && (
+                <Button size="sm" icon={BadgeCheck} onClick={() => setConfirmPagar(true)}>
+                  Marcar pagado
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
       </Card>
 
       {/* Tabla de ítems */}
@@ -383,27 +701,102 @@ function PedidoDetalle({ pedido, onBack, onUpdated }) {
           ¿Marcar el pedido <span className="text-white font-mono">#{pedido.idPedido}</span> como pagado?
         </p>
         <p className="text-surface-500 text-xs font-body mb-6">
-          Esta acción registrará el egreso de <span className="text-brand-400 font-mono">{fmt(pedido.monto)}</span> en las estadísticas.
+          Esta acción registrará el egreso de <span className="text-brand-400 font-mono">{fmt(pedido.monto)}</span>.
         </p>
         <div className="flex gap-2">
           <Button variant="secondary" className="flex-1" onClick={() => setConfirmPagar(false)}>Cancelar</Button>
           <Button className="flex-1" icon={BadgeCheck} onClick={marcarPagado}>Confirmar pago</Button>
         </div>
       </Modal>
+
+      {/* Modal cambio de estado logístico */}
+      <Modal open={!!confirmEstado} onClose={() => setConfirmEstado(null)}
+        title={confirmEstado === 'recibido' ? 'Confirmar recepción' : 'Marcar para revisión'}
+        width="max-w-sm">
+        {confirmEstado === 'recibido' ? (
+          <>
+            <p className="text-surface-300 text-sm font-body mb-2">
+              ¿Confirmar que el pedido <span className="text-white font-mono">#{pedido.idPedido}</span> fue recibido correctamente?
+            </p>
+            <p className="text-emerald-400 text-xs font-body mb-6 bg-emerald-500/10 border border-emerald-500/25 rounded-xl px-3 py-2">
+              El stock de todos los productos de este pedido se sumará al Inventario.
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="text-surface-300 text-sm font-body mb-2">
+              ¿Marcar el pedido <span className="text-white font-mono">#{pedido.idPedido}</span> para revisión?
+            </p>
+            <p className="text-yellow-400 text-xs font-body mb-6 bg-yellow-500/10 border border-yellow-500/25 rounded-xl px-3 py-2">
+              El stock NO se actualizará hasta que el pedido sea marcado como Recibido.
+            </p>
+          </>
+        )}
+        <div className="flex gap-2">
+          <Button variant="secondary" className="flex-1" onClick={() => setConfirmEstado(null)}>Cancelar</Button>
+          <Button className="flex-1"
+            icon={confirmEstado === 'recibido' ? CheckCircle2 : AlertCircle}
+            onClick={() => cambiarEstadoLogistico(confirmEstado)}>
+            Confirmar
+          </Button>
+        </div>
+      </Modal>
     </div>
   )
 }
 
-// ─── Formulario nuevo pedido ────────────────────────────────────────────────
+// ─── Formulario nuevo / editar pedido ──────────────────────────────────────
 
 const ITEM_EMPTY = () => ({ idProducto: '', nombreProducto: '', cantidad: 1, precioUnitario: '', medida: null })
 
-function NuevoPedido({ onGuardado, onCancelar }) {
-  const [items, setItems] = useState([ITEM_EMPTY()])
-  const [error, setError] = useState('')
+const METODOS_PAGO = [
+  { value: 'efectivo',      label: 'Efectivo' },
+  { value: 'transferencia', label: 'Transferencia' },
+  { value: 'echeck',        label: 'E-Check (CC30)' },
+]
+
+function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
+  const esEdicion = !!pedidoEditando
+
+  // Inicializar items desde el pedido existente si es edición
+  const [items,      setItems]      = useState(() => {
+    if (esEdicion) {
+      const detalles = query(`
+        SELECT dc.*, p.nombre AS nombreProducto
+        FROM DetallePedidoCompra dc
+        LEFT JOIN Producto p ON p.idProducto = dc.idProducto
+        WHERE dc.idPedido = ?
+        ORDER BY dc.idDetallePedido
+      `, [pedidoEditando.idPedido])
+      return detalles.length > 0
+        ? detalles.map(d => ({
+            idProducto:     d.idProducto,
+            nombreProducto: d.nombreProducto || '',
+            cantidad:       d.cantidad,
+            precioUnitario: d.precioUnitario,
+            medida:         d.medida || null,
+          }))
+        : [ITEM_EMPTY()]
+    }
+    return [ITEM_EMPTY()]
+  })
+
+  const [metodoPago,  setMetodoPago]  = useState(() =>
+    esEdicion ? (pedidoEditando.metodoPago || 'efectivo') : 'efectivo'
+  )
+  const [proveedor,   setProveedor]   = useState(() => {
+    if (esEdicion && pedidoEditando.idProveedor) {
+      return query('SELECT * FROM Proveedor WHERE idProveedor = ?', [pedidoEditando.idProveedor])[0] || null
+    }
+    return null
+  })
+  const [toast,  setToast]  = useState('')
+  const [error,  setError]  = useState('')
 
   const total = items.reduce((acc, it) =>
     acc + (parseInt(it.cantidad) || 0) * (parseFloat(String(it.precioUnitario).replace(',', '.')) || 0), 0)
+
+  const dia30 = proximoDia30()
 
   function updateItem(idx, key, val) {
     setItems(prev => prev.map((it, i) => i === idx ? { ...it, [key]: val } : it))
@@ -425,33 +818,84 @@ function NuevoPedido({ onGuardado, onCancelar }) {
       if (existe.tieneMedidas && !it.medida) { setError(`Seleccioná una medida para el producto ID ${it.idProducto}.`); return }
     }
 
-    const fecha      = today()
-    const idPedido   = run(
-      `INSERT INTO PedidoCompra (fecha, monto, estado) VALUES (?, ?, 'pendiente')`,
-      [fecha, total]
-    )
-    const pedidoReal = query('SELECT MAX(idPedido) as id FROM PedidoCompra WHERE fecha = ?', [fecha])[0]?.id ?? idPedido
+    if (esEdicion) {
+      // Actualizar pedido existente
+      run(
+        `UPDATE PedidoCompra SET monto = ?, metodoPago = ?, idProveedor = ? WHERE idPedido = ?`,
+        [total, metodoPago, proveedor?.idProveedor ?? null, pedidoEditando.idPedido]
+      )
+      // Reemplazar ítems
+      run(`DELETE FROM DetallePedidoCompra WHERE idPedido = ?`, [pedidoEditando.idPedido])
+      for (const it of validItems) {
+        const precio   = parseFloat(String(it.precioUnitario).replace(',', '.')) || 0
+        const cantidad = parseInt(it.cantidad)
+        run(
+          `INSERT INTO DetallePedidoCompra (idPedido, idProducto, medida, cantidad, precioUnitario, subtotal)
+           VALUES (?,?,?,?,?,?)`,
+          [pedidoEditando.idPedido, parseInt(it.idProducto), it.medida || null, cantidad, precio, cantidad * precio]
+        )
+      }
+      // Actualizar precioProveedor: para productos con medidas, usar el precio más alto del pedido
+      const productosEditados = [...new Set(validItems.map(it => parseInt(it.idProducto)))]
+      for (const idProd of productosEditados) {
+        const prod = query('SELECT tieneMedidas FROM Producto WHERE idProducto = ?', [idProd])[0]
+        if (!prod) continue
+        if (prod.tieneMedidas) {
+          const maxP = query(
+            `SELECT MAX(precioUnitario) as m FROM DetallePedidoCompra WHERE idPedido = ? AND idProducto = ?`,
+            [pedidoEditando.idPedido, idProd]
+          )[0]?.m ?? 0
+          if (maxP > 0) run(`UPDATE Producto SET precioProveedor = ? WHERE idProducto = ?`, [maxP, idProd])
+        } else {
+          const precio = parseFloat(String(validItems.find(it => parseInt(it.idProducto) === idProd)?.precioUnitario).replace(',', '.')) || 0
+          if (precio > 0) run(`UPDATE Producto SET precioProveedor = ? WHERE idProducto = ?`, [precio, idProd])
+        }
+      }
+      onGuardado(pedidoEditando.idPedido)
+    } else {
+      // Nuevo pedido
+      const fecha    = today()
+      const idPedido = run(
+        `INSERT INTO PedidoCompra (fecha, monto, estadoPago, estadoLogistico, metodoPago, idProveedor)
+         VALUES (?, ?, 'pendiente', 'encargado', ?, ?)`,
+        [fecha, total, metodoPago, proveedor?.idProveedor ?? null]
+      )
+      const pedidoReal = query('SELECT MAX(idPedido) as id FROM PedidoCompra WHERE fecha = ?', [fecha])[0]?.id ?? idPedido
 
-    for (const it of validItems) {
-      const precio   = parseFloat(String(it.precioUnitario).replace(',', '.')) || 0
-      const cantidad = parseInt(it.cantidad)
-      run(
-        `INSERT INTO DetallePedidoCompra (idPedido, idProducto, medida, cantidad, precioUnitario, subtotal)
-         VALUES (?,?,?,?,?,?)`,
-        [pedidoReal, parseInt(it.idProducto), it.medida || null, cantidad, precio, cantidad * precio]
-      )
-      // Actualizar precioProveedor en el producto con el precio del pedido
-      run(
-        `UPDATE Producto SET precioProveedor = ? WHERE idProducto = ?`,
-        [precio, parseInt(it.idProducto)]
-      )
+      for (const it of validItems) {
+        const precio   = parseFloat(String(it.precioUnitario).replace(',', '.')) || 0
+        const cantidad = parseInt(it.cantidad)
+        run(
+          `INSERT INTO DetallePedidoCompra (idPedido, idProducto, medida, cantidad, precioUnitario, subtotal)
+           VALUES (?,?,?,?,?,?)`,
+          [pedidoReal, parseInt(it.idProducto), it.medida || null, cantidad, precio, cantidad * precio]
+        )
+      }
+      // Actualizar precioProveedor: precio más alto para productos con medidas
+      const productosNuevos = [...new Set(validItems.map(it => parseInt(it.idProducto)))]
+      for (const idProd of productosNuevos) {
+        const prod = query('SELECT tieneMedidas FROM Producto WHERE idProducto = ?', [idProd])[0]
+        if (!prod) continue
+        if (prod.tieneMedidas) {
+          const maxP = query(
+            `SELECT MAX(precioUnitario) as m FROM DetallePedidoCompra WHERE idPedido = ? AND idProducto = ?`,
+            [pedidoReal, idProd]
+          )[0]?.m ?? 0
+          if (maxP > 0) run(`UPDATE Producto SET precioProveedor = ? WHERE idProducto = ?`, [maxP, idProd])
+        } else {
+          const precio = parseFloat(String(validItems.find(it => parseInt(it.idProducto) === idProd)?.precioUnitario).replace(',', '.')) || 0
+          if (precio > 0) run(`UPDATE Producto SET precioProveedor = ? WHERE idProducto = ?`, [precio, idProd])
+        }
+      }
+
+      onGuardado(pedidoReal)
     }
-
-    onGuardado(pedidoReal)
   }
 
   return (
     <div className="max-w-5xl mx-auto space-y-6 animate-slide-up">
+      {toast && <Toast message={toast} onDone={() => setToast('')} />}
+
       <div className="flex items-center gap-3">
         <button onClick={onCancelar}
           className="flex items-center gap-2 text-surface-400 hover:text-white text-sm font-body transition-colors">
@@ -459,18 +903,52 @@ function NuevoPedido({ onGuardado, onCancelar }) {
         </button>
       </div>
 
-      <PageHeader title="Nuevo Pedido" subtitle="Pedido de compra" />
+      <PageHeader
+        title={esEdicion ? `Editar Pedido #${pedidoEditando.idPedido}` : 'Nuevo Pedido'}
+        subtitle="Pedido de compra"
+      />
 
       {/* Info */}
       <div className="bg-blue-500/10 border border-blue-500/25 rounded-xl px-5 py-3 flex items-start gap-3">
         <Package size={16} className="text-blue-400 mt-0.5 flex-shrink-0" />
         <p className="text-blue-300 text-sm font-body">
-          Los precios unitarios son los del <strong>proveedor</strong> y deben cargarse manualmente.
-          No se rellenan automáticamente desde el inventario.
+          El precio unitario se autocompleta con el último precio del proveedor registrado en Inventario.
+          Si no hay precio previo, el campo quedará vacío para que lo ingreses manualmente.
         </p>
       </div>
 
-      {/* Tabla */}
+      {/* Proveedor + Método de pago */}
+      <Card className="p-6 space-y-5">
+        <ProveedorSelector value={proveedor} onChange={setProveedor} onToast={setToast} />
+
+        <div>
+          <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-2">
+            Método de pago
+          </label>
+          <div className="flex flex-wrap gap-2">
+            {METODOS_PAGO.map(m => (
+              <button key={m.value} onClick={() => setMetodoPago(m.value)}
+                className={`px-4 py-2 rounded-xl text-sm font-body border transition-all
+                  ${metodoPago === m.value
+                    ? 'bg-brand-500/15 border-brand-500/40 text-white'
+                    : 'bg-surface-700 border-surface-600 text-surface-400 hover:border-surface-500'}`}>
+                {m.label}
+              </button>
+            ))}
+          </div>
+
+          {metodoPago === 'echeck' && (
+            <div className="mt-3 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3 flex items-start gap-3">
+              <CalendarCheck size={16} className="text-amber-400 mt-0.5 flex-shrink-0" />
+              <p className="text-amber-300 text-sm font-body">
+                <strong>E-Check (CC30):</strong> El monto será debitado automáticamente el día <strong>{dia30}</strong>.
+              </p>
+            </div>
+          )}
+        </div>
+      </Card>
+
+      {/* Tabla de productos */}
       <Card className="overflow-visible">
         <div className="px-6 py-4 border-b border-surface-700 flex items-center justify-between">
           <h2 className="font-body font-semibold text-white text-sm">Productos</h2>
@@ -515,7 +993,9 @@ function NuevoPedido({ onGuardado, onCancelar }) {
                 <AlertCircle size={14} className="flex-shrink-0" />{error}
               </div>
             )}
-            <Button size="lg" icon={ShoppingCart} onClick={guardar}>Guardar Pedido</Button>
+            <Button size="lg" icon={esEdicion ? Pencil : ShoppingCart} onClick={guardar}>
+              {esEdicion ? 'Guardar cambios' : 'Guardar Pedido'}
+            </Button>
           </div>
         </div>
       </Card>
@@ -529,9 +1009,11 @@ const PAGE_SIZE = 20
 
 export default function PedidosCompra() {
   const [pedidos,      setPedidos]      = useState([])
-  const [vista,        setVista]        = useState('lista')   // 'lista' | 'nuevo' | 'detalle'
+  // vista: 'lista' | 'nuevo' | 'detalle' | 'editar'
+  const [vista,        setVista]        = useState('lista')
   const [selected,     setSelected]     = useState(null)
   const [filterEst,    setFilterEst]    = useState('all')
+  const [filterLog,    setFilterLog]    = useState('all')
   const [filterProv,   setFilterProv]   = useState('')
   const [filterDesde,  setFilterDesde]  = useState('')
   const [filterHasta,  setFilterHasta]  = useState('')
@@ -539,28 +1021,37 @@ export default function PedidosCompra() {
   const [toast,        setToast]        = useState('')
 
   const load = useCallback(() => {
-    let sql = `SELECT * FROM PedidoCompra WHERE 1=1`
+    let sql = `
+      SELECT pc.*,
+             COALESCE(pr.nombreComercial, pr.nombreFiscal) AS nombreProveedor,
+             pr.nombreFiscal AS nombreFiscalProv
+      FROM PedidoCompra pc
+      LEFT JOIN Proveedor pr ON pr.idProveedor = pc.idProveedor
+      WHERE 1=1`
     const params = []
-    if (filterEst !== 'all') { sql += ` AND estado = ?`;    params.push(filterEst) }
-    if (filterDesde)         { sql += ` AND fecha >= ?`;    params.push(filterDesde) }
-    if (filterHasta)         { sql += ` AND fecha <= ?`;    params.push(filterHasta) }
-    sql += ` ORDER BY idPedido DESC`
+    if (filterEst !== 'all') { sql += ` AND pc.estadoPago = ?`;      params.push(filterEst) }
+    if (filterLog !== 'all') { sql += ` AND pc.estadoLogistico = ?`; params.push(filterLog) }
+    if (filterDesde)         { sql += ` AND pc.fecha >= ?`;           params.push(filterDesde) }
+    if (filterHasta)         { sql += ` AND pc.fecha <= ?`;           params.push(filterHasta) }
+    sql += ` ORDER BY pc.idPedido DESC`
     setPedidos(query(sql, params))
     setPage(1)
-  }, [filterEst, filterDesde, filterHasta])
+  }, [filterEst, filterLog, filterDesde, filterHasta])
 
   useEffect(() => { load() }, [load])
 
-  // Resumen financiero
-  const totalPendiente = pedidos.filter(p => p.estado === 'pendiente').reduce((a, p) => a + p.monto, 0)
-  const totalPagado    = pedidos.filter(p => p.estado === 'pagado').reduce((a, p) => a + p.monto, 0)
+  const totalPendiente = pedidos.filter(p => p.estadoPago === 'pendiente').reduce((a, p) => a + p.monto, 0)
+  const totalPagado    = pedidos.filter(p => p.estadoPago === 'pagado').reduce((a, p) => a + p.monto, 0)
 
-  // Client-side filter by proveedor name or ID (stored in notes/proveedor field if present, else filter by idPedido text)
   const filteredPedidos = filterProv.trim()
-    ? pedidos.filter(p =>
-        String(p.idPedido).includes(filterProv.trim()) ||
-        (p.proveedor && p.proveedor.toLowerCase().includes(filterProv.trim().toLowerCase()))
-      )
+    ? pedidos.filter(p => {
+        const term = filterProv.trim().toLowerCase()
+        return (
+          String(p.idPedido).includes(term) ||
+          (p.nombreProveedor   && p.nombreProveedor.toLowerCase().includes(term)) ||
+          (p.nombreFiscalProv  && p.nombreFiscalProv.toLowerCase().includes(term))
+        )
+      })
     : pedidos
 
   const paginated  = filteredPedidos.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
@@ -570,22 +1061,39 @@ export default function PedidosCompra() {
   function volverLista()   { setSelected(null); setVista('lista'); load() }
 
   function handleGuardado(id) {
-    setToast(`Pedido #${id} creado correctamente ✓`)
+    const isEdit = vista === 'editar'
+    setToast(isEdit ? `Pedido #${id} actualizado correctamente ✓` : `Pedido #${id} creado correctamente ✓`)
     setVista('lista')
     load()
   }
 
   function handleUpdated() {
-    setToast('Pedido marcado como pagado ✓')
+    setToast('Pedido actualizado ✓')
     load()
   }
 
-  if (vista === 'nuevo')   return <NuevoPedido onGuardado={handleGuardado} onCancelar={volverLista} />
-  if (vista === 'detalle') return <PedidoDetalle pedido={selected} onBack={volverLista} onUpdated={handleUpdated} />
+  function handleEditar() {
+    setVista('editar')
+  }
+
+  if (vista === 'nuevo')
+    return <NuevoPedido onGuardado={handleGuardado} onCancelar={volverLista} />
+
+  if (vista === 'editar' && selected)
+    return <NuevoPedido onGuardado={handleGuardado} onCancelar={() => setVista('detalle')} pedidoEditando={selected} />
+
+  if (vista === 'detalle')
+    return (
+      <PedidoDetalle
+        pedido={selected}
+        onBack={volverLista}
+        onUpdated={handleUpdated}
+        onEditar={handleEditar}
+      />
+    )
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
-      {/* Toast rendered as fixed overlay — no layout impact */}
       {toast && <Toast message={toast} onDone={() => setToast('')} />}
 
       <PageHeader
@@ -599,9 +1107,9 @@ export default function PedidosCompra() {
       {/* Resumen */}
       <div className="grid grid-cols-3 gap-4">
         {[
-          { label: 'Total pedidos',      value: pedidos.length,  color: 'text-white' },
-          { label: 'Deuda pendiente',    value: fmt(totalPendiente), color: 'text-yellow-400' },
-          { label: 'Total pagado',       value: fmt(totalPagado),    color: 'text-emerald-400' },
+          { label: 'Total pedidos',   value: pedidos.length,      color: 'text-white' },
+          { label: 'Deuda pendiente', value: fmt(totalPendiente), color: 'text-yellow-400' },
+          { label: 'Total pagado',    value: fmt(totalPagado),    color: 'text-emerald-400' },
         ].map(({ label, value, color }) => (
           <div key={label} className="bg-surface-800 border border-surface-700 rounded-xl p-4">
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body">{label}</p>
@@ -612,101 +1120,64 @@ export default function PedidosCompra() {
 
       {/* Filtros */}
       <Card className="p-4">
-        <div className="flex items-end gap-2 flex-nowrap overflow-x-auto">
+        <div className="flex flex-wrap gap-3 items-end w-full">
 
           {/* Buscador */}
-          <div className="w-[300px] flex-shrink-0">
-
-            <div className="relative">
-              <Search
-                size={13}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-500 pointer-events-none"
-              />
-
-              <input
-                type="text"
-                value={filterProv}
-                onChange={e => {
-                  setFilterProv(e.target.value)
-                  setPage(1)
-                }}
-                placeholder="Buscar por proveedor o ID de pedido..."
-                className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2 text-white
-                        text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
-              />
-            </div>
+          <div className="relative flex-1 min-w-[180px]">
+            <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
+            <input
+              type="text" value={filterProv}
+              onChange={e => { setFilterProv(e.target.value); setPage(1) }}
+              placeholder="Buscar por proveedor o ID..."
+              className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2 text-white
+                         text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
+            />
           </div>
 
-          {/* Filtros */}
-          <div className="flex flex-wrap gap-2 flex-1 items-end">
+          {/* Dropdown: Estado Logístico */}
+          <select
+            value={filterLog}
+            onChange={e => { setFilterLog(e.target.value); setPage(1) }}
+            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer [color-scheme:dark]">
+            <option value="all">Estado logístico</option>
+            <option value="encargado">Encargado</option>
+            <option value="recibido">Recibido</option>
+          </select>
 
-            {[
-              { value: 'all', label: 'Todos' },
-              { value: 'pendiente', label: 'Pendientes' },
-              { value: 'pagado', label: 'Pagados' },
-            ].map(({ value, label }) => (
-              <button
-                key={value}
-                onClick={() => setFilterEst(value)}
-                className={`px-4 py-2.5 rounded-xl text-sm font-body border transition-all whitespace-nowrap flex items-center justify-center
-                ${
-                  filterEst === value
-                    ? 'bg-brand-500/15 border-brand-500/40 text-white'
-                    : 'bg-surface-700 border-surface-600 text-surface-400 hover:border-surface-500'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+          {/* Dropdown: Estado Pago */}
+          <select
+            value={filterEst}
+            onChange={e => { setFilterEst(e.target.value); setPage(1) }}
+            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer [color-scheme:dark]">
+            <option value="all">Estado de pago</option>
+            <option value="pendiente">Pago pendiente</option>
+            <option value="pagado">Pagado</option>
+          </select>
 
-            <div className="flex flex-col gap-1 min-w-[150px]">
-              <span className="text-surface-400 text-xs font-body px-1">
-                DESDE
-              </span>
-
-              <input
-                type="date"
-                value={filterDesde}
-                onChange={e => setFilterDesde(e.target.value)}
-                className="w-full bg-surface-700 border border-surface-600 rounded-xl
-                          px-3 py-2.5 text-white text-sm font-mono
-                          focus:outline-none focus:border-brand-500 transition-all"
-              />
-            </div>
-
-            <div className="flex flex-col gap-1 min-w-[150px]">
-              <span className="text-surface-400 text-xs font-body px-1">
-                HASTA
-              </span>
-
-              <input
-                type="date"
-                value={filterHasta}
-                onChange={e => setFilterHasta(e.target.value)}
-                className="w-full bg-surface-700 border border-surface-600 rounded-xl
-                          px-3 py-2.5 text-white text-sm font-mono
-                          focus:outline-none focus:border-brand-500 transition-all"
-              />
-            </div>
-
-            {(filterProv || filterDesde || filterHasta) && (
-              <button
-                onClick={() => {
-                  setFilterProv('')
-                  setFilterDesde('')
-                  setFilterHasta('')
-                  setPage(1)
-                }}
-                className="px-3 py-2 rounded-xl text-xs font-body
-                          border border-surface-600 text-surface-400
-                          hover:text-white hover:border-surface-500
-                          transition-all bg-surface-700 whitespace-nowrap"
-              >
-                Limpiar
-              </button>
-            )}
-
+          {/* Fecha Desde */}
+          <div className="flex flex-col gap-1">
+            <label className="text-surface-400 text-xs uppercase tracking-widest font-body">Desde</label>
+            <input type="date" value={filterDesde} onChange={e => setFilterDesde(e.target.value)}
+              className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
           </div>
+
+          {/* Fecha Hasta */}
+          <div className="flex flex-col gap-1">
+            <label className="text-surface-400 text-xs uppercase tracking-widest font-body">Hasta</label>
+            <input type="date" value={filterHasta} onChange={e => setFilterHasta(e.target.value)}
+              className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+          </div>
+
+          {/* Limpiar */}
+          {(filterProv || filterDesde || filterHasta || filterEst !== 'all' || filterLog !== 'all') && (
+            <button
+              onClick={() => { setFilterProv(''); setFilterDesde(''); setFilterHasta(''); setFilterEst('all'); setFilterLog('all'); setPage(1) }}
+              className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-surface-400 text-sm font-body
+                         hover:text-white hover:border-surface-500 transition-all whitespace-nowrap">
+              Limpiar
+            </button>
+          )}
+
         </div>
       </Card>
 
@@ -716,29 +1187,46 @@ export default function PedidosCompra() {
           <table className="w-full text-sm font-body">
             <thead>
               <tr className="border-b border-surface-700">
-                {['ID','Fecha','Monto','Estado',''].map(h => (
+                {['ID','Fecha pedido','Proveedor','Monto','Método pago','Estado logístico','Pago',''].map(h => (
                   <th key={h} className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
-              {paginated.map(p => (
-                <tr key={p.idPedido} onClick={() => abrirDetalle(p)}
-                  className="border-b border-surface-700/50 hover:bg-surface-700/40 cursor-pointer transition-colors">
-                  <td className="py-3 px-4 text-brand-400 font-mono text-sm">#{p.idPedido}</td>
-                  <td className="py-3 px-4 text-surface-300 font-mono text-xs">{fmtFecha(p.fecha)}</td>
-                  <td className="py-3 px-4 text-white font-mono font-medium">{fmt(p.monto)}</td>
-                  <td className="py-3 px-4">
-                    {p.estado === 'pendiente'
-                      ? <Badge color="yellow"><Clock size={11} className="inline mr-1" />Pendiente de pago</Badge>
-                      : <Badge color="green"><CheckCircle2 size={11} className="inline mr-1" />Pagado</Badge>
-                    }
-                  </td>
-                  <td className="py-3 px-4 text-surface-500">
-                    <ShoppingCart size={15} />
-                  </td>
-                </tr>
-              ))}
+              {paginated.map(p => {
+                const estadoLog = p.estadoLogistico ?? 'encargado'
+                const cfg       = ESTADO_CONFIG[estadoLog] ?? ESTADO_CONFIG.encargado
+                return (
+                  <tr key={p.idPedido} onClick={() => abrirDetalle(p)}
+                    className="border-b border-surface-700/50 hover:bg-surface-700/40 cursor-pointer transition-colors">
+                    <td className="py-3 px-4 text-brand-400 font-mono text-sm">#{p.idPedido}</td>
+                    <td className="py-3 px-4 text-surface-300 font-mono text-xs">{fmtFecha(p.fecha)}</td>
+                    <td className="py-3 px-4">
+                      {p.nombreProveedor ? (
+                        <p className="text-white text-sm font-body font-medium">{p.nombreProveedor}</p>
+                      ) : (
+                        <span className="text-surface-600 text-sm font-body">—</span>
+                      )}
+                    </td>
+                    <td className="py-3 px-4 text-white font-mono font-medium">{fmt(p.monto)}</td>
+                    <td className="py-3 px-4 text-surface-300 text-xs font-body capitalize">
+                      {p.metodoPago === 'echeck' ? 'E-Check' : (p.metodoPago || '—')}
+                    </td>
+                    <td className="py-3 px-4">
+                      <Badge color={cfg.color}>
+                        <cfg.icon size={11} className="inline mr-1" />{cfg.label}
+                      </Badge>
+                    </td>
+                    <td className="py-3 px-4">
+                      {p.estadoPago === 'pendiente'
+                        ? <Badge color="yellow"><Clock size={11} className="inline mr-1" />Pendiente</Badge>
+                        : <Badge color="green"><CheckCircle2 size={11} className="inline mr-1" />Pagado</Badge>
+                      }
+                    </td>
+                    <td className="py-3 px-4 text-surface-500"><ShoppingCart size={15} /></td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>

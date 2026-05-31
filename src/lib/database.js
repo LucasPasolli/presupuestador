@@ -53,6 +53,17 @@ function runSchema() {
   `)
 
   db.run(`
+    CREATE TABLE IF NOT EXISTS Proveedor (
+      idProveedor              INTEGER PRIMARY KEY AUTOINCREMENT,
+      nombreFiscal             TEXT NOT NULL,
+      nombreComercial          TEXT,
+      identificacionTributaria TEXT,
+      telefono                 TEXT,
+      email                    TEXT
+    );
+  `)
+
+  db.run(`
     CREATE TABLE IF NOT EXISTS Cliente (
       idCliente   INTEGER PRIMARY KEY AUTOINCREMENT,
       nombre      TEXT NOT NULL,
@@ -137,10 +148,15 @@ function runSchema() {
 
   db.run(`
     CREATE TABLE IF NOT EXISTS PedidoCompra (
-      idPedido  INTEGER PRIMARY KEY AUTOINCREMENT,
-      fecha     TEXT NOT NULL,
-      monto     REAL NOT NULL DEFAULT 0,
-      estado    TEXT NOT NULL DEFAULT 'pendiente' CHECK(estado IN ('pendiente','pagado'))
+      idPedido        INTEGER PRIMARY KEY AUTOINCREMENT,
+      fecha           TEXT NOT NULL,
+      monto           REAL NOT NULL DEFAULT 0,
+      estadoPago      TEXT NOT NULL DEFAULT 'pendiente' CHECK(estadoPago IN ('pendiente','pagado')),
+      estadoLogistico TEXT NOT NULL DEFAULT 'encargado' CHECK(estadoLogistico IN ('encargado','recibido','revisar')),
+      fechaRecepcion  TEXT,
+      metodoPago      TEXT DEFAULT 'efectivo' CHECK(metodoPago IN ('efectivo','transferencia','echeck')),
+      idProveedor     INTEGER,
+      FOREIGN KEY (idProveedor) REFERENCES Proveedor(idProveedor) ON DELETE SET NULL
     );
   `)
 
@@ -202,11 +218,40 @@ function runMigrations() {
     persistDB()
   }
 
-  // v7 → v8: agrega fechaPago a Saldo (fecha efectiva de cobro, distinta de fechaFin que es el vencimiento).
+  // v7 → v8: agrega fechaPago a Saldo
   const colsSaldo = db.exec(`PRAGMA table_info(Saldo)`)[0]?.values ?? []
   const yaExisteFP = colsSaldo.some(row => row[1] === 'fechaPago')
   if (!yaExisteFP) {
     db.run(`ALTER TABLE Saldo ADD COLUMN fechaPago TEXT`)
+    persistDB()
+  }
+
+  // v8 → v9: tabla Proveedor (CREATE TABLE IF NOT EXISTS ya la crea en schema si no existe)
+  // v9 → v10: columnas nuevas en PedidoCompra (estadoPago, estadoLogistico, fechaRecepcion, metodoPago, idProveedor)
+  const colsPedido = db.exec(`PRAGMA table_info(PedidoCompra)`)[0]?.values ?? []
+  const colNamesPedido = colsPedido.map(r => r[1])
+
+  // Renombrar 'estado' → 'estadoPago' si todavía se llama 'estado' (bases antiguas)
+  if (colNamesPedido.includes('estado') && !colNamesPedido.includes('estadoPago')) {
+    // SQLite no tiene RENAME COLUMN en versiones viejas, usamos ADD + UPDATE
+    db.run(`ALTER TABLE PedidoCompra ADD COLUMN estadoPago TEXT DEFAULT 'pendiente'`)
+    db.run(`UPDATE PedidoCompra SET estadoPago = estado`)
+    persistDB()
+  }
+  if (!colNamesPedido.includes('estadoLogistico')) {
+    db.run(`ALTER TABLE PedidoCompra ADD COLUMN estadoLogistico TEXT DEFAULT 'encargado'`)
+    persistDB()
+  }
+  if (!colNamesPedido.includes('fechaRecepcion')) {
+    db.run(`ALTER TABLE PedidoCompra ADD COLUMN fechaRecepcion TEXT`)
+    persistDB()
+  }
+  if (!colNamesPedido.includes('metodoPago')) {
+    db.run(`ALTER TABLE PedidoCompra ADD COLUMN metodoPago TEXT DEFAULT 'efectivo'`)
+    persistDB()
+  }
+  if (!colNamesPedido.includes('idProveedor')) {
+    db.run(`ALTER TABLE PedidoCompra ADD COLUMN idProveedor INTEGER`)
     persistDB()
   }
 }
