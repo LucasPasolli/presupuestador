@@ -35,8 +35,8 @@ function proximoDia30() {
 
 // Estado visual del pedido (logístico)
 const ESTADO_CONFIG = {
-  encargado: { label: 'Encargado', color: 'yellow', icon: Clock },
-  recibido:  { label: 'Recibido',  color: 'green',  icon: CheckCircle2 },
+  encargado: { label: 'Encargado', color: 'blue',   icon: Clock },
+  recibido:  { label: 'Recibido',  color: 'purple',  icon: Truck },
 }
 
 // ─── Toast ─────────────────────────────────────────────────────────────────
@@ -167,7 +167,7 @@ function ProveedorSelector({ value, onChange, onToast }) {
   return (
     <div ref={wrapRef} className="relative">
       <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1">
-        Proveedor <span className="text-surface-500 normal-case">(opcional)</span>
+        Proveedor
       </label>
 
       {value ? (
@@ -358,10 +358,14 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
       if (p) {
         setNombreSearch(p.nombre)
         onUpdate(index, 'nombreProducto', p.nombre)
-        if (p.precioProveedor > 0) {
-          onUpdate(index, 'precioUnitario', p.precioProveedor)
-        }
+        // Siempre actualizar el precio (incluyendo limpiar si no tiene precio asignado)
+        onUpdate(index, 'precioUnitario', p.precioProveedor > 0 ? p.precioProveedor : '')
         onUpdate(index, 'medida', null)
+      } else {
+        // ID sin coincidencia: limpiar nombre y precio
+        setNombreSearch('')
+        onUpdate(index, 'nombreProducto', '')
+        onUpdate(index, 'precioUnitario', '')
       }
     }
   }
@@ -456,33 +460,48 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
 
 // ─── Vista detalle de un pedido ─────────────────────────────────────────────
 
-function PedidoDetalle({ pedido, onBack, onUpdated, onEditar }) {
+function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
+  const [pedido,        setPedido]        = useState(pedidoInit)
   const [detalles,      setDetalles]      = useState([])
   const [confirmPagar,  setConfirmPagar]  = useState(false)
   const [confirmEstado, setConfirmEstado] = useState(null) // 'recibido'
   const [proveedor,     setProveedor]     = useState(null)
 
-  useEffect(() => {
+  const reload = useCallback(() => {
+    const p = query(`
+      SELECT pc.*, pv.nombreComercial AS nombreProveedor, pv.nombreFiscal AS nombreFiscalProv
+      FROM PedidoCompra pc
+      LEFT JOIN Proveedor pv ON pv.idProveedor = pc.idProveedor
+      WHERE pc.idPedido = ?
+    `, [pedidoInit.idPedido])[0]
+    if (p) setPedido(p)
+
     const rows = query(`
       SELECT dc.*, p.nombre AS nombreProducto
       FROM DetallePedidoCompra dc
       LEFT JOIN Producto p ON p.idProducto = dc.idProducto
       WHERE dc.idPedido = ?
       ORDER BY dc.idDetallePedido
-    `, [pedido.idPedido])
+    `, [pedidoInit.idPedido])
     setDetalles(rows)
 
-    if (pedido.idProveedor) {
-      const prov = query('SELECT * FROM Proveedor WHERE idProveedor = ?', [pedido.idProveedor])[0]
+    const idProv = p?.idProveedor ?? pedidoInit.idProveedor
+    if (idProv) {
+      const prov = query('SELECT * FROM Proveedor WHERE idProveedor = ?', [idProv])[0]
       setProveedor(prov || null)
+    } else {
+      setProveedor(null)
     }
-  }, [pedido.idPedido])
+  }, [pedidoInit.idPedido])
+
+  useEffect(() => { reload() }, [reload])
 
   function marcarPagado() {
-    run(`UPDATE PedidoCompra SET estadoPago = 'pagado' WHERE idPedido = ?`, [pedido.idPedido])
+    const fechaHoy = today()
+    run(`UPDATE PedidoCompra SET estadoPago = 'pagado', fechaPago = ? WHERE idPedido = ?`, [fechaHoy, pedido.idPedido])
     setConfirmPagar(false)
+    setPedido(prev => ({ ...prev, estadoPago: 'pagado', fechaPago: fechaHoy }))
     onUpdated()
-    onBack()
   }
 
   function cambiarEstadoLogistico(nuevoEstado) {
@@ -537,8 +556,8 @@ function PedidoDetalle({ pedido, onBack, onUpdated, onEditar }) {
       [nuevoEstado, fechaRecepcion, pedido.idPedido]
     )
     setConfirmEstado(null)
+    reload()
     onUpdated()
-    onBack()
   }
 
   const esPendientePago   = pedido.estadoPago === 'pendiente'
@@ -550,15 +569,22 @@ function PedidoDetalle({ pedido, onBack, onUpdated, onEditar }) {
   return (
     <div className="max-w-4xl mx-auto space-y-6 animate-slide-up">
       {/* Breadcrumb */}
-      <div className="flex items-center gap-3">
-        <button onClick={onBack}
-          className="flex items-center gap-2 text-surface-400 hover:text-white text-sm font-body transition-colors">
-          <ArrowLeft size={16} />Volver a pedidos
-        </button>
-        <span className="text-surface-600">/</span>
-        <span className="text-surface-300 text-sm font-body">
-          Pedido <span className="text-brand-400 font-mono">#{pedido.idPedido}</span>
-        </span>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <button onClick={onBack}
+            className="flex items-center gap-2 text-surface-400 hover:text-white text-sm font-body transition-colors">
+            <ArrowLeft size={16} />Volver a pedidos
+          </button>
+          <span className="text-surface-600">/</span>
+          <span className="text-surface-300 text-sm font-body">
+            Pedido <span className="text-brand-400 font-mono">#{pedido.idPedido}</span>
+          </span>
+        </div>
+        {estadoLog === 'encargado' && (
+          <Button size="sm" variant="secondary" icon={Pencil} onClick={onEditar}>
+            Editar
+          </Button>
+        )}
       </div>
 
       {/* Cabecera */}
@@ -577,12 +603,6 @@ function PedidoDetalle({ pedido, onBack, onUpdated, onEditar }) {
               {esPendientePago ? <Clock size={11} className="inline mr-1" /> : <CheckCircle2 size={11} className="inline mr-1" />}
               {esPendientePago ? 'Pago pendiente' : 'Pagado'}
             </Badge>
-            {/* Botones de cabecera: solo Editar */}
-            {estadoLog === 'encargado' && (
-              <Button size="sm" variant="secondary" icon={Pencil} onClick={onEditar}>
-                Editar pedido
-              </Button>
-            )}
           </div>
         </div>
         {/* Aviso echeck */}
@@ -606,6 +626,12 @@ function PedidoDetalle({ pedido, onBack, onUpdated, onEditar }) {
               <p className="text-white text-sm font-mono">{fmtFecha(pedido.fechaRecepcion)}</p>
             </div>
           )}
+          {pedido.estadoPago === 'pagado' && (
+            <div className="bg-surface-700 rounded-xl p-4">
+              <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Fecha de pago</p>
+              <p className="text-emerald-400 text-sm font-mono">{fmtFecha(pedido.fechaPago)}</p>
+            </div>
+          )}
           <div className="bg-surface-700 rounded-xl p-4">
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Método de pago</p>
             <p className="text-white text-sm font-body capitalize">
@@ -625,18 +651,19 @@ function PedidoDetalle({ pedido, onBack, onUpdated, onEditar }) {
         </div>
         {/* Acciones de estado */}
         {(estadoLog === 'encargado' || esPendientePago) && (
-          <div className="pt-5 border-t border-surface-700">
+          <div className="mt-6 pt-5 border-t border-surface-700">
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-3">Cambiar estado</p>
             <div className="flex flex-wrap gap-2">
               {estadoLog === 'encargado' && (
-                <Button size="sm" icon={CheckCircle2} onClick={() => setConfirmEstado('recibido')}
-                  className="bg-emerald-600 hover:bg-emerald-500 border-emerald-500 text-white">
+                <Button size="sm" icon={Truck} onClick={() => setConfirmEstado('recibido')}
+                  className="bg-brand-600 hover:bg-brand-500 border-brand-500 text-white">
                   Marcar Recibido
                 </Button>
               )}
               {esPendientePago && (
-                <Button size="sm" icon={BadgeCheck} onClick={() => setConfirmPagar(true)}>
-                  Marcar pagado
+                <Button size="sm" icon={BadgeCheck} onClick={() => setConfirmPagar(true)}
+                  className="bg-emerald-600 hover:bg-emerald-500 border-emerald-500 text-white">
+                  Marcar Pagado
                 </Button>
               )}
             </div>
@@ -806,6 +833,7 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
 
   function guardar() {
     setError('')
+    if (!proveedor) { setError('Seleccioná un proveedor antes de guardar el pedido.'); return }
     const validItems = items.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
     if (!validItems.length) { setError('Agregá al menos un producto con ID válido.'); return }
 

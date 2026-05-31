@@ -154,6 +154,7 @@ function runSchema() {
       estadoPago      TEXT NOT NULL DEFAULT 'pendiente' CHECK(estadoPago IN ('pendiente','pagado')),
       estadoLogistico TEXT NOT NULL DEFAULT 'encargado' CHECK(estadoLogistico IN ('encargado','recibido','revisar')),
       fechaRecepcion  TEXT,
+      fechaPago       TEXT,
       metodoPago      TEXT DEFAULT 'efectivo' CHECK(metodoPago IN ('efectivo','transferencia','echeck')),
       idProveedor     INTEGER,
       FOREIGN KEY (idProveedor) REFERENCES Proveedor(idProveedor) ON DELETE SET NULL
@@ -233,7 +234,6 @@ function runMigrations() {
 
   // Renombrar 'estado' → 'estadoPago' si todavía se llama 'estado' (bases antiguas)
   if (colNamesPedido.includes('estado') && !colNamesPedido.includes('estadoPago')) {
-    // SQLite no tiene RENAME COLUMN en versiones viejas, usamos ADD + UPDATE
     db.run(`ALTER TABLE PedidoCompra ADD COLUMN estadoPago TEXT DEFAULT 'pendiente'`)
     db.run(`UPDATE PedidoCompra SET estadoPago = estado`)
     persistDB()
@@ -252,6 +252,11 @@ function runMigrations() {
   }
   if (!colNamesPedido.includes('idProveedor')) {
     db.run(`ALTER TABLE PedidoCompra ADD COLUMN idProveedor INTEGER`)
+    persistDB()
+  }
+  // v10 → v11: agrega fechaPago a PedidoCompra
+  if (!colNamesPedido.includes('fechaPago')) {
+    db.run(`ALTER TABLE PedidoCompra ADD COLUMN fechaPago TEXT`)
     persistDB()
   }
 }
