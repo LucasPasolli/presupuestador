@@ -54,6 +54,7 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
     idCategoria:     1,
     precioProveedor: '',
     precioUnitario:  '',
+    puntoReposicion: '',
   })
   const [margen,  setMargen]  = useState('')   // porcentaje de ganancia
   const [errors,  setErrors]  = useState({})
@@ -72,6 +73,11 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
       precioUnitario:
         producto.precioUnitario && producto.precioUnitario > 0
           ? String(producto.precioUnitario)
+          : '',
+
+      puntoReposicion:
+        producto.puntoReposicion && producto.puntoReposicion > 0
+          ? String(producto.puntoReposicion)
           : '',
     })
     setMargen('')
@@ -141,9 +147,10 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
       : parseFloat(
           String(form.precioUnitario).replace(',', '.')
         )
+    const pr = parseInt(form.puntoReposicion) || 0
     run(
-      `UPDATE Producto SET nombre=?, idCategoria=?, precioProveedor=?, precioUnitario=? WHERE idProducto=?`,
-      [form.nombre.trim(), form.idCategoria, pp, pu, producto.idProducto]
+      `UPDATE Producto SET nombre=?, idCategoria=?, precioProveedor=?, precioUnitario=?, puntoReposicion=? WHERE idProducto=?`,
+      [form.nombre.trim(), form.idCategoria, pp, pu, pr, producto.idProducto]
     )
     onSaved()
     onClose()
@@ -270,6 +277,17 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
           )}
         </div>
 
+        {/* Punto de Reposición */}
+        <Input
+          label="Punto de Reposición (stock mínimo)"
+          value={form.puntoReposicion}
+          onChange={(e) => {
+            const v = e.target.value.replace(/\D/g, '')
+            set('puntoReposicion', v)
+          }}
+          placeholder="Ej: 5"
+        />
+
         <div className="flex gap-2 pt-2">
           <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
           <Button className="flex-1" onClick={guardar}>Guardar Cambios</Button>
@@ -385,7 +403,8 @@ function StockModal({ open, onClose, producto, onSaved }) {
 
     // Producto SIN medidas
     setModo('sinMedidas')
-    setStockNuevo(String(producto?.cantidad ?? 0))
+    // Si el stock actual es 0, dejar el campo vacío en lugar de mostrar "0"
+    setStockNuevo((producto?.cantidad ?? 0) > 0 ? String(producto.cantidad) : '')
 
     // Si ya tiene stock cargado, fijar tipo
     if ((producto?.cantidad ?? 0) > 0) {
@@ -822,11 +841,13 @@ const PAGE_SIZE = 50
 
 export default function Inventario() {
   const [productos,    setProductos]    = useState([])
+  const [allProductos, setAllProductos] = useState([])   // todos sin filtro para stats
   const [categorias,   setCategorias]   = useState([])
   const [searchNombre, setSearchNombre] = useState('')
   const [searchId,     setSearchId]     = useState('')  
   const [filterCat,    setFilterCat]    = useState('all')
   const [filterStock,  setFilterStock]  = useState('all')
+  const [filterBajoStock, setFilterBajoStock] = useState(false)
   const [page,         setPage]         = useState(1)
   const [sortKey,      setSortKey]      = useState('nombre')
   const [sortDir,      setSortDir]      = useState('asc')
@@ -843,6 +864,17 @@ export default function Inventario() {
   const load = useCallback(() => {
     const cats = query('SELECT * FROM Categoria ORDER BY nombre')
     setCategorias(cats)
+
+    // Cargar todos los productos para estadísticas globales
+    const todosSql = `
+      SELECT p.*, c.nombre as categoriaNombre,
+        CASE WHEN p.tieneMedidas=1
+          THEN (SELECT COALESCE(SUM(pm.cantidad),0) FROM ProductoMedida pm WHERE pm.idProducto=p.idProducto)
+          ELSE p.cantidad
+        END as stockTotal
+      FROM Producto p
+      JOIN Categoria c ON p.idCategoria=c.idCategoria`
+    setAllProductos(query(todosSql))
 
     let sql = `
       SELECT p.*, c.nombre as categoriaNombre,
@@ -875,9 +907,19 @@ export default function Inventario() {
 
     sql += ` ORDER BY ${sortKey === 'stock' ? 'stockTotal' : sortKey === 'precio' ? 'precioUnitario' : 'p.nombre'} ${sortDir.toUpperCase()}`
 
-    setProductos(query(sql, params))
+    let resultado = query(sql, params)
+
+    if (filterBajoStock) {
+      resultado = resultado.filter(
+        (p) =>
+          p.puntoReposicion > 0 &&
+          p.stockTotal <= p.puntoReposicion
+      )
+    }
+
+setProductos(resultado)
     setPage(1)
-  }, [searchNombre, searchId, filterCat, filterStock, sortKey, sortDir])
+  }, [searchNombre, searchId, filterCat, filterStock, filterBajoStock, sortKey, sortDir])
 
   useEffect(() => { load() }, [load])
 
@@ -1008,75 +1050,144 @@ export default function Inventario() {
 
       {/* Resumen rápido */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        {[
-          { label: 'Total productos', value: productos.length },
-          { label: 'Con stock',       value: productos.filter((p) => p.stockTotal > 0).length },
-          { label: 'Sin stock',       value: productos.filter((p) => p.stockTotal === 0).length },
-          { label: 'Categorías',      value: categorias.length },
-        ].map(({ label, value }) => (
-          <div key={label} className="bg-surface-800 border border-surface-700 rounded-xl p-4">
-            <p className="text-surface-400 text-xs uppercase tracking-widest font-body">{label}</p>
-            <p className="font-display text-3xl text-white tracking-widest mt-0.5">{value}</p>
-          </div>
-        ))}
+        <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
+          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">
+            Total productos
+          </p>
+          <p className="font-display text-3xl text-white tracking-widest mt-0.5">
+            {allProductos.length}
+          </p>
+        </div>
+
+        <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
+          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">
+            Con stock
+          </p>
+          <p className="font-display text-3xl text-white tracking-widest mt-0.5">
+            {allProductos.filter((p) => p.stockTotal > 0).length}
+          </p>
+        </div>
+
+        <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
+          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">
+            Sin stock
+          </p>
+          <p className="font-display text-3xl text-white tracking-widest mt-0.5">
+            {allProductos.filter((p) => p.stockTotal === 0).length}
+          </p>
+        </div>
+
+        <button
+          onClick={() => setFilterBajoStock((v) => !v)}
+          className={`
+            rounded-xl p-4 border text-left transition-all
+            ${
+              filterBajoStock
+                ? 'bg-yellow-500/20 border-yellow-400/60'
+                : 'bg-yellow-500/10 border-yellow-500/30 hover:bg-yellow-500/15'
+            }
+          `}
+        >
+          <p className="text-yellow-300 text-xs uppercase tracking-widest font-body">
+            Bajo stock
+          </p>
+
+          <p className="font-display text-3xl text-yellow-200 tracking-widest mt-0.5">
+            {
+              allProductos.filter(
+                (p) =>
+                  p.puntoReposicion > 0 &&
+                  p.stockTotal <= p.puntoReposicion
+              ).length
+            }
+          </p>
+
+          <p className="text-yellow-400/70 text-xs mt-1">
+            Click para filtrar
+          </p>
+        </button>
       </div>
 
       {/* Filtros */}
       <Card className="p-4">
-        <div className="flex flex-wrap gap-3 items-center">
-        <div className="flex flex-1 gap-3 min-w-[320px]">
-          {/* Buscar por nombre */}
-          <div className="relative flex-1">
-            <Search
-              size={15}
-              className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none"
-            />
+        {(() => {
+          const hayFiltros = searchNombre || searchId || filterCat !== 'all' || filterStock !== 'all' || filterBajoStock
+          return (
+            <div className="flex flex-wrap gap-3 items-center">
+              <div className="flex flex-1 gap-3 min-w-[200px]">
+                {/* Buscar por nombre — se achica cuando aparece el botón limpiar */}
+                <div className={`relative transition-all duration-200 ${hayFiltros ? 'flex-1' : 'flex-1'}`}>
+                  <Search
+                    size={15}
+                    className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none"
+                  />
+                  <input
+                    value={searchNombre}
+                    onChange={(e) => setSearchNombre(e.target.value)}
+                    placeholder="Buscar por nombre..."
+                    className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2 text-white
+                              text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
+                  />
+                </div>
 
-            <input
-              value={searchNombre}
-              onChange={(e) => setSearchNombre(e.target.value)}
-              placeholder="Buscar por nombre..."
-              className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2 text-white
-                        text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
-            />
-          </div>
+                {/* Buscar por ID */}
+                <div className="relative w-40 flex-shrink-0">
+                  <input
+                    value={searchId}
+                    onChange={(e) => setSearchId(e.target.value.replace(/\D/g, ''))}
+                    placeholder="ID..."
+                    className="w-full bg-surface-700 border border-surface-600 rounded-xl px-4 py-2 text-white
+                              text-sm font-mono placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
+                  />
+                </div>
+              </div>
 
-          {/* Buscar por ID */}
-          <div className="relative w-40">
-            <input
-              value={searchId}
-              onChange={(e) => setSearchId(e.target.value.replace(/\D/g, ''))}
-              placeholder="ID..."
-              className="w-full bg-surface-700 border border-surface-600 rounded-xl px-4 py-2 text-white
-                        text-sm font-mono placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
-            />
-          </div>
-        </div>
-          {/* Filtro categoría */}
-          <select
-            value={filterCat}
-            onChange={(e) => setFilterCat(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
-                       font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer"
-          >
-            <option value="all" className="font-body">Todas las categorías</option>
-            {categorias.map((c) => (
-              <option key={c.idCategoria} value={c.idCategoria} className="font-body">{c.nombre}</option>
-            ))}
-          </select>
+              {/* Filtro categoría */}
+              <select
+                value={filterCat}
+                onChange={(e) => setFilterCat(e.target.value)}
+                className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
+                           font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer"
+              >
+                <option value="all" className="font-body">Todas las categorías</option>
+                {categorias.map((c) => (
+                  <option key={c.idCategoria} value={c.idCategoria} className="font-body">{c.nombre}</option>
+                ))}
+              </select>
 
-          {/* Filtro stock */}
-          <select
-            value={filterStock}
-            onChange={(e) => setFilterStock(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
-                       font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer"
-          >
-            <option value="all" className="font-body">Todo el stock</option>
-            <option value="con" className="font-body">Con stock</option>
-            <option value="sin" className="font-body">Sin stock</option>
-          </select>
-        </div>
+              {/* Filtro stock */}
+              <select
+                value={filterStock}
+                onChange={(e) => setFilterStock(e.target.value)}
+                className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
+                           font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer"
+              >
+                <option value="all" className="font-body">Todo el stock</option>
+                <option value="con" className="font-body">Con stock</option>
+                <option value="sin" className="font-body">Sin stock</option>
+              </select>
+
+              {/* Botón limpiar filtros — solo cuando hay filtros activos */}
+              {hayFiltros && (
+                <button
+                  onClick={() => {
+                    setSearchNombre('')
+                    setSearchId('')
+                    setFilterCat('all')
+                    setFilterStock('all')
+                    setFilterBajoStock(false)
+                  }}
+                  className="flex items-center gap-2 bg-surface-700 border border-surface-600 rounded-xl px-3 py-2
+                             text-surface-300 text-sm font-body hover:border-red-500/50 hover:text-red-400
+                             hover:bg-red-500/10 transition-all cursor-pointer whitespace-nowrap"
+                >
+                  <X size={13} />
+                  Limpiar filtros
+                </button>
+              )}
+            </div>
+          )
+        })()}
       </Card>
 
       {/* Tabla */}
@@ -1136,7 +1247,8 @@ export default function Inventario() {
             </thead>
             <tbody>
               {paginated.map((p) => (
-                <tr key={p.idProducto} className="border-b border-surface-700/50 hover:bg-surface-700/30 transition-colors">
+                <tr key={p.idProducto} className={`border-b border-surface-700/50 hover:bg-surface-700/30 transition-colors
+                  ${p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion ? 'bg-yellow-500/5' : ''}`}>
                   <Td className="font-mono text-surface-400 whitespace-nowrap">#{p.idProducto}</Td>
                   <Td>
                     <span className="text-white font-body">{p.nombre}</span>
@@ -1153,7 +1265,13 @@ export default function Inventario() {
                     {p.precioUnitario > 0 ? fmt(p.precioUnitario) : <span className="text-surface-500">—</span>}
                   </Td>
                   <Td>
-                    <span className={`font-mono font-medium ${p.stockTotal === 0 ? 'text-red-400' : p.stockTotal < 5 ? 'text-yellow-400' : 'text-emerald-400'}`}>
+                    <span className={`font-mono font-medium ${
+                      p.stockTotal === 0
+                        ? 'text-red-400'
+                        : p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion
+                          ? 'text-yellow-400'
+                          : 'text-emerald-400'
+                    }`}>
                       {p.stockTotal}
                     </span>
                   </Td>

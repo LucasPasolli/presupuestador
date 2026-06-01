@@ -86,6 +86,7 @@ function runSchema() {
       precioUnitario  REAL NOT NULL DEFAULT 0,
       cantidad        INTEGER NOT NULL DEFAULT 0,
       tieneMedidas    INTEGER NOT NULL DEFAULT 0 CHECK(tieneMedidas IN (0,1)),
+      puntoReposicion INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (idCategoria) REFERENCES Categoria(idCategoria) ON DELETE RESTRICT
     );
   `)
@@ -216,6 +217,15 @@ function runMigrations() {
   if (!yaExistePP) {
     db.run(`ALTER TABLE Producto ADD COLUMN precioProveedor REAL DEFAULT 0`)
     db.run(`UPDATE Producto SET precioProveedor = 0 WHERE precioProveedor IS NULL`)
+    persistDB()
+  }
+
+  // v11 → v12: agrega puntoReposicion a Producto.
+  const colsProd2 = db.exec(`PRAGMA table_info(Producto)`)[0]?.values ?? []
+  const yaExistePR = colsProd2.some(row => row[1] === 'puntoReposicion')
+  if (!yaExistePR) {
+    db.run(`ALTER TABLE Producto ADD COLUMN puntoReposicion INTEGER DEFAULT 0`)
+    db.run(`UPDATE Producto SET puntoReposicion = 0 WHERE puntoReposicion IS NULL`)
     persistDB()
   }
 
