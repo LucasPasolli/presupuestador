@@ -22,6 +22,11 @@ function fmt(n) {
   return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(n ?? 0)
 }
 
+// Elimina tildes para búsquedas insensibles a acentos
+function norm(s) {
+  return (s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+}
+
 // ─── Toast ─────────────────────────────────────────────────────────────────
 
 function Toast({ message, onDone }) {
@@ -107,10 +112,13 @@ function ClienteSelector({ value, onChange, onToast }) {
   function buscar(text) {
     setSearch(text)
     if (!text.trim()) { setResults([]); setShowDrop(false); return }
-    const rows = query(
-      `SELECT * FROM Cliente WHERE nombre LIKE ? OR apellido LIKE ? OR CAST(idCliente AS TEXT) = ? LIMIT 8`,
-      [`%${text}%`, `%${text}%`, text.trim()]
-    )
+    const normText = norm(text.trim())
+    const byId = query(`SELECT * FROM Cliente WHERE CAST(idCliente AS TEXT) = ? LIMIT 1`, [text.trim()])
+    const byName = query(`SELECT * FROM Cliente LIMIT 300`)
+      .filter(c => norm(c.nombre).includes(normText) || norm(c.apellido).includes(normText))
+    // Unir sin duplicados
+    const seen = new Set(byId.map(c => c.idCliente))
+    const rows = [...byId, ...byName.filter(c => !seen.has(c.idCliente))].slice(0, 8)
     setResults(rows)
     setShowDrop(true)
   }
@@ -199,7 +207,7 @@ function ClienteSelector({ value, onChange, onToast }) {
 
 // ─── Fila de ítem ───────────────────────────────────────────────────────────
 
-function ItemRow({ item, index, onUpdate, onRemove, onClearError, onStockError }) {
+function ItemRow({ uid, item, index, onUpdate, onRemove, onClearError, onStockError }) {
   const [nombreSearch,   setNombreSearch]   = useState(item.nombreProducto || '')
   const [nombreResults,  setNombreResults]  = useState([])
   const [showDrop,       setShowDrop]       = useState(false)
@@ -207,11 +215,15 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError, onStockError }
   const [medidas,        setMedidas]        = useState([])
   const [idError,        setIdError]        = useState('')
   const [stockWarning,   setStockWarning]   = useState('')
+  const [priceWarning,   setPriceWarning]   = useState(false)
   const [tooltipPos,     setTooltipPos]     = useState({ top: 0, left: 0 })
   const [showTooltip,    setShowTooltip]    = useState(false)
-  const cantRef  = useRef(null)
-  const wrapRef  = useRef(null)
-  const inputRef = useRef(null)
+  const cantRef   = useRef(null)
+  const wrapRef   = useRef(null)
+  const inputRef  = useRef(null)
+  const priceRef  = useRef(null)
+  const [showPriceTooltip, setShowPriceTooltip] = useState(false)
+  const [priceTooltipPos,  setPriceTooltipPos]  = useState({ top: 0, left: 0 })
 
   useEffect(() => {
     const handler = e => {
@@ -246,16 +258,16 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError, onStockError }
       setMedidas(ms.map(r => r.medida))
     } else {
       setMedidas([])
-      onUpdate(index, 'medida', null)
+      onUpdate(uid, 'medida', null)
     }
   }, [item.idProducto])
 
   function checkStock(idProducto, medida, cantidad) {
     if (!idProducto || !cantidad || parseInt(cantidad) <= 0) {
-      setStockWarning(''); onStockError(index, false); return
+      setStockWarning(''); onStockError(uid, false); return
     }
     const prod = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(idProducto)])[0]
-    if (!prod) { setStockWarning(''); onStockError(index, false); return }
+    if (!prod) { setStockWarning(''); onStockError(uid, false); return }
     let stockDisp = 0
     if (prod.tieneMedidas && medida) {
       const pm = query('SELECT cantidad FROM ProductoMedida WHERE idProducto = ? AND medida = ?', [parseInt(idProducto), medida])[0]
@@ -263,24 +275,36 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError, onStockError }
     } else if (!prod.tieneMedidas) {
       stockDisp = prod.cantidad ?? 0
     } else {
-      setStockWarning(''); onStockError(index, false); return
+      setStockWarning(''); onStockError(uid, false); return
     }
     const pedido = parseInt(cantidad) || 0
     if (pedido > stockDisp) {
       setStockWarning(`Stock Disponible: ${stockDisp}.`)
-      onStockError(index, true)
+      onStockError(uid, true)
     } else {
       setStockWarning('')
-      onStockError(index, false)
+      onStockError(uid, false)
     }
   }
 
   function buscarPorNombre(text) {
     setNombreSearch(text)
     onClearError()
-    onUpdate(index, 'nombreProducto', text)
+    onUpdate(uid, 'nombreProducto', text)
+    // Si había un producto seleccionado y el usuario modifica el nombre, limpiar el ID y precio
+    if (item.idProducto) {
+      onUpdate(uid, 'idProducto', '')
+      onUpdate(uid, 'precioUnitario', 0)
+      onUpdate(uid, 'medida', null)
+      setStockWarning('')
+      onStockError(uid, false)
+      setPriceWarning(false)
+    }
     if (!text.trim()) { setNombreResults([]); setShowDrop(false); return }
-    const rows = query(`SELECT * FROM Producto WHERE nombre LIKE ? LIMIT 12`, [`%${text.trim()}%`])
+    const normText = norm(text.trim())
+    const rows = query(`SELECT * FROM Producto LIMIT 300`)
+      .filter(p => norm(p.nombre).includes(normText))
+      .slice(0, 12)
     setNombreResults(rows)
     setShowDrop(true)
   }
@@ -290,36 +314,46 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError, onStockError }
     setShowDrop(false)
     onClearError()
     setIdError('')
-    onUpdate(index, 'idProducto',     p.idProducto)
-    onUpdate(index, 'nombreProducto', p.nombre)
-    onUpdate(index, 'precioUnitario', p.precioUnitario)
-    onUpdate(index, 'medida',         null)
+    onUpdate(uid, 'idProducto',     p.idProducto)
+    onUpdate(uid, 'nombreProducto', p.nombre)
+    onUpdate(uid, 'precioUnitario', p.precioUnitario)
+    onUpdate(uid, 'medida',         null)
+    setPriceWarning(!p.precioUnitario)
     checkStock(p.idProducto, null, item.cantidad)
   }
 
   function handleIdChange(val) {
     const clean = val.replace(/\D/g, '')
     onClearError()
-    onUpdate(index, 'idProducto', clean)
+    onUpdate(uid, 'idProducto', clean)
     if (clean) {
       const p = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(clean)])[0]
       if (p) {
         setNombreSearch(p.nombre)
-        onUpdate(index, 'nombreProducto', p.nombre)
-        onUpdate(index, 'precioUnitario', p.precioUnitario)
-        onUpdate(index, 'medida', null)
+        onUpdate(uid, 'nombreProducto', p.nombre)
+        onUpdate(uid, 'precioUnitario', p.precioUnitario)
+        onUpdate(uid, 'medida', null)
         setIdError('')
+        setPriceWarning(!p.precioUnitario)
         checkStock(p.idProducto, null, item.cantidad)
       } else {
         // ID no existe — limpiamos nombre y precio, no rellenamos nada
         setNombreSearch('')
-        onUpdate(index, 'nombreProducto', '')
-        onUpdate(index, 'precioUnitario', 0)
-        onUpdate(index, 'medida', null)
+        onUpdate(uid, 'nombreProducto', '')
+        onUpdate(uid, 'precioUnitario', 0)
+        onUpdate(uid, 'medida', null)
         setIdError(`Sin producto con ID ${clean}`)
       }
     } else {
+      // ID vacío → limpiar todo el producto
+      setNombreSearch('')
+      onUpdate(uid, 'nombreProducto', '')
+      onUpdate(uid, 'precioUnitario', 0)
+      onUpdate(uid, 'medida', null)
+      setStockWarning('')
+      onStockError(uid, false)
       setIdError('')
+      setPriceWarning(false)
     }
   }
 
@@ -339,12 +373,12 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError, onStockError }
             onChange={e => {
               onClearError()
               const raw = e.target.value.replace(/\D/g, '')
-              onUpdate(index, 'cantidad', raw)
+              onUpdate(uid, 'cantidad', raw)
               checkStock(item.idProducto, item.medida, raw)
             }}
             onBlur={e => {
               const val = (!e.target.value || parseInt(e.target.value) < 1) ? '1' : e.target.value
-              if (!e.target.value || parseInt(e.target.value) < 1) onUpdate(index, 'cantidad', '1')
+              if (!e.target.value || parseInt(e.target.value) < 1) onUpdate(uid, 'cantidad', '1')
               checkStock(item.idProducto, item.medida, val)
               setShowTooltip(false)
             }}
@@ -409,7 +443,7 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError, onStockError }
         {medidas.length > 0 ? (
           <select value={item.medida || ''}
             onChange={e => {
-              onUpdate(index, 'medida', e.target.value)
+              onUpdate(uid, 'medida', e.target.value)
               checkStock(item.idProducto, e.target.value, item.cantidad)
             }}
             className="w-full bg-surface-700 border border-surface-600 rounded-lg px-2 py-1.5
@@ -424,10 +458,33 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError, onStockError }
 
       {/* Precio — read only */}
       <td className="py-2 px-2 w-36">
-        <div className="w-full bg-surface-800 border border-surface-700 rounded-lg px-2 py-1.5
-                        text-surface-300 text-sm font-mono cursor-not-allowed select-none">
-          {item.precioUnitario ? fmt(parseFloat(item.precioUnitario)) : <span className="text-surface-600">—</span>}
+        <div ref={priceRef}
+             className={`w-full rounded-lg px-2 py-1.5 text-sm font-mono cursor-not-allowed select-none
+                        ${priceWarning
+                          ? 'bg-yellow-900/40 border border-yellow-500 text-yellow-300'
+                          : 'bg-surface-800 border border-surface-700 text-surface-300'}`}
+             onMouseEnter={() => {
+               if (priceWarning) {
+                 const r = priceRef.current?.getBoundingClientRect()
+                 if (r) setPriceTooltipPos({ top: r.top + window.scrollY - 36, left: r.left + window.scrollX })
+                 setShowPriceTooltip(true)
+               }
+             }}
+             onMouseLeave={() => setShowPriceTooltip(false)}>
+          {item.precioUnitario ? fmt(parseFloat(item.precioUnitario)) : (
+            priceWarning
+              ? <span className="text-yellow-400 text-xs">Sin precio ⚠</span>
+              : <span className="text-surface-600">—</span>
+          )}
         </div>
+        {priceWarning && showPriceTooltip && createPortal(
+          <div style={{ position: 'absolute', top: priceTooltipPos.top, left: priceTooltipPos.left, zIndex: 9999, pointerEvents: 'none' }}
+               className="bg-yellow-900/95 border border-yellow-500/60 text-yellow-200 text-[11px] font-body
+                          rounded-lg px-2.5 py-1.5 shadow-xl whitespace-nowrap flex items-center gap-1.5">
+            <span>⚠</span><span>Sin precio definido — asignarlo desde Inventario</span>
+          </div>,
+          document.body
+        )}
       </td>
 
       {/* Subtotal */}
@@ -439,7 +496,7 @@ function ItemRow({ item, index, onUpdate, onRemove, onClearError, onStockError }
 
       {/* Borrar */}
       <td className="py-2 px-2 w-10">
-        <button onClick={() => onRemove(index)} className="text-surface-500 hover:text-red-400 transition-colors p-1 rounded">
+        <button onClick={() => onRemove(uid)} className="text-surface-500 hover:text-red-400 transition-colors p-1 rounded">
           <Trash2 size={15} />
         </button>
       </td>
@@ -620,7 +677,7 @@ async function generarPDFPresupuesto(idPresupuesto) {
   doc.save(`Presupuesto_${idPresupuesto}_${pres.cNombre}_${pres.cApellido}.pdf`)
 }
 
-const ITEM_EMPTY = () => ({ idProducto: '', nombreProducto: '', cantidad: 1, precioUnitario: 0, medida: null })
+const ITEM_EMPTY = () => ({ _uid: Math.random().toString(36).slice(2), idProducto: '', nombreProducto: '', cantidad: 1, precioUnitario: 0, medida: null })
 
 export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
   // ── Modo edición: cargar datos existentes ──
@@ -657,6 +714,7 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
     const pctDB = esExcepcionDB ? String(((1 - factorDB) * 100).toFixed(4).replace(/\.?0+$/, '')) : ''
 
     const itemsDB = detalles.map(d => ({
+      _uid: Math.random().toString(36).slice(2),
       idProducto: String(d.idProducto),
       nombreProducto: d.nombreProducto ?? '',
       cantidad: String(d.cantidad),
@@ -696,17 +754,17 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
     acc + (parseInt(it.cantidad) || 0) * (parseFloat(it.precioUnitario) || 0), 0)
   const totalFinal = subtotalOriginal * factorReal
 
-  function updateItem(idx, key, val) {
-    setItems(prev => prev.map((it, i) => i === idx ? { ...it, [key]: val } : it))
+  function updateItem(uid, key, val) {
+    setItems(prev => prev.map(it => it._uid === uid ? { ...it, [key]: val } : it))
     setError('')
   }
   function addItem() { setItems(prev => [...prev, ITEM_EMPTY()]) }
-  function removeItem(idx) {
-    setItems(prev => prev.filter((_, i) => i !== idx))
-    setStockErrors(prev => { const n = { ...prev }; delete n[idx]; return n })
+  function removeItem(uid) {
+    setItems(prev => prev.filter(it => it._uid !== uid))
+    setStockErrors(prev => { const n = { ...prev }; delete n[uid]; return n })
   }
-  function handleStockError(idx, hasError) {
-    setStockErrors(prev => ({ ...prev, [idx]: hasError }))
+  function handleStockError(uid, hasError) {
+    setStockErrors(prev => ({ ...prev, [uid]: hasError }))
   }
 
   function guardar() {
@@ -720,6 +778,14 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
       const existe = query('SELECT idProducto, tieneMedidas FROM Producto WHERE idProducto = ?', [parseInt(it.idProducto)])[0]
       if (!existe) { setError(`El producto ID ${it.idProducto} no existe en el inventario.`); return }
       if (existe.tieneMedidas && !it.medida) { setError(`Seleccioná una medida para el producto ID ${it.idProducto}.`); return }
+    }
+
+    // Verificar que todos los ítems tengan precio definido
+    for (const it of validItems) {
+      if (!parseFloat(it.precioUnitario)) {
+        setError(`El producto "${it.nombreProducto || 'ID ' + it.idProducto}" no tiene precio definido. Asignalo desde Inventario.`)
+        return
+      }
     }
 
     // Verificar stock suficiente para todos los ítems
@@ -899,7 +965,7 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
             </thead>
             <tbody>
               {items.map((item, idx) => (
-                <ItemRow key={idx} item={item} index={idx} onUpdate={updateItem} onRemove={removeItem} onClearError={() => setError('')} onStockError={handleStockError} />
+                <ItemRow key={item._uid} uid={item._uid} item={item} index={idx} onUpdate={updateItem} onRemove={removeItem} onClearError={() => setError('')} onStockError={handleStockError} />
               ))}
             </tbody>
           </table>
