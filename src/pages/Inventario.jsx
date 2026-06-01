@@ -9,6 +9,13 @@ import * as XLSX from 'xlsx'
 
 const MEDIDAS_VALIDAS = ['standard', '0.25', '0.50', '0.75', '1.00', '1.25', '1.50', '1.75', '2.00']
 
+function normalize(str) {
+  return str
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+}
+
 function fmt(n) {
   return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(n ?? 0)
 }
@@ -888,8 +895,7 @@ export default function Inventario() {
     const params = []
 
     if (searchNombre.trim()) {
-      sql += ` AND p.nombre LIKE ?`
-      params.push(`%${searchNombre.trim()}%`)
+      // El filtro por nombre se aplica en JS para ignorar tildes
     }
     if (searchId.trim()) {
       sql += ` AND p.idProducto = ?`
@@ -908,6 +914,11 @@ export default function Inventario() {
     sql += ` ORDER BY ${sortKey === 'stock' ? 'stockTotal' : sortKey === 'precio' ? 'precioUnitario' : 'p.nombre'} ${sortDir.toUpperCase()}`
 
     let resultado = query(sql, params)
+
+    if (searchNombre.trim()) {
+      const needle = normalize(searchNombre.trim())
+      resultado = resultado.filter((p) => normalize(p.nombre).includes(needle))
+    }
 
     if (filterBajoStock) {
       resultado = resultado.filter(
