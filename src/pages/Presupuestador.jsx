@@ -302,7 +302,7 @@ function ItemRow({ uid, item, index, onUpdate, onRemove, onClearError, onStockEr
     }
     if (!text.trim()) { setNombreResults([]); setShowDrop(false); return }
     const normText = norm(text.trim())
-    const rows = query(`SELECT * FROM Producto LIMIT 300`)
+    const rows = query(`SELECT * FROM Producto LIMIT 2000`)
       .filter(p => norm(p.nombre).includes(normText))
       .slice(0, 12)
     setNombreResults(rows)

@@ -1,5 +1,5 @@
 // src/pages/PedidosCompra.jsx
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { query, run } from '../lib/database'
 import { Card, PageHeader, Button, Badge, Modal, Input } from '../components/ui'
@@ -71,7 +71,8 @@ function NuevoProveedorModal({ open, onClose, onCreated }) {
 
   function guardar() {
     const e = {}
-    if (!form.nombreFiscal.trim()) e.nombreFiscal = 'Requerido'
+    if (!form.nombreFiscal.trim())    e.nombreFiscal    = 'Requerido'
+    if (!form.nombreComercial.trim()) e.nombreComercial = 'Requerido'
     setErrors(e)
     if (Object.keys(e).length) return
 
@@ -92,8 +93,9 @@ function NuevoProveedorModal({ open, onClose, onCreated }) {
         <Input label="Nombre fiscal *" value={form.nombreFiscal}
           onChange={e => set('nombreFiscal', e.target.value)}
           error={errors.nombreFiscal} placeholder="Razón social" />
-        <Input label="Nombre comercial" value={form.nombreComercial}
+        <Input label="Nombre comercial *" value={form.nombreComercial}
           onChange={e => set('nombreComercial', e.target.value)}
+          error={errors.nombreComercial}
           placeholder="Nombre por el que se lo conoce" />
         <Input label="Identificación tributaria (CUIT)" value={form.identificacionTributaria}
           onChange={e => set('identificacionTributaria', e.target.value)}
@@ -228,62 +230,10 @@ function ProveedorSelector({ value, onChange, onToast }) {
   )
 }
 
-// ─── Dropdown de productos con posición fixed ───────────────────────────────
+// ─── Helpers de normalización ──────────────────────────────────────────────
 
-function ProductoDropdown({ results, anchorRef, dropRef, onSelect, searchText }) {
-  const [pos, setPos] = useState(null)
-
-  useLayoutEffect(() => {
-    const calc = () => {
-      if (!anchorRef.current) return
-      const rect       = anchorRef.current.getBoundingClientRect()
-      const maxH       = 260
-      const spaceBelow = window.innerHeight - rect.bottom - 8
-      const spaceAbove = rect.top - 8
-      const openUp     = spaceBelow < maxH && spaceAbove > spaceBelow
-      const top        = openUp ? rect.top - Math.min(maxH, spaceAbove) - 4 : rect.bottom + 4
-      const realMaxH   = openUp ? Math.min(maxH, spaceAbove) : Math.min(maxH, spaceBelow)
-      setPos({ top, left: rect.left, width: Math.max(rect.width, 320), maxH: realMaxH })
-    }
-    const id = requestAnimationFrame(calc)
-    window.addEventListener('scroll', calc, true)
-    window.addEventListener('resize', calc)
-    return () => {
-      cancelAnimationFrame(id)
-      window.removeEventListener('scroll', calc, true)
-      window.removeEventListener('resize', calc)
-    }
-  }, [anchorRef, results])
-
-  if (!pos) return null
-
-  return createPortal(
-    <div
-      ref={dropRef}
-      style={{
-        position: 'fixed', top: pos.top, left: pos.left,
-        width: pos.width, zIndex: 9999, maxHeight: pos.maxH, overflowY: 'auto'
-      }}
-      className="bg-surface-800 border border-surface-600 rounded-xl shadow-2xl"
-    >
-      {results.length === 0
-        ? <p className="px-4 py-3 text-surface-300 text-xs font-body">Sin resultados para "{searchText}"</p>
-        : results.map(p => (
-          <button key={p.idProducto}
-            onMouseDown={e => e.preventDefault()}
-            onClick={() => onSelect(p)}
-            className="w-full text-left px-3 py-2.5 hover:bg-surface-700 transition-colors border-b border-surface-700/60 last:border-0">
-            <p className="text-white text-xs font-body leading-tight">{p.nombre}</p>
-            <p className="text-surface-400 text-xs font-mono mt-0.5">
-              #{p.idProducto}{p.tieneMedidas ? ' · Con medidas' : ''}
-              {p.precioProveedor > 0 ? ` · Último precio: ${fmt(p.precioProveedor)}` : ''}
-            </p>
-          </button>
-        ))
-      }
-    </div>,
-    document.body
-  )
+function norm(s) {
+  return (s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
 }
 
 // ─── Fila de ítem del pedido ────────────────────────────────────────────────
@@ -292,6 +242,7 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
   const [nombreSearch,   setNombreSearch]   = useState(item.nombreProducto || '')
   const [nombreResults,  setNombreResults]  = useState([])
   const [showDrop,       setShowDrop]       = useState(false)
+  const [dropPos,        setDropPos]        = useState({ top: 0, left: 0, width: 0 })
   const [medidas,        setMedidas]        = useState([])
   const inputRef = useRef(null)
   const wrapRef  = useRef(null)
@@ -306,6 +257,19 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [])
+
+  // Recalcula posición del dropdown (scroll-aware, igual que Presupuestador)
+  useEffect(() => {
+    if (!showDrop || !inputRef.current) return
+    const update = () => {
+      const rect = inputRef.current.getBoundingClientRect()
+      setDropPos({ top: rect.bottom + window.scrollY + 4, left: rect.left + window.scrollX, width: Math.max(rect.width, 300) })
+    }
+    update()
+    window.addEventListener('scroll', update, true)
+    window.addEventListener('resize', update)
+    return () => { window.removeEventListener('scroll', update, true); window.removeEventListener('resize', update) }
+  }, [showDrop])
 
   // Sync nombre search when item changes externally (edit mode load)
   useEffect(() => {
@@ -330,8 +294,14 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
   function buscarPorNombre(text) {
     setNombreSearch(text)
     onUpdate(index, 'nombreProducto', text)
+    // Al escribir manualmente el nombre, desvinculamos el producto seleccionado
+    onUpdate(index, 'idProducto', '')
+    onUpdate(index, 'precioUnitario', '')
     if (!text.trim()) { setNombreResults([]); setShowDrop(false); return }
-    const rows = query('SELECT * FROM Producto WHERE nombre LIKE ? LIMIT 12', [`%${text.trim()}%`])
+    const normText = norm(text.trim())
+    const rows = query('SELECT * FROM Producto LIMIT 2000', [])
+      .filter(p => norm(p.nombre).includes(normText))
+      .slice(0, 12)
     setNombreResults(rows)
     setShowDrop(true)
   }
@@ -353,20 +323,26 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
   function handleIdChange(val) {
     const clean = val.replace(/\D/g, '')
     onUpdate(index, 'idProducto', clean)
-    if (clean) {
-      const p = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(clean)])[0]
-      if (p) {
-        setNombreSearch(p.nombre)
-        onUpdate(index, 'nombreProducto', p.nombre)
-        // Siempre actualizar el precio (incluyendo limpiar si no tiene precio asignado)
-        onUpdate(index, 'precioUnitario', p.precioProveedor > 0 ? p.precioProveedor : '')
-        onUpdate(index, 'medida', null)
-      } else {
-        // ID sin coincidencia: limpiar nombre y precio
-        setNombreSearch('')
-        onUpdate(index, 'nombreProducto', '')
-        onUpdate(index, 'precioUnitario', '')
-      }
+    if (!clean) {
+      // ID vacío: limpiar todos los campos
+      setNombreSearch('')
+      onUpdate(index, 'nombreProducto', '')
+      onUpdate(index, 'precioUnitario', '')
+      onUpdate(index, 'medida', null)
+      return
+    }
+    const p = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(clean)])[0]
+    if (p) {
+      setNombreSearch(p.nombre)
+      onUpdate(index, 'nombreProducto', p.nombre)
+      // Siempre actualizar el precio (incluyendo limpiar si no tiene precio asignado)
+      onUpdate(index, 'precioUnitario', p.precioProveedor > 0 ? p.precioProveedor : '')
+      onUpdate(index, 'medida', null)
+    } else {
+      // ID sin coincidencia: limpiar nombre y precio
+      setNombreSearch('')
+      onUpdate(index, 'nombreProducto', '')
+      onUpdate(index, 'precioUnitario', '')
     }
   }
 
@@ -394,9 +370,31 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
           onChange={e => buscarPorNombre(e.target.value)}
           placeholder="Nombre del producto..."
           className={cell + ' w-full'} />
-        {showDrop && (
-          <ProductoDropdown results={nombreResults} anchorRef={inputRef} dropRef={dropRef}
-            onSelect={seleccionarProducto} searchText={nombreSearch} />
+        {showDrop && createPortal(
+          <div
+            ref={dropRef}
+            data-producto-drop
+            style={{ position: 'absolute', top: dropPos.top, left: dropPos.left, width: dropPos.width, zIndex: 9999 }}
+            className="bg-surface-800 border border-surface-600 rounded-xl shadow-2xl max-h-[260px] overflow-y-auto"
+          >
+            {nombreResults.length === 0 ? (
+              <p className="px-4 py-3 text-surface-300 text-xs font-body">Sin resultados para "{nombreSearch}"</p>
+            ) : (
+              nombreResults.map(p => (
+                <button key={p.idProducto}
+                  onMouseDown={e => e.preventDefault()}
+                  onClick={() => seleccionarProducto(p)}
+                  className="w-full text-left px-3 py-2.5 hover:bg-surface-700 transition-colors border-b border-surface-700/60 last:border-0">
+                  <p className="text-white text-xs font-body leading-tight">{p.nombre}</p>
+                  <p className="text-surface-400 text-xs font-mono mt-0.5">
+                    #{p.idProducto}{p.tieneMedidas ? ' · Con medidas' : ''}
+                    {p.precioProveedor > 0 ? ` · Último precio: ${fmt(p.precioProveedor)}` : ''}
+                  </p>
+                </button>
+              ))
+            )}
+          </div>,
+          document.body
         )}
       </td>
 
@@ -1014,10 +1012,10 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
               <span className="text-brand-400 font-mono font-bold text-lg">{fmt(total)}</span>
             </div>
           </div>
-          <div className="space-y-2">
+          <div className="flex flex-col items-end gap-2">
             {error && (
               <div className="flex items-center gap-2 text-red-400 text-xs bg-red-500/10 border border-red-500/30
-                              rounded-xl px-3 py-2 max-w-xs">
+                              rounded-xl px-3 py-2 max-w-xs text-right">
                 <AlertCircle size={14} className="flex-shrink-0" />{error}
               </div>
             )}
@@ -1073,11 +1071,12 @@ export default function PedidosCompra() {
 
   const filteredPedidos = filterProv.trim()
     ? pedidos.filter(p => {
-        const term = filterProv.trim().toLowerCase()
+        const term = norm(filterProv.trim())
+        const isNumeric = /^\d+$/.test(filterProv.trim())
         return (
-          String(p.idPedido).includes(term) ||
-          (p.nombreProveedor   && p.nombreProveedor.toLowerCase().includes(term)) ||
-          (p.nombreFiscalProv  && p.nombreFiscalProv.toLowerCase().includes(term))
+          (isNumeric ? String(p.idPedido) === filterProv.trim() : false) ||
+          (p.nombreProveedor   && norm(p.nombreProveedor).includes(term)) ||
+          (p.nombreFiscalProv  && norm(p.nombreFiscalProv).includes(term))
         )
       })
     : pedidos
