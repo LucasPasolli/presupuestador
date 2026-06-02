@@ -322,14 +322,13 @@ function NuevoProductoModal({ open, onClose, categorias, onSaved }) {
   function validate() {
     const e = {}
     if (!form.nombre.trim()) e.nombre = 'Requerido'
-    if (form.precioUnitario === '' || isNaN(parseFloat(form.precioUnitario))) e.precioUnitario = 'Ingresá un precio válido'
     setErrors(e)
     return Object.keys(e).length === 0
   }
 
   function guardar() {
     if (!validate()) return
-    const precio = parseFloat(String(form.precioUnitario).replace(',', '.'))
+    const precio = parseFloat(String(form.precioUnitario).replace(',', '.')) || 0
     run(
       `INSERT INTO Producto (idCategoria, nombre, precioProveedor, precioUnitario, cantidad, tieneMedidas) VALUES (?,?,0,?,0,0)`,
       [form.idCategoria, form.nombre.trim(), precio]
@@ -358,7 +357,7 @@ function NuevoProductoModal({ open, onClose, categorias, onSaved }) {
           ))}
         </Select>
         <Input
-          label="Precio Unitario de Venta *"
+          label="Precio Unitario de Venta"
           value={form.precioUnitario}
           onChange={(e) => {
             const v = e.target.value.replace(',', '.')
@@ -932,6 +931,67 @@ setProductos(resultado)
     setPage(1)
   }, [searchNombre, searchId, filterCat, filterStock, filterBajoStock, sortKey, sortDir])
 
+  // Igual que load() pero sin resetear la página (para editar/stock/eliminar/categoría/actualizar precios)
+  const loadSinResetPage = useCallback(() => {
+    const cats = query('SELECT * FROM Categoria ORDER BY nombre')
+    setCategorias(cats)
+
+    const todosSql = `
+      SELECT p.*, c.nombre as categoriaNombre,
+        CASE WHEN p.tieneMedidas=1
+          THEN (SELECT COALESCE(SUM(pm.cantidad),0) FROM ProductoMedida pm WHERE pm.idProducto=p.idProducto)
+          ELSE p.cantidad
+        END as stockTotal
+      FROM Producto p
+      JOIN Categoria c ON p.idCategoria=c.idCategoria`
+    setAllProductos(query(todosSql))
+
+    let sql = `
+      SELECT p.*, c.nombre as categoriaNombre,
+        CASE WHEN p.tieneMedidas=1
+          THEN (SELECT COALESCE(SUM(pm.cantidad),0) FROM ProductoMedida pm WHERE pm.idProducto=p.idProducto)
+          ELSE p.cantidad
+        END as stockTotal
+      FROM Producto p
+      JOIN Categoria c ON p.idCategoria=c.idCategoria
+      WHERE 1=1`
+    const params = []
+
+    if (searchId.trim()) {
+      sql += ` AND p.idProducto = ?`
+      params.push(parseInt(searchId) || -1)
+    }
+    if (filterCat !== 'all') {
+      sql += ` AND p.idCategoria=?`
+      params.push(parseInt(filterCat))
+    }
+    if (filterStock === 'con') {
+      sql += ` AND stockTotal > 0`
+    } else if (filterStock === 'sin') {
+      sql += ` AND stockTotal = 0`
+    }
+
+    sql += ` ORDER BY ${sortKey === 'stock' ? 'stockTotal' : sortKey === 'precio' ? 'precioUnitario' : 'p.nombre'} ${sortDir.toUpperCase()}`
+
+    let resultado = query(sql, params)
+
+    if (searchNombre.trim()) {
+      const needle = normalize(searchNombre.trim())
+      resultado = resultado.filter((p) => normalize(p.nombre).includes(needle))
+    }
+
+    if (filterBajoStock) {
+      resultado = resultado.filter(
+        (p) =>
+          p.puntoReposicion > 0 &&
+          p.stockTotal <= p.puntoReposicion
+      )
+    }
+
+    setProductos(resultado)
+    // NO se llama setPage(1) — se conserva la página actual
+  }, [searchNombre, searchId, filterCat, filterStock, filterBajoStock, sortKey, sortDir])
+
   useEffect(() => { load() }, [load])
 
   function toggleSort(key) {
@@ -947,7 +1007,7 @@ setProductos(resultado)
   function eliminar(p) {
     run(`DELETE FROM Producto WHERE idProducto=?`, [p.idProducto])
     setDeleteConfirm(null)
-    load()
+    loadSinResetPage()
     setToast(`"${p.nombre.slice(0, 30)}..." eliminado`)
   }
 
@@ -1355,7 +1415,7 @@ setProductos(resultado)
         open={modalNuevo}
         onClose={() => setModalNuevo(false)}
         categorias={categorias}
-        onSaved={() => { load(); setToast('Producto creado correctamente ✓') }}
+        onSaved={() => { loadSinResetPage(); setToast('Producto creado correctamente ✓') }}
       />
 
       <EditarProductoModal
@@ -1363,27 +1423,27 @@ setProductos(resultado)
         onClose={() => setModalEditar(false)}
         producto={selected}
         categorias={categorias}
-        onSaved={() => { load(); setToast('Producto actualizado ✓') }}
+        onSaved={() => { loadSinResetPage(); setToast('Producto actualizado ✓') }}
       />
 
       <StockModal
         open={modalStock}
         onClose={() => setModalStock(false)}
         producto={selected}
-        onSaved={() => { load(); setToast('Stock actualizado ✓') }}
+        onSaved={() => { loadSinResetPage(); setToast('Stock actualizado ✓') }}
       />
 
       <CatModal
         open={modalCat}
         onClose={() => setModalCat(false)}
         categorias={categorias}
-        onSaved={() => { load(); setToast('Categoría creada ✓') }}
+        onSaved={() => { loadSinResetPage(); setToast('Categoría creada ✓') }}
       />
       <ActualizarPreciosModal
         open={modalActualizarPrecios}
         onClose={() => setModalActualizarPrecios(false)}
         onSaved={() => {
-          load()
+          loadSinResetPage()
           setToast('Precios actualizados correctamente ✓')
         }}
       />
