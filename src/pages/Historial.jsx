@@ -5,7 +5,7 @@ import { query, run } from '../lib/database'
 import { Card, PageHeader, Button, Badge, Modal } from '../components/ui'
 import {
   Search, ChevronDown, ChevronUp, ArrowLeft, FileText,
-  Clock, CheckCircle2, XCircle, ThumbsUp, AlertCircle, Trash2, Download, Pencil
+  Clock, CheckCircle2, XCircle, ThumbsUp, AlertCircle, Trash2, Download, Pencil, X
 } from 'lucide-react'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -376,13 +376,13 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
 
       {/* Totales */}
       <Card className="p-6">
-        <div className="max-w-xs ml-auto space-y-2 text-sm font-body">
-          <div className="flex justify-between gap-12">
-            <span className="text-surface-400">Subtotal (lista):</span>
-            <span className="text-surface-200 font-mono">{fmt(pres.montoOriginal)}</span>
+        <div className="ml-auto w-fit min-w-[280px] space-y-2 text-sm font-body">
+          <div className="flex justify-between gap-8">
+            <span className="text-surface-400 shrink-0">Subtotal (lista):</span>
+            <span className="text-surface-200 font-mono text-right">{fmt(pres.montoOriginal)}</span>
           </div>
-          <div className="flex justify-between gap-12">
-            <span className="text-surface-400">
+          <div className="flex justify-between gap-8">
+            <span className="text-surface-400 shrink-0">
               Ajuste
               {ajuste !== 0 && (
                 <span className={`ml-1.5 text-xs font-mono ${factorReal < 1 ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -393,13 +393,13 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
                 <span className="ml-1 text-xs text-violet-400 font-body">[Excepción]</span>
               )}
             </span>
-            <span className={`font-mono font-medium ${ajuste<0?'text-emerald-400':ajuste>0?'text-red-400':'text-surface-400'}`}>
+            <span className={`font-mono font-medium text-right ${ajuste<0?'text-emerald-400':ajuste>0?'text-red-400':'text-surface-400'}`}>
               {ajuste===0?'—':ajuste<0?`- ${fmt(Math.abs(ajuste))}`:`+ ${fmt(ajuste)}`}
             </span>
           </div>
-          <div className="border-t border-surface-700 pt-2 flex justify-between gap-12">
-            <span className="text-white font-semibold">Total:</span>
-            <span className="text-brand-400 font-mono font-bold text-lg">{fmt(pres.monto)}</span>
+          <div className="border-t border-surface-700 pt-2 flex justify-between gap-8">
+            <span className="text-white font-semibold shrink-0">Total:</span>
+            <span className="text-brand-400 font-mono font-bold text-lg text-right">{fmt(pres.monto)}</span>
           </div>
         </div>
       </Card>
@@ -457,6 +457,7 @@ export default function Historial() {
   const [filterFechaD, setFilterFechaD] = useState('')
   const [filterFechaH, setFilterFechaH] = useState('')
   const [sortDir,      setSortDir]      = useState('desc')
+  const [sortKey,      setSortKey]      = useState('id')
   const [page,         setPage]         = useState(1)
   const [selected,     setSelected]     = useState(null)
   const [editando,     setEditando]     = useState(null)  // idPresupuesto being edited
@@ -486,10 +487,10 @@ export default function Historial() {
     if (soloExcepcion)          { sql += ` AND p.esExcepcion=1` }
     if (filterFechaD)           { sql += ` AND p.fecha>=?`; params.push(filterFechaD) }
     if (filterFechaH)           { sql += ` AND p.fecha<=?`; params.push(filterFechaH) }
-    sql += ` ORDER BY p.idPresupuesto ${sortDir.toUpperCase()}`
+    sql += ` ORDER BY ${sortKey === 'fecha' ? 'p.fecha' : 'p.idPresupuesto'} ${sortDir.toUpperCase()}`
     setPresupuestos(query(sql, params))
     setPage(1)
-  }, [search, filterMetodo, filterEstado, soloExcepcion, filterFechaD, filterFechaH, sortDir])
+  }, [search, filterMetodo, filterEstado, soloExcepcion, filterFechaD, filterFechaH, sortDir, sortKey])
 
   useEffect(() => { load() }, [load])
 
@@ -499,6 +500,16 @@ export default function Historial() {
   const pendCobro  = presupuestos.filter(p => p.saldoEstado === 'pendiente').length
   const hasFilters = search || filterMetodo!=='all' || filterEstado!=='all' || filterFechaD || filterFechaH
   const hasAnyFilter = hasFilters || soloExcepcion
+
+  function toggleSort(key) {
+    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    else { setSortKey(key); setSortDir('desc') }
+  }
+
+  function SortIcon({ col }) {
+    if (sortKey !== col) return <span className="text-surface-600 ml-1">↕</span>
+    return sortDir === 'asc' ? <ChevronUp size={13} className="inline ml-1" /> : <ChevronDown size={13} className="inline ml-1" />
+  }
 
   // ── Modo edición: muestra el Presupuestador con datos cargados ──
   if (editando) return (
@@ -567,7 +578,15 @@ export default function Historial() {
               return true
             })
             return (
-              <select value={filterMetodo} onChange={e=>{ setFilterMetodo(e.target.value); setFilterEstado('all') }}
+              <select value={filterMetodo} onChange={e => {
+                const nuevoMetodo = e.target.value
+                setFilterMetodo(nuevoMetodo)
+                // Solo resetear estado si la combinación es inválida
+                const nuevoEsCC = nuevoMetodo === 'cc15' || nuevoMetodo === 'cc30'
+                const nuevoEsEfectTransf = nuevoMetodo === 'efectivo' || nuevoMetodo === 'transferencia'
+                if (nuevoEsCC && filterEstado === 'pagado')   setFilterEstado('all')
+                if (nuevoEsEfectTransf && filterEstado === 'aprobado') setFilterEstado('all')
+              }}
                 className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer">
                 <option value="all">Todos los métodos</option>
                 {metodosFiltrados.map(([v,m]) => <option key={v} value={v}>{m.label}</option>)}
@@ -584,7 +603,15 @@ export default function Historial() {
               return true
             })
             return (
-              <select value={filterEstado} onChange={e=>{ setFilterEstado(e.target.value); setFilterMetodo('all') }}
+              <select value={filterEstado} onChange={e => {
+                const nuevoEstado = e.target.value
+                setFilterEstado(nuevoEstado)
+                // Solo resetear método si la combinación es inválida
+                const metodoEsCC = filterMetodo === 'cc15' || filterMetodo === 'cc30'
+                const metodoEsEfectTransf = filterMetodo === 'efectivo' || filterMetodo === 'transferencia'
+                if (nuevoEstado === 'pagado'   && metodoEsCC)          setFilterMetodo('all')
+                if (nuevoEstado === 'aprobado' && metodoEsEfectTransf) setFilterMetodo('all')
+              }}
                 className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer">
                 <option value="all">Todos los estados</option>
                 {estadosFiltrados.map(([v,s]) => <option key={v} value={v}>{s.label}</option>)}
@@ -610,12 +637,24 @@ export default function Historial() {
               className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
           </div>
 
-          <button onClick={()=>setSortDir(d=>d==='desc'?'asc':'desc')}
-            className="flex items-center gap-2 bg-surface-700 border border-surface-600 hover:border-surface-500 rounded-xl px-3 py-2 text-white text-sm font-body transition-all">
-            {sortDir==='desc'?<><ChevronDown size={15}/>Más recientes</>:<><ChevronUp size={15}/>Más antiguos</>}
-          </button>
-
-
+          {hasAnyFilter && (
+            <button
+              onClick={() => {
+                setSearch('')
+                setFilterMetodo('all')
+                setFilterEstado('all')
+                setSoloExcepcion(false)
+                setFilterFechaD('')
+                setFilterFechaH('')
+              }}
+              className="flex items-center gap-2 bg-surface-700 border border-surface-600 rounded-xl px-3 py-2
+                         text-surface-300 text-sm font-body hover:border-red-500/50 hover:text-red-400
+                         hover:bg-red-500/10 transition-all cursor-pointer whitespace-nowrap"
+            >
+              <X size={13} />
+              Limpiar filtros
+            </button>
+          )}
         </div>
       </Card>
 
@@ -625,7 +664,19 @@ export default function Historial() {
           <table className="w-full text-sm font-body">
             <thead>
               <tr className="border-b border-surface-700">
-                {['ID','Fecha','Cliente','Método','Estado','Total','Saldo',''].map(h => (
+                <th
+                  className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
+                  onClick={() => toggleSort('id')}
+                >
+                  <div className="flex items-center gap-1">ID <SortIcon col="id" /></div>
+                </th>
+                <th
+                  className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
+                  onClick={() => toggleSort('fecha')}
+                >
+                  <div className="flex items-center gap-1">Fecha <SortIcon col="fecha" /></div>
+                </th>
+                {['Cliente','Método','Estado','Total','Saldo',''].map(h => (
                   <th key={h} className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">{h}</th>
                 ))}
               </tr>
