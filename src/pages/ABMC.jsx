@@ -9,19 +9,21 @@ import {
 } from '../components/ui'
 import {
   Users, Truck, FileText, ShoppingCart,
-  Wallet, TrendingDown, Plus, Pencil, Trash2,
+  Wallet, TrendingDown, TrendingUp, Tag, Plus, Pencil, Trash2,
   AlertTriangle, Info,
 } from 'lucide-react'
 
 // ─── Tabs config ─────────────────────────────────────────────────────────────
 
 const TABS = [
-  { key: 'clientes',       label: 'Clientes',          icon: Users,         color: 'from-brand-500 to-brand-600' },
-  { key: 'proveedores',    label: 'Proveedores',        icon: Truck,         color: 'from-brand-500 to-brand-600' },
-  { key: 'presupuestos',   label: 'Presupuestos',       icon: FileText,      color: 'from-brand-500 to-brand-600' },
-  { key: 'pedidos',        label: 'Pedidos de Compra',  icon: ShoppingCart,  color: 'from-brand-500 to-brand-600' },
-  { key: 'saldos',         label: 'Saldos',             icon: Wallet,        color: 'from-brand-500 to-brand-600' },
-  { key: 'egresos',        label: 'Egresos',            icon: TrendingDown,  color: 'from-brand-500 to-brand-600' },
+  { key: 'clientes',       label: 'Clientes',      icon: Users,         color: 'from-brand-500 to-brand-600' },
+  { key: 'proveedores',    label: 'Proveedores',    icon: Truck,         color: 'from-brand-500 to-brand-600' },
+  { key: 'presupuestos',   label: 'Presupuestos',   icon: FileText,      color: 'from-brand-500 to-brand-600' },
+  { key: 'pedidos',        label: 'Pedidos',        icon: ShoppingCart,  color: 'from-brand-500 to-brand-600' },
+  { key: 'saldos',         label: 'Saldos',         icon: Wallet,        color: 'from-brand-500 to-brand-600' },
+  { key: 'egresos',        label: 'Egresos',        icon: TrendingDown,  color: 'from-brand-500 to-brand-600' },
+  { key: 'ingresos',       label: 'Ingresos',       icon: TrendingUp,    color: 'from-brand-500 to-brand-600' },
+  { key: 'categorias',     label: 'Categorías',     icon: Tag,           color: 'from-brand-500 to-brand-600' },
 ]
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -157,7 +159,7 @@ function Clientes() {
   function openEdit(r) { setForm({ ...r }); setEditId(r.idCliente); setError(''); setModal(true) }
 
   function save() {
-    if (!form.nombre.trim() || !form.apellido.trim()) { setError('Nombre y apellido son obligatorios.'); return }
+    if (!form.nombre.trim() || !form.apellido.trim()) { setError('Nombre y Apellido son obligatorios.'); return }
     if (editId) {
       run(`UPDATE Cliente SET nombre=?,apellido=?,apodo=?,nombreComercio=?,cuit=?,domicilio=?,telefono=?,mail=? WHERE idCliente=?`,
         [form.nombre, form.apellido, form.apodo, form.nombreComercio, form.cuit, form.domicilio, form.telefono, form.mail, editId])
@@ -586,7 +588,7 @@ function Pedidos() {
       SELECT pc.*, p.nombreFiscal AS provNombre
       FROM PedidoCompra pc
       LEFT JOIN Proveedor p ON p.idProveedor = pc.idProveedor
-      ORDER BY pc.fecha DESC
+      ORDER BY pc.fecha DESC, pc.idPedido DESC
     `))
   }, [])
 
@@ -1014,6 +1016,257 @@ function Egresos() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// INGRESOS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const INGRESO_BLANK = { fecha: new Date().toISOString().slice(0, 10), descripcion: '', monto: 0 }
+
+function Ingresos() {
+  const [allRows, setAllRows] = useState([])
+  const [modal, setModal] = useState(false)
+  const [form, setForm] = useState(INGRESO_BLANK)
+  const [editId, setEditId] = useState(null)
+  const [confirm, setConfirm] = useState(null)
+  const [error, setError] = useState('')
+  const [search, setSearch] = useState('')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
+  const [page, setPage] = useState(1)
+
+  const load = useCallback(() => {
+    setAllRows(query('SELECT * FROM Ingreso ORDER BY fecha DESC, idIngreso DESC'))
+  }, [])
+
+  useEffect(() => { load() }, [load])
+  useEffect(() => { setPage(1) }, [search, dateFrom, dateTo])
+
+  function openCreate() { setForm({ ...INGRESO_BLANK }); setEditId(null); setError(''); setModal(true) }
+  function openEdit(r) { setForm({ ...r }); setEditId(r.idIngreso); setError(''); setModal(true) }
+
+  function save() {
+    if (!form.descripcion.trim()) { setError('La descripción es obligatoria.'); return }
+    if (!form.monto || form.monto <= 0) { setError('El monto debe ser mayor a 0.'); return }
+    if (editId) {
+      run(`UPDATE Ingreso SET fecha=?,descripcion=?,monto=? WHERE idIngreso=?`,
+        [form.fecha, form.descripcion, form.monto, editId])
+    } else {
+      run(`INSERT INTO Ingreso(fecha,descripcion,monto) VALUES(?,?,?)`,
+        [form.fecha, form.descripcion, form.monto])
+    }
+    setModal(false); load()
+  }
+
+  function del(id) {
+    run(`DELETE FROM Ingreso WHERE idIngreso=?`, [id])
+    setConfirm(null); load()
+  }
+
+  const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }))
+  const fn = (k) => (e) => setForm(p => ({ ...p, [k]: Number(e.target.value) }))
+
+  const filtered = allRows.filter(r => {
+    const q = search.trim().toLowerCase()
+    const matchFrom = !dateFrom || r.fecha >= dateFrom
+    const matchTo = !dateTo || r.fecha <= dateTo
+    if (!q) return matchFrom && matchTo
+    if (/^\d+$/.test(q)) return String(r.idIngreso) === q && matchFrom && matchTo
+    const matchQ = r.descripcion.toLowerCase().includes(q)
+    return matchQ && matchFrom && matchTo
+  })
+  const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const confirmRow = allRows.find(r => r.idIngreso === confirm)
+
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-2 items-center w-full flex-wrap">
+        <div className="flex-1 min-w-[160px]">
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Buscar por ID o descripción…"
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
+          />
+        </div>
+        <div>
+          <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+        </div>
+        <div>
+          <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+        </div>
+        <Button icon={Plus} onClick={openCreate}>Nuevo ingreso</Button>
+      </div>
+
+      <Card>
+        <Table headers={['#', 'Fecha', 'Descripción', 'Monto', '']}
+          empty={paged.length === 0 ? 'Sin ingresos registrados' : null}>
+          {paged.map(r => (
+            <Tr key={r.idIngreso}>
+              <Td className="text-surface-500 font-mono text-xs">#{r.idIngreso}</Td>
+              <Td className="text-surface-400">{r.fecha}</Td>
+              <Td>{r.descripcion}</Td>
+              <Td className="text-green-300 font-semibold">{fmt(r.monto)}</Td>
+              <Td>
+                <div className="flex gap-2 justify-end">
+                  <Button variant="ghost" size="sm" icon={Pencil} onClick={() => openEdit(r)} />
+                  <Button variant="ghost" size="sm" icon={Trash2} className="hover:text-red-400" onClick={() => setConfirm(r.idIngreso)} />
+                </div>
+              </Td>
+            </Tr>
+          ))}
+        </Table>
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+      </Card>
+
+      <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar ingreso' : 'Nuevo ingreso'}>
+        <div className="space-y-4">
+          <Input label="Fecha *" type="date" value={form.fecha} onChange={f('fecha')} />
+          <Input label="Descripción *" value={form.descripcion} onChange={f('descripcion')}
+            placeholder="Ej: Venta mayorista — Marzo" />
+          <Input label="Monto *" type="number" min="0" value={form.monto} onChange={fn('monto')}
+            className="[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" />
+          {error && <p className="text-red-400 text-xs">{error}</p>}
+          <div className="flex gap-3 pt-2">
+            <Button variant="secondary" className="flex-1" onClick={() => setModal(false)}>Cancelar</Button>
+            <Button className="flex-1" onClick={save}>Guardar</Button>
+          </div>
+        </div>
+      </Modal>
+
+      <ConfirmModal open={!!confirm} onClose={() => setConfirm(null)} onConfirm={() => del(confirm)}
+        details={confirmRow ? [
+          ['ID', `#${confirmRow.idIngreso}`],
+          ['Fecha', confirmRow.fecha],
+          ['Descripción', confirmRow.descripcion],
+          ['Monto', fmt(confirmRow.monto)],
+        ] : []}
+        message="¿Eliminar este ingreso?"
+      />
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CATEGORÍAS DE PRODUCTO
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const CAT_BLANK = { nombre: '' }
+
+function Categorias() {
+  const [allRows, setAllRows] = useState([])
+  const [modal, setModal] = useState(false)
+  const [form, setForm] = useState(CAT_BLANK)
+  const [editId, setEditId] = useState(null)
+  const [confirm, setConfirm] = useState(null)
+  const [error, setError] = useState('')
+  const [search, setSearch] = useState('')
+  const [page, setPage] = useState(1)
+
+  const load = useCallback(() => {
+    setAllRows(query(`
+      SELECT c.*, COUNT(p.idProducto) AS cantProductos
+      FROM Categoria c
+      LEFT JOIN Producto p ON p.idCategoria = c.idCategoria
+      GROUP BY c.idCategoria
+      ORDER BY c.nombre
+    `))
+  }, [])
+
+  useEffect(() => { load() }, [load])
+  useEffect(() => { setPage(1) }, [search])
+
+  function openCreate() { setForm(CAT_BLANK); setEditId(null); setError(''); setModal(true) }
+  function openEdit(r) { setForm({ nombre: r.nombre }); setEditId(r.idCategoria); setError(''); setModal(true) }
+
+  function save() {
+    if (!form.nombre.trim()) { setError('El nombre es obligatorio.'); return }
+    if (editId) {
+      run(`UPDATE Categoria SET nombre=? WHERE idCategoria=?`, [form.nombre.trim(), editId])
+    } else {
+      run(`INSERT INTO Categoria(nombre) VALUES(?)`, [form.nombre.trim()])
+    }
+    setModal(false); load()
+  }
+
+  function del(id) {
+    try { run(`DELETE FROM Categoria WHERE idCategoria=?`, [id]) }
+    catch { alert('No se puede eliminar: tiene productos asociados.') }
+    setConfirm(null); load()
+  }
+
+  const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }))
+
+  const filtered = allRows.filter(r => {
+    const q = search.trim().toLowerCase()
+    if (!q) return true
+    if (/^\d+$/.test(q)) return String(r.idCategoria) === q
+    return r.nombre.toLowerCase().includes(q)
+  })
+  const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const confirmRow = allRows.find(r => r.idCategoria === confirm)
+
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-2 items-center w-full">
+        <div className="flex-1">
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Buscar por ID o nombre…"
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
+          />
+        </div>
+        <Button icon={Plus} onClick={openCreate}>Nueva categoría</Button>
+      </div>
+
+      <Card>
+        <Table headers={['ID', 'Nombre', 'Productos', '']}
+          empty={paged.length === 0 ? 'Sin categorías' : null}>
+          {paged.map(r => (
+            <Tr key={r.idCategoria}>
+              <Td className="text-surface-500 font-mono text-xs">#{r.idCategoria}</Td>
+              <Td>{r.nombre}</Td>
+              <Td className="text-surface-400">{r.cantProductos}</Td>
+              <Td>
+                <div className="flex gap-2 justify-end">
+                  <Button variant="ghost" size="sm" icon={Pencil} onClick={() => openEdit(r)} />
+                  <Button variant="ghost" size="sm" icon={Trash2} className="hover:text-red-400" onClick={() => setConfirm(r.idCategoria)} />
+                </div>
+              </Td>
+            </Tr>
+          ))}
+        </Table>
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+      </Card>
+
+      <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar categoría' : 'Nueva categoría'}>
+        <div className="space-y-4">
+          <Input label="Nombre *" value={form.nombre} onChange={f('nombre')}
+            placeholder="Ej: Filtros, Frenos, Eléctrico…" />
+          {error && <p className="text-red-400 text-xs">{error}</p>}
+          <div className="flex gap-3 pt-2">
+            <Button variant="secondary" className="flex-1" onClick={() => setModal(false)}>Cancelar</Button>
+            <Button className="flex-1" onClick={save}>Guardar</Button>
+          </div>
+        </div>
+      </Modal>
+
+      <ConfirmModal open={!!confirm} onClose={() => setConfirm(null)} onConfirm={() => del(confirm)}
+        details={confirmRow ? [
+          ['ID', `#${confirmRow.idCategoria}`],
+          ['Nombre', confirmRow.nombre],
+          ['Productos asociados', confirmRow.cantProductos],
+        ] : []}
+        message="¿Eliminar esta categoría? Solo es posible si no tiene productos asociados."
+      />
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // PÁGINA PRINCIPAL ABMC
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1024,6 +1277,8 @@ const PANEL = {
   pedidos:      Pedidos,
   saldos:       Saldos,
   egresos:      Egresos,
+  ingresos:     Ingresos,
+  categorias:   Categorias,
 }
 
 export default function ABMC() {

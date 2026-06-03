@@ -186,6 +186,16 @@ function runSchema() {
     );
   `)
 
+  // ── NUEVA: tabla Ingreso ──────────────────────────────────────────────────
+  db.run(`
+    CREATE TABLE IF NOT EXISTS Ingreso (
+      idIngreso   INTEGER PRIMARY KEY AUTOINCREMENT,
+      fecha       TEXT NOT NULL,
+      descripcion TEXT NOT NULL,
+      monto       REAL NOT NULL DEFAULT 0
+    );
+  `)
+
   // ── Seed inicial ──────────────────────────────────────────────────────────
   const catCount = db.exec(`SELECT COUNT(*) FROM Categoria`)[0].values[0][0]
   if (catCount === 0) {
@@ -284,6 +294,16 @@ function runMigrations() {
     db.run(`ALTER TABLE Cliente ADD COLUMN nombreComercio TEXT`)
     persistDB()
   }
+
+  // v14 → v15: crea tabla Ingreso si no existe
+  db.run(`
+    CREATE TABLE IF NOT EXISTS Ingreso (
+      idIngreso   INTEGER PRIMARY KEY AUTOINCREMENT,
+      fecha       TEXT NOT NULL,
+      descripcion TEXT NOT NULL,
+      monto       REAL NOT NULL DEFAULT 0
+    );
+  `)
 }
 
 
