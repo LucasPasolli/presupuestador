@@ -3,7 +3,7 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import { useAuth } from '../../lib/AuthContext'
 import {
   FileText, Clock, Package, Receipt,
-  BarChart2, ShoppingCart, Wallet, LogOut, Menu, Home
+  BarChart2, ShoppingCart, Wallet, LogOut, Menu, Home, Settings2
 } from 'lucide-react'
 import { useState } from 'react'
 
@@ -15,6 +15,7 @@ const NAV = [
   { to: '/estadisticas',   label: 'Estadísticas',      icon: BarChart2 },
   { to: '/pedidos',        label: 'Pedidos de Compra', icon: ShoppingCart },
   { to: '/saldos',         label: 'Saldos',            icon: Wallet },
+  { to: '/abmc',           label: 'ABMC',              icon: Settings2 },
 ]
 
 export default function AppShell({ children }) {
@@ -34,7 +35,6 @@ export default function AppShell({ children }) {
                          flex flex-col transition-transform duration-300
                          ${open ? 'translate-x-0' : '-translate-x-full'} lg:relative lg:translate-x-0`}>
 
-        {/* Brand — clickeable para volver al inicio */}
         <NavLink to="/" onClick={() => setOpen(false)}
           className="p-6 border-b border-surface-700 flex items-center gap-3 hover:bg-surface-700/40 transition-colors">
           <span className="text-2xl">🏍</span>
@@ -44,7 +44,6 @@ export default function AppShell({ children }) {
           </div>
         </NavLink>
 
-        {/* Botón Inicio explícito */}
         <div className="px-4 pt-3">
           <NavLink to="/" onClick={() => setOpen(false)}
             className={({ isActive }) =>
@@ -58,10 +57,8 @@ export default function AppShell({ children }) {
           </NavLink>
         </div>
 
-        {/* Separador */}
         <div className="mx-4 mt-2 border-t border-surface-700/60" />
 
-        {/* Nav principal */}
         <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
           {NAV.map(({ to, label, icon: Icon }) => (
             <NavLink key={to} to={to} onClick={() => setOpen(false)}
@@ -77,7 +74,6 @@ export default function AppShell({ children }) {
           ))}
         </nav>
 
-        {/* Logout */}
         <div className="p-4 border-t border-surface-700">
           <button onClick={handleLogout}
             className="flex items-center gap-3 px-4 py-3 w-full rounded-xl text-sm

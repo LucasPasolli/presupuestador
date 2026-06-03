@@ -65,18 +65,18 @@ function runSchema() {
 
   db.run(`
     CREATE TABLE IF NOT EXISTS Cliente (
-      idCliente   INTEGER PRIMARY KEY AUTOINCREMENT,
-      nombre      TEXT NOT NULL,
-      apellido    TEXT NOT NULL,
-      cuit        TEXT,
-      domicilio   TEXT,
-      telefono    TEXT,
-      mail        TEXT
+      idCliente      INTEGER PRIMARY KEY AUTOINCREMENT,
+      nombre         TEXT NOT NULL,
+      apellido       TEXT NOT NULL,
+      cuit           TEXT,
+      domicilio      TEXT,
+      telefono       TEXT,
+      mail           TEXT,
+      apodo          TEXT,
+      nombreComercio TEXT
     );
   `)
 
-  // Producto: tieneMedidas=1 significa que el stock se gestiona por medida en ProductoMedida.
-  // tieneMedidas=0 significa stock único en columna "cantidad".
   db.run(`
     CREATE TABLE IF NOT EXISTS Producto (
       idProducto      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,8 +91,6 @@ function runSchema() {
     );
   `)
 
-  // Stock por medida. Solo se usa cuando Producto.tieneMedidas = 1.
-  // Las medidas válidas: standard, 0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00
   db.run(`
     CREATE TABLE IF NOT EXISTS ProductoMedida (
       idMedida    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -176,13 +174,23 @@ function runSchema() {
     );
   `)
 
+  // ── NUEVA: tabla Egreso ───────────────────────────────────────────────────
+  db.run(`
+    CREATE TABLE IF NOT EXISTS Egreso (
+      idEgreso    INTEGER PRIMARY KEY AUTOINCREMENT,
+      fecha       TEXT NOT NULL,
+      categoria   TEXT NOT NULL CHECK(categoria IN ('Sueldo','Transporte','Comida','Servicios','Flete','Envíos','Otro')),
+      descripcion TEXT NOT NULL,
+      monto       REAL NOT NULL DEFAULT 0,
+      metodoPago  TEXT NOT NULL DEFAULT 'efectivo' CHECK(metodoPago IN ('efectivo','transferencia','cheque'))
+    );
+  `)
+
   // ── Seed inicial ──────────────────────────────────────────────────────────
   const catCount = db.exec(`SELECT COUNT(*) FROM Categoria`)[0].values[0][0]
   if (catCount === 0) {
-    // Insertar categoría General
     db.run(`INSERT INTO Categoria (nombre) VALUES ('General')`)
 
-    // Insertar todos los productos del CSV en bloque usando una transacción
     db.run(`BEGIN TRANSACTION`)
     for (const nombre of PRODUCTOS_SEED) {
       db.run(
@@ -198,8 +206,6 @@ function runSchema() {
 }
 
 // ─── Migraciones ────────────────────────────────────────────────────────────
-// Cada migración es idempotente: usa try/catch porque SQLite no tiene
-// ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
 
 function runMigrations() {
   // v5 → v6: agrega esExcepcion a Presupuesto.
@@ -237,12 +243,10 @@ function runMigrations() {
     persistDB()
   }
 
-  // v8 → v9: tabla Proveedor (CREATE TABLE IF NOT EXISTS ya la crea en schema si no existe)
-  // v9 → v10: columnas nuevas en PedidoCompra (estadoPago, estadoLogistico, fechaRecepcion, metodoPago, idProveedor)
+  // v9 → v10: columnas nuevas en PedidoCompra
   const colsPedido = db.exec(`PRAGMA table_info(PedidoCompra)`)[0]?.values ?? []
   const colNamesPedido = colsPedido.map(r => r[1])
 
-  // Renombrar 'estado' → 'estadoPago' si todavía se llama 'estado' (bases antiguas)
   if (colNamesPedido.includes('estado') && !colNamesPedido.includes('estadoPago')) {
     db.run(`ALTER TABLE PedidoCompra ADD COLUMN estadoPago TEXT DEFAULT 'pendiente'`)
     db.run(`UPDATE PedidoCompra SET estadoPago = estado`)
@@ -264,9 +268,20 @@ function runMigrations() {
     db.run(`ALTER TABLE PedidoCompra ADD COLUMN idProveedor INTEGER`)
     persistDB()
   }
-  // v10 → v11: agrega fechaPago a PedidoCompra
   if (!colNamesPedido.includes('fechaPago')) {
     db.run(`ALTER TABLE PedidoCompra ADD COLUMN fechaPago TEXT`)
+    persistDB()
+  }
+
+  // v13 → v14: agrega apodo y nombreComercio a Cliente
+  const colsCliente = db.exec(`PRAGMA table_info(Cliente)`)[0]?.values ?? []
+  const colNamesCliente = colsCliente.map(r => r[1])
+  if (!colNamesCliente.includes('apodo')) {
+    db.run(`ALTER TABLE Cliente ADD COLUMN apodo TEXT`)
+    persistDB()
+  }
+  if (!colNamesCliente.includes('nombreComercio')) {
+    db.run(`ALTER TABLE Cliente ADD COLUMN nombreComercio TEXT`)
     persistDB()
   }
 }

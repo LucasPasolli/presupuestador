@@ -471,15 +471,22 @@ export default function Historial() {
       WHERE 1=1`
     const params = []
     if (search.trim()) {
-      const parts = search.trim().split(/\s+/)
-      if (parts.length >= 2) {
-        // Con espacios: intentar buscar por nombre + apellido en ambos órdenes
-        const p1 = parts[0], p2 = parts.slice(1).join(' ')
-        sql += ` AND (p.idPresupuesto=? OR (c.nombre LIKE ? AND c.apellido LIKE ?) OR (c.nombre LIKE ? AND c.apellido LIKE ?) OR c.nombre LIKE ? OR c.apellido LIKE ?)`
-        params.push(parseInt(search)||-1, `%${p1}%`, `%${p2}%`, `%${p2}%`, `%${p1}%`, `%${search.trim()}%`, `%${search.trim()}%`)
+      const q = search.trim()
+      const isNumeric = /^\d+$/.test(q)
+      if (isNumeric) {
+        // Búsqueda exacta por ID
+        sql += ` AND p.idPresupuesto=?`
+        params.push(parseInt(q))
       } else {
-        sql += ` AND (p.idPresupuesto=? OR c.nombre LIKE ? OR c.apellido LIKE ?)`
-        params.push(parseInt(search)||-1, `%${search.trim()}%`, `%${search.trim()}%`)
+        const parts = q.split(/\s+/)
+        if (parts.length >= 2) {
+          const p1 = parts[0], p2 = parts.slice(1).join(' ')
+          sql += ` AND ((c.nombre LIKE ? AND c.apellido LIKE ?) OR (c.nombre LIKE ? AND c.apellido LIKE ?) OR c.nombre LIKE ? OR c.apellido LIKE ?)`
+          params.push(`%${p1}%`, `%${p2}%`, `%${p2}%`, `%${p1}%`, `%${q}%`, `%${q}%`)
+        } else {
+          sql += ` AND (c.nombre LIKE ? OR c.apellido LIKE ?)`
+          params.push(`%${q}%`, `%${q}%`)
+        }
       }
     }
     if (filterMetodo !== 'all') { sql += ` AND p.metodoPago=?`; params.push(filterMetodo) }
@@ -727,8 +734,8 @@ export default function Historial() {
               {(page-1)*PAGE_SIZE+1}–{Math.min(page*PAGE_SIZE,presupuestos.length)} de {presupuestos.length}
             </p>
             <div className="flex gap-2">
-              <Button size="sm" variant="secondary" onClick={()=>setPage(p=>Math.max(1,p-1))} disabled={page===1}>← Ant.</Button>
-              <Button size="sm" variant="secondary" onClick={()=>setPage(p=>Math.min(totalPages,p+1))} disabled={page===totalPages}>Sig. →</Button>
+              <Button size="sm" variant="secondary" onClick={()=>setPage(p=>Math.max(1,p-1))} disabled={page===1}>← Anterior</Button>
+              <Button size="sm" variant="secondary" onClick={()=>setPage(p=>Math.min(totalPages,p+1))} disabled={page===totalPages}>Siguiente →</Button>
             </div>
           </div>
         )}

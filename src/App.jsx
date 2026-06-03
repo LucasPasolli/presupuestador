@@ -11,6 +11,7 @@ import Facturas from './pages/Facturas'
 import Estadisticas from './pages/Estadisticas'
 import PedidosCompra from './pages/PedidosCompra'
 import Saldos from './pages/Saldos'
+import ABMC from './pages/ABMC'
 
 function RequireAuth({ children }) {
   const { authed } = useAuth()
@@ -31,6 +32,7 @@ export default function App() {
         <Route path="/estadisticas"   element={<RequireAuth><Estadisticas /></RequireAuth>} />
         <Route path="/pedidos"        element={<RequireAuth><PedidosCompra /></RequireAuth>} />
         <Route path="/saldos"         element={<RequireAuth><Saldos /></RequireAuth>} />
+        <Route path="/abmc"           element={<RequireAuth><ABMC /></RequireAuth>} />
         <Route path="*"               element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
