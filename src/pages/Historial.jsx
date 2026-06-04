@@ -16,11 +16,20 @@ async function generarPDFPresupuesto(idPresupuesto) {
   const { default: jsPDF }     = await import('jspdf')
   const { default: autoTable } = await import('jspdf-autotable')
 
-  const pres = query('SELECT p.*, c.nombre AS cNombre, c.apellido AS cApellido, c.cuit, c.telefono, c.mail FROM Presupuesto p JOIN Cliente c ON c.idCliente = p.idCliente WHERE p.idPresupuesto = ?', [idPresupuesto])[0]
+  const pres = query(`
+    SELECT p.*,
+           COALESCE(c.nombre,  p.nombreCliente)   AS cNombre,
+           COALESCE(c.apellido,p.apellidoCliente) AS cApellido,
+           c.cuit, c.telefono, c.mail
+    FROM Presupuesto p
+    LEFT JOIN Cliente c ON c.idCliente = p.idCliente
+    WHERE p.idPresupuesto = ?
+  `, [idPresupuesto])[0]
   if (!pres) return
 
   const detalles = query(`
-    SELECT dp.*, pr.nombre AS nombreProducto
+    SELECT dp.*,
+           COALESCE(dp.nombreProducto, pr.nombre, '(producto eliminado #' || dp.idProducto || ')') AS nombreProducto
     FROM DetallePresupuesto dp
     LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
     WHERE dp.idPresupuesto = ?
@@ -148,7 +157,7 @@ function descontarStock(idPresupuesto) {
   )
   for (const d of detalles) {
     const prod = query('SELECT tieneMedidas FROM Producto WHERE idProducto = ?', [d.idProducto])[0]
-    if (!prod) continue
+    if (!prod) continue  // producto ya eliminado → ignorar descuento de stock
     if (prod.tieneMedidas && d.medida) {
       run(`UPDATE ProductoMedida SET cantidad = MAX(0, cantidad - ?) WHERE idProducto = ? AND medida = ?`,
         [d.cantidad, d.idProducto, d.medida])
@@ -176,7 +185,8 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
     const p = query('SELECT * FROM Presupuesto WHERE idPresupuesto = ?', [pres.idPresupuesto])[0]
     if (p) setPres(p)
     const rows = query(`
-      SELECT dp.*, pr.nombre AS nombreProducto
+      SELECT dp.*,
+             COALESCE(dp.nombreProducto, pr.nombre, '(producto eliminado #' || dp.idProducto || ')') AS nombreProducto
       FROM DetallePresupuesto dp
       LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
       WHERE dp.idPresupuesto = ? ORDER BY dp.idDetalle
@@ -291,7 +301,10 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
             {cliente
               ? <><p className="text-white text-sm font-body font-medium">{cliente.nombre} {cliente.apellido}</p>
                   <p className="text-surface-400 text-xs font-mono mt-0.5">ID #{cliente.idCliente}{cliente.telefono?` · ${cliente.telefono}`:''}</p></>
-              : <p className="text-surface-400 text-sm font-mono">ID #{pres.idCliente}</p>}
+              : <><p className="text-white text-sm font-body font-medium">
+                    {pres.nombreCliente ? `${pres.nombreCliente} ${pres.apellidoCliente ?? ''}`.trim() : `ID #${pres.idCliente}`}
+                  </p>
+                  <p className="text-surface-500 text-xs font-mono mt-0.5">Cliente eliminado · ID #{pres.idCliente}</p></>}
           </div>
           <div className="bg-surface-700 rounded-xl p-4">
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Método</p>
@@ -464,7 +477,10 @@ export default function Historial() {
 
   const load = useCallback(() => {
     let sql = `
-      SELECT p.*, c.nombre AS clienteNombre, c.apellido AS clienteApellido, s.estado AS saldoEstado
+      SELECT p.*,
+             COALESCE(c.nombre,  p.nombreCliente)   AS clienteNombre,
+             COALESCE(c.apellido,p.apellidoCliente) AS clienteApellido,
+             s.estado AS saldoEstado
       FROM Presupuesto p
       LEFT JOIN Cliente c ON c.idCliente = p.idCliente
       LEFT JOIN Saldo   s ON s.idPresupuesto = p.idPresupuesto
@@ -526,7 +542,10 @@ export default function Historial() {
         setEditando(null)
         // Recarga y vuelve al detalle del presupuesto actualizado
         const pActualizado = query(
-          `SELECT p.*, c.nombre AS clienteNombre, c.apellido AS clienteApellido, s.estado AS saldoEstado
+          `SELECT p.*,
+                  COALESCE(c.nombre,  p.nombreCliente)   AS clienteNombre,
+                  COALESCE(c.apellido,p.apellidoCliente) AS clienteApellido,
+                  s.estado AS saldoEstado
            FROM Presupuesto p
            LEFT JOIN Cliente c ON c.idCliente = p.idCliente
            LEFT JOIN Saldo   s ON s.idPresupuesto = p.idPresupuesto

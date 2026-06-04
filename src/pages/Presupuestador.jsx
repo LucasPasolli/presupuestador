@@ -814,8 +814,8 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
     if (modoEdicion) {
       // ── UPDATE: sobreescribir el presupuesto existente ──
       run(
-        `UPDATE Presupuesto SET idCliente=?, metodoPago=?, montoOriginal=?, monto=?, esExcepcion=? WHERE idPresupuesto=?`,
-        [cliente.idCliente, metodoDb, subtotalOriginal, totalFinal, esExcepcion ? 1 : 0, presupuestoEditar]
+        `UPDATE Presupuesto SET idCliente=?, nombreCliente=?, apellidoCliente=?, metodoPago=?, montoOriginal=?, monto=?, esExcepcion=? WHERE idPresupuesto=?`,
+        [cliente.idCliente, cliente.nombre, cliente.apellido, metodoDb, subtotalOriginal, totalFinal, esExcepcion ? 1 : 0, presupuestoEditar]
       )
       // Reemplazar todos los detalles
       run(`DELETE FROM DetallePresupuesto WHERE idPresupuesto = ?`, [presupuestoEditar])
@@ -823,8 +823,8 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
         const precio   = parseFloat(it.precioUnitario) || 0
         const cantidad = parseInt(it.cantidad)
         run(
-          `INSERT INTO DetallePresupuesto (idPresupuesto, idProducto, medida, cantidad, precioUnitario, subtotal) VALUES (?,?,?,?,?,?)`,
-          [presupuestoEditar, parseInt(it.idProducto), it.medida || null, cantidad, precio, cantidad * precio]
+          `INSERT INTO DetallePresupuesto (idPresupuesto, idProducto, nombreProducto, medida, cantidad, precioUnitario, subtotal) VALUES (?,?,?,?,?,?,?)`,
+          [presupuestoEditar, parseInt(it.idProducto), it.nombreProducto || null, it.medida || null, cantidad, precio, cantidad * precio]
         )
       }
       presupuestoReal = presupuestoEditar
@@ -833,8 +833,8 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
     } else {
       // ── INSERT: presupuesto nuevo ──
       const idPresupuesto = run(
-        `INSERT INTO Presupuesto (idCliente, fecha, metodoPago, montoOriginal, monto, estado, esExcepcion) VALUES (?,?,?,?,?,'borrador',?)`,
-        [cliente.idCliente, fecha, metodoDb, subtotalOriginal, totalFinal, esExcepcion ? 1 : 0]
+        `INSERT INTO Presupuesto (idCliente, nombreCliente, apellidoCliente, fecha, metodoPago, montoOriginal, monto, estado, esExcepcion) VALUES (?,?,?,?,?,?,?,'borrador',?)`,
+        [cliente.idCliente, cliente.nombre, cliente.apellido, fecha, metodoDb, subtotalOriginal, totalFinal, esExcepcion ? 1 : 0]
       )
       // Verificamos leyendo el ID real de la DB por si last_insert_rowid fue afectado
       presupuestoReal = query('SELECT MAX(idPresupuesto) as id FROM Presupuesto WHERE idCliente = ? AND fecha = ?', [cliente.idCliente, fecha])[0]?.id ?? idPresupuesto
@@ -843,8 +843,8 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
         const precio   = parseFloat(it.precioUnitario) || 0
         const cantidad = parseInt(it.cantidad)
         run(
-          `INSERT INTO DetallePresupuesto (idPresupuesto, idProducto, medida, cantidad, precioUnitario, subtotal) VALUES (?,?,?,?,?,?)`,
-          [idPresupuesto, parseInt(it.idProducto), it.medida || null, cantidad, precio, cantidad * precio]
+          `INSERT INTO DetallePresupuesto (idPresupuesto, idProducto, nombreProducto, medida, cantidad, precioUnitario, subtotal) VALUES (?,?,?,?,?,?,?)`,
+          [idPresupuesto, parseInt(it.idProducto), it.nombreProducto || null, it.medida || null, cantidad, precio, cantidad * precio]
         )
       }
     }
