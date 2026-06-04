@@ -259,7 +259,7 @@ function Clientes() {
           ['Apellido y nombre', `${confirmRow.apellido}, ${confirmRow.nombre}`],
           ['CUIT', confirmRow.cuit || '—'],
         ] : []}
-        message="¿Eliminar este cliente? Solo es posible si no tiene presupuestos asociados."
+        message="¿Estas seguro de ELIMINAR este cliente?"
       />
     </div>
   )
@@ -383,7 +383,7 @@ function Proveedores() {
           ['Nombre fiscal', confirmRow.nombreFiscal],
           ['Nombre comercial', confirmRow.nombreComercial || '—'],
         ] : []}
-        message="¿Eliminar este proveedor?"
+        message="¿Estas seguro de ELIMINAR este proveedor?"
       />
     </div>
   )

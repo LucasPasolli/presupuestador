@@ -110,6 +110,8 @@ function runSchema() {
       metodoPago     TEXT NOT NULL CHECK(metodoPago IN ('efectivo','transferencia','cc30','cc15')),
       montoOriginal  REAL NOT NULL DEFAULT 0,
       monto          REAL NOT NULL DEFAULT 0,
+      nombreCliente   TEXT,
+      apellidoCliente TEXT,
       estado         TEXT NOT NULL DEFAULT 'borrador' CHECK(estado IN ('borrador','aprobado','pagado','rechazado')),
       esExcepcion    INTEGER NOT NULL DEFAULT 0 CHECK(esExcepcion IN (0,1)),
       FOREIGN KEY (idCliente) REFERENCES Cliente(idCliente) ON DELETE RESTRICT
@@ -121,6 +123,7 @@ function runSchema() {
       idDetalle      INTEGER PRIMARY KEY AUTOINCREMENT,
       idPresupuesto  INTEGER NOT NULL,
       idProducto     INTEGER NOT NULL,
+      nombreProducto TEXT,
       medida         TEXT,
       cantidad       INTEGER NOT NULL,
       precioUnitario REAL NOT NULL,
@@ -156,6 +159,7 @@ function runSchema() {
       fechaPago       TEXT,
       metodoPago      TEXT DEFAULT 'efectivo' CHECK(metodoPago IN ('efectivo','transferencia','echeck')),
       idProveedor     INTEGER,
+      nombreProveedor TEXT,
       FOREIGN KEY (idProveedor) REFERENCES Proveedor(idProveedor) ON DELETE SET NULL
     );
   `)
@@ -164,13 +168,14 @@ function runSchema() {
     CREATE TABLE IF NOT EXISTS DetallePedidoCompra (
       idDetallePedido INTEGER PRIMARY KEY AUTOINCREMENT,
       idPedido        INTEGER NOT NULL,
-      idProducto      INTEGER NOT NULL,
+      idProducto      INTEGER,
+      nombreProducto  TEXT,
       medida          TEXT,
       cantidad        INTEGER NOT NULL,
       precioUnitario  REAL NOT NULL,
       subtotal        REAL NOT NULL,
       FOREIGN KEY (idPedido)   REFERENCES PedidoCompra(idPedido) ON DELETE CASCADE,
-      FOREIGN KEY (idProducto) REFERENCES Producto(idProducto) ON DELETE RESTRICT
+      FOREIGN KEY (idProducto) REFERENCES Producto(idProducto) ON DELETE SET NULL
     );
   `)
 
@@ -304,6 +309,84 @@ function runMigrations() {
       monto       REAL NOT NULL DEFAULT 0
     );
   `)
+
+  // v15 → v16: snapshot de nombre de producto en DetallePresupuesto.
+  // Garantiza que borrar/renombrar un Producto no destruya el dato histórico.
+  const colsDetalle = db.exec(`PRAGMA table_info(DetallePresupuesto)`)[0]?.values ?? []
+  if (!colsDetalle.some(r => r[1] === 'nombreProducto')) {
+    db.run(`ALTER TABLE DetallePresupuesto ADD COLUMN nombreProducto TEXT`)
+    db.run(`
+      UPDATE DetallePresupuesto
+      SET nombreProducto = (
+        SELECT nombre FROM Producto
+        WHERE Producto.idProducto = DetallePresupuesto.idProducto
+      )
+      WHERE nombreProducto IS NULL
+    `)
+    persistDB()
+  }
+
+  // v17 → v18: snapshot de nombre de proveedor en PedidoCompra.
+  // Garantiza que borrar un Proveedor no haga desaparecer el nombre en historial.
+  const colsPedido2 = db.exec(`PRAGMA table_info(PedidoCompra)`)[0]?.values ?? []
+  if (!colsPedido2.some(r => r[1] === 'nombreProveedor')) {
+    db.run(`ALTER TABLE PedidoCompra ADD COLUMN nombreProveedor TEXT`)
+    db.run(`
+      UPDATE PedidoCompra
+      SET nombreProveedor = (
+        SELECT COALESCE(nombreComercial, nombreFiscal)
+        FROM Proveedor
+        WHERE Proveedor.idProveedor = PedidoCompra.idProveedor
+      )
+      WHERE nombreProveedor IS NULL AND idProveedor IS NOT NULL
+    `)
+    persistDB()
+  }
+
+  // v18 → v19: backfill nombreProducto en DetallePedidoCompra.
+  // La columna ya existe pero el INSERT nunca la populaba — rellenar los registros vacíos.
+  const colsDetallePedido = db.exec(`PRAGMA table_info(DetallePedidoCompra)`)[0]?.values ?? []
+  if (!colsDetallePedido.some(r => r[1] === 'nombreProducto')) {
+    db.run(`ALTER TABLE DetallePedidoCompra ADD COLUMN nombreProducto TEXT`)
+  }
+  db.run(`
+    UPDATE DetallePedidoCompra
+    SET nombreProducto = (
+      SELECT nombre FROM Producto
+      WHERE Producto.idProducto = DetallePedidoCompra.idProducto
+    )
+    WHERE (nombreProducto IS NULL OR nombreProducto = '') AND idProducto IS NOT NULL
+  `)
+  persistDB()
+
+  // v16 → v17: snapshot de nombre de cliente en Presupuesto.
+  // Garantiza que borrar un Cliente no haga desaparecer el nombre en historial y PDF.
+  const colsPresMig = db.exec(`PRAGMA table_info(Presupuesto)`)[0]?.values ?? []
+  const colNamesPresMig = colsPresMig.map(r => r[1])
+  if (!colNamesPresMig.includes('nombreCliente')) {
+    db.run(`ALTER TABLE Presupuesto ADD COLUMN nombreCliente TEXT`)
+    db.run(`
+      UPDATE Presupuesto
+      SET nombreCliente = (
+        SELECT nombre FROM Cliente
+        WHERE Cliente.idCliente = Presupuesto.idCliente
+      )
+      WHERE nombreCliente IS NULL
+    `)
+    persistDB()
+  }
+  if (!colNamesPresMig.includes('apellidoCliente')) {
+    db.run(`ALTER TABLE Presupuesto ADD COLUMN apellidoCliente TEXT`)
+    db.run(`
+      UPDATE Presupuesto
+      SET apellidoCliente = (
+        SELECT apellido FROM Cliente
+        WHERE Cliente.idCliente = Presupuesto.idCliente
+      )
+      WHERE apellidoCliente IS NULL
+    `)
+    persistDB()
+  }
 }
 
 

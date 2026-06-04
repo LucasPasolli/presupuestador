@@ -467,7 +467,10 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
 
   const reload = useCallback(() => {
     const p = query(`
-      SELECT pc.*, pv.nombreComercial AS nombreProveedor, pv.nombreFiscal AS nombreFiscalProv
+      SELECT pc.*,
+             COALESCE(pc.nombreProveedor, pv.nombreComercial, pv.nombreFiscal) AS nombreProveedorDisplay,
+             pv.nombreComercial AS nombreComercialJoin,
+             pv.nombreFiscal    AS nombreFiscalJoin
       FROM PedidoCompra pc
       LEFT JOIN Proveedor pv ON pv.idProveedor = pc.idProveedor
       WHERE pc.idPedido = ?
@@ -475,7 +478,8 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
     if (p) setPedido(p)
 
     const rows = query(`
-      SELECT dc.*, p.nombre AS nombreProducto
+      SELECT dc.*,
+             COALESCE(dc.nombreProducto, p.nombre) AS nombreProducto
       FROM DetallePedidoCompra dc
       LEFT JOIN Producto p ON p.idProducto = dc.idProducto
       WHERE dc.idPedido = ?
@@ -483,10 +487,14 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
     `, [pedidoInit.idPedido])
     setDetalles(rows)
 
+    // Para el panel de proveedor: usar objeto con snapshot si el proveedor fue borrado
     const idProv = p?.idProveedor ?? pedidoInit.idProveedor
     if (idProv) {
       const prov = query('SELECT * FROM Proveedor WHERE idProveedor = ?', [idProv])[0]
       setProveedor(prov || null)
+    } else if (p?.nombreProveedor) {
+      // Proveedor borrado pero tenemos el snapshot del nombre
+      setProveedor({ nombreComercial: p.nombreProveedor, nombreFiscal: p.nombreProveedor, idProveedor: null, _deleted: true })
     } else {
       setProveedor(null)
     }
@@ -847,8 +855,8 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
     if (esEdicion) {
       // Actualizar pedido existente
       run(
-        `UPDATE PedidoCompra SET monto = ?, metodoPago = ?, idProveedor = ? WHERE idPedido = ?`,
-        [total, metodoPago, proveedor?.idProveedor ?? null, pedidoEditando.idPedido]
+        `UPDATE PedidoCompra SET monto = ?, metodoPago = ?, idProveedor = ?, nombreProveedor = ? WHERE idPedido = ?`,
+        [total, metodoPago, proveedor?.idProveedor ?? null, proveedor?.nombreComercial || proveedor?.nombreFiscal || null, pedidoEditando.idPedido]
       )
       // Reemplazar ítems
       run(`DELETE FROM DetallePedidoCompra WHERE idPedido = ?`, [pedidoEditando.idPedido])
@@ -856,9 +864,9 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
         const precio   = parseFloat(String(it.precioUnitario).replace(',', '.')) || 0
         const cantidad = parseInt(it.cantidad)
         run(
-          `INSERT INTO DetallePedidoCompra (idPedido, idProducto, medida, cantidad, precioUnitario, subtotal)
-           VALUES (?,?,?,?,?,?)`,
-          [pedidoEditando.idPedido, parseInt(it.idProducto), it.medida || null, cantidad, precio, cantidad * precio]
+          `INSERT INTO DetallePedidoCompra (idPedido, idProducto, nombreProducto, medida, cantidad, precioUnitario, subtotal)
+           VALUES (?,?,?,?,?,?,?)`,
+          [pedidoEditando.idPedido, parseInt(it.idProducto), it.nombreProducto || null, it.medida || null, cantidad, precio, cantidad * precio]
         )
       }
       // Actualizar precioProveedor: para productos con medidas, usar el precio más alto del pedido
@@ -882,9 +890,9 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
       // Nuevo pedido
       const fecha    = today()
       const idPedido = run(
-        `INSERT INTO PedidoCompra (fecha, monto, estadoPago, estadoLogistico, metodoPago, idProveedor)
-         VALUES (?, ?, 'pendiente', 'encargado', ?, ?)`,
-        [fecha, total, metodoPago, proveedor?.idProveedor ?? null]
+        `INSERT INTO PedidoCompra (fecha, monto, estadoPago, estadoLogistico, metodoPago, idProveedor, nombreProveedor)
+         VALUES (?, ?, 'pendiente', 'encargado', ?, ?, ?)`,
+        [fecha, total, metodoPago, proveedor?.idProveedor ?? null, proveedor?.nombreComercial || proveedor?.nombreFiscal || null]
       )
       const pedidoReal = query('SELECT MAX(idPedido) as id FROM PedidoCompra WHERE fecha = ?', [fecha])[0]?.id ?? idPedido
 
@@ -892,9 +900,9 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
         const precio   = parseFloat(String(it.precioUnitario).replace(',', '.')) || 0
         const cantidad = parseInt(it.cantidad)
         run(
-          `INSERT INTO DetallePedidoCompra (idPedido, idProducto, medida, cantidad, precioUnitario, subtotal)
-           VALUES (?,?,?,?,?,?)`,
-          [pedidoReal, parseInt(it.idProducto), it.medida || null, cantidad, precio, cantidad * precio]
+          `INSERT INTO DetallePedidoCompra (idPedido, idProducto, nombreProducto, medida, cantidad, precioUnitario, subtotal)
+           VALUES (?,?,?,?,?,?,?)`,
+          [pedidoReal, parseInt(it.idProducto), it.nombreProducto || null, it.medida || null, cantidad, precio, cantidad * precio]
         )
       }
       // Actualizar precioProveedor: precio más alto para productos con medidas
@@ -1049,7 +1057,7 @@ export default function PedidosCompra() {
   const load = useCallback(() => {
     let sql = `
       SELECT pc.*,
-             COALESCE(pr.nombreComercial, pr.nombreFiscal) AS nombreProveedor,
+             COALESCE(pc.nombreProveedor, pr.nombreComercial, pr.nombreFiscal) AS nombreProveedor,
              pr.nombreFiscal AS nombreFiscalProv
       FROM PedidoCompra pc
       LEFT JOIN Proveedor pr ON pr.idProveedor = pc.idProveedor
