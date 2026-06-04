@@ -240,7 +240,7 @@ function GraficoDona({ datos }) {
 function calcularMetricas(desde, hasta) {
   const m = {}
 
-  // ── 1. Ingresos totales del período ──────────────────────────────────────
+  // ── 1. Presupuestos del período (aprobados + pagados) ─────────────────────
   const presupuestosPeriodo = query(`
     SELECT p.idPresupuesto, p.monto, p.montoOriginal, p.metodoPago, p.fecha, p.idCliente, p.estado
     FROM Presupuesto p
@@ -248,23 +248,23 @@ function calcularMetricas(desde, hasta) {
       AND p.estado IN ('aprobado','pagado')
   `, [desde, hasta])
 
-  m.facturadoTotal  = presupuestosPeriodo.reduce((a, p) => a + p.monto, 0)
+  m.facturadoTotal    = presupuestosPeriodo.reduce((a, p) => a + p.monto, 0)
   m.totalPresupuestos = presupuestosPeriodo.length
-  m.ticketPromedio  = m.totalPresupuestos ? m.facturadoTotal / m.totalPresupuestos : 0
+  m.ticketPromedio    = m.totalPresupuestos ? m.facturadoTotal / m.totalPresupuestos : 0
 
-  // Descuentos otorgados = diferencia entre precio lista y precio final para efectivo/transf
+  // Descuentos = montoOriginal > monto (efectivo/transf con precio especial)
   m.descuentosOtorgados = presupuestosPeriodo.reduce((a, p) => {
-    const diff = p.montoOriginal - p.monto
+    const diff = (p.montoOriginal ?? 0) - p.monto
     return a + (diff > 0 ? diff : 0)
   }, 0)
-  // Recargos cobrados (CC30)
+  // Recargos = monto > montoOriginal (CC con interés)
   m.recargosCC = presupuestosPeriodo.reduce((a, p) => {
-    const diff = p.monto - p.montoOriginal
+    const diff = p.monto - (p.montoOriginal ?? 0)
     return a + (diff > 0 ? diff : 0)
   }, 0)
 
-  // ── 2. Cobrado real vs. pendiente ─────────────────────────────────────────
-  // Cobrado = efectivo + transferencia + saldos CC ya pagados
+  // ── 2. Cobrado real vs. pendiente CC ──────────────────────────────────────
+  // Saldos CC generados por presupuestos del período
   const saldosDelPeriodo = query(`
     SELECT s.monto, s.estado, s.idPresupuesto
     FROM Saldo s
@@ -272,48 +272,63 @@ function calcularMetricas(desde, hasta) {
     WHERE p.fecha >= ? AND p.fecha <= ?
   `, [desde, hasta])
 
-  const montosCC = presupuestosPeriodo
-    .filter(p => p.metodoPago === 'cc15' || p.metodoPago === 'cc30')
-    .map(p => p.monto)
-
-  const montoCCTotal     = montosCC.reduce((a, v) => a + v, 0)
   const montoCCPagado    = saldosDelPeriodo.filter(s => s.estado === 'pagado').reduce((a, s) => a + s.monto, 0)
   const montoCCPendiente = saldosDelPeriodo.filter(s => s.estado === 'pendiente').reduce((a, s) => a + s.monto, 0)
 
+  // Contado: efectivo + transferencia con estado 'pagado'
   const montoContado = presupuestosPeriodo
     .filter(p => (p.metodoPago === 'efectivo' || p.metodoPago === 'transferencia') && p.estado === 'pagado')
     .reduce((a, p) => a + p.monto, 0)
 
-  m.cobradoReal      = montoContado + montoCCPagado
-  m.pendienteCC      = montoCCPendiente
+  // Ingresos extra del período (tabla Ingreso)
+  const ingresosExtra = query(`
+    SELECT COALESCE(SUM(monto),0) as v FROM Ingreso
+    WHERE fecha >= ? AND fecha <= ?
+  `, [desde, hasta])[0]?.v ?? 0
 
-  // ── 3. Saldos por vencer (todos los pendientes, no solo el período) ───────
-  const hoy = today()
+  m.cobradoReal = montoContado + montoCCPagado + ingresosExtra
+  m.pendienteCC = montoCCPendiente
+
+  // ── 3. Saldos por vencer — rangos EXCLUSIVOS (global, no filtrado por período) ──
+  const hoy  = today()
   const en15 = new Date(); en15.setDate(en15.getDate() + 15)
   const en30 = new Date(); en30.setDate(en30.getDate() + 30)
+  const hoyStr  = hoy
+  const en15Str = en15.toISOString().slice(0, 10)
+  const en30Str = en30.toISOString().slice(0, 10)
 
+  // JOIN con Cliente usando LEFT JOIN para sobrevivir a clientes eliminados
   const saldosPendientesGlobal = query(`
-    SELECT s.monto, s.fechaFin, c.nombre, c.apellido
+    SELECT s.monto, s.fechaFin,
+           COALESCE(p.nombreCliente,  c.nombre,  '') AS nombre,
+           COALESCE(p.apellidoCliente, c.apellido, '') AS apellido
     FROM Saldo s
-    JOIN Cliente c ON c.idCliente = s.idCliente
+    JOIN Presupuesto p ON p.idPresupuesto = s.idPresupuesto
+    LEFT JOIN Cliente c ON c.idCliente = s.idCliente
     WHERE s.estado = 'pendiente'
     ORDER BY s.fechaFin ASC
   `)
 
+  // Vencidos: fechaFin < hoy
+  m.saldosVencidos    = saldosPendientesGlobal
+    .filter(s => s.fechaFin < hoyStr)
+    .reduce((a, s) => a + s.monto, 0)
+  // Por vencer en los próximos 15 días (sin incluir vencidos)
   m.saldosPorVencer15 = saldosPendientesGlobal
-    .filter(s => s.fechaFin <= en15.toISOString().slice(0,10))
+    .filter(s => s.fechaFin >= hoyStr && s.fechaFin <= en15Str)
     .reduce((a, s) => a + s.monto, 0)
+  // Entre 16 y 30 días
   m.saldosPorVencer30 = saldosPendientesGlobal
-    .filter(s => s.fechaFin <= en30.toISOString().slice(0,10))
+    .filter(s => s.fechaFin > en15Str && s.fechaFin <= en30Str)
     .reduce((a, s) => a + s.monto, 0)
-  m.saldosVencidos = saldosPendientesGlobal
-    .filter(s => s.fechaFin < hoy)
-    .reduce((a, s) => a + s.monto, 0)
-  m.proxSaldos = saldosPendientesGlobal.slice(0, 5)
+  // Próximos vencimientos (los 5 más cercanos que aún no vencieron)
+  m.proxSaldos = saldosPendientesGlobal
+    .filter(s => s.fechaFin >= hoyStr)
+    .slice(0, 5)
 
   // ── 4. Mix de métodos de pago ─────────────────────────────────────────────
-  const metodoLabels = { efectivo:'Efectivo', transferencia:'Transferencia', cc15:'CC 15d', cc30:'CC 30d' }
-  const porMetodo    = {}
+  const metodoLabels = { efectivo: 'Efectivo', transferencia: 'Transferencia', cc15: 'CC 15d', cc30: 'CC 30d' }
+  const porMetodo = {}
   for (const p of presupuestosPeriodo) {
     if (!porMetodo[p.metodoPago]) porMetodo[p.metodoPago] = 0
     porMetodo[p.metodoPago] += p.monto
@@ -322,69 +337,94 @@ function calcularMetricas(desde, hasta) {
     .map(([k, v]) => ({ value: k, label: metodoLabels[k] ?? k, monto: v }))
     .sort((a, b) => b.monto - a.monto)
 
-  // ── 5. Evolución mensual (últimos N meses) ────────────────────────────────
+  // ── 5. Evolución mensual ──────────────────────────────────────────────────
+  // Obtener todos los meses con actividad en el período
   const mesesData = query(`
     SELECT strftime('%Y-%m', fecha) AS mes,
            SUM(monto) AS monto,
            COUNT(*) AS cantidad
     FROM Presupuesto
     WHERE fecha >= ? AND fecha <= ?
+      AND estado IN ('aprobado','pagado')
     GROUP BY mes
     ORDER BY mes
   `, [desde, hasta])
 
-  // Agregar "cobrado" por mes (efectivo+transf inmediato + CC pagado en ese mes)
   m.evolucionMensual = mesesData.map(row => {
-
-    const cobradoMes = query(`
-      SELECT COALESCE(SUM(p.monto),0) as v
+    // Cobrado contado (efectivo/transf pagados) en ese mes
+    const cobradoContadoMes = query(`
+      SELECT COALESCE(SUM(p.monto), 0) AS v
       FROM Presupuesto p
       WHERE strftime('%Y-%m', p.fecha) = ?
-        AND (
-          p.metodoPago IN ('efectivo','transferencia')
-          OR p.idPresupuesto IN (
-            SELECT idPresupuesto
-            FROM Saldo
-            WHERE estado = 'pagado'
-              AND strftime('%Y-%m', fechaFin) = ?
-          )
-        )
-    `, [row.mes, row.mes])[0]?.v ?? 0
+        AND p.metodoPago IN ('efectivo', 'transferencia')
+        AND p.estado = 'pagado'
+    `, [row.mes])[0]?.v ?? 0
 
-    const egresoMes = query(`
-      SELECT COALESCE(SUM(monto),0) as v
+    // CC cobrados en ese mes (por fechaPago del saldo, no por fechaFin)
+    const cobradoCCMes = query(`
+      SELECT COALESCE(SUM(s.monto), 0) AS v
+      FROM Saldo s
+      WHERE s.estado = 'pagado'
+        AND strftime('%Y-%m', s.fechaPago) = ?
+    `, [row.mes])[0]?.v ?? 0
+
+    // Egresos pagados (PedidoCompra) en ese mes — campo correcto: estadoPago
+    const egresosMes = query(`
+      SELECT COALESCE(SUM(monto), 0) AS v
       FROM PedidoCompra
-      WHERE estado = 'pagado'
+      WHERE estadoPago = 'pagado'
         AND strftime('%Y-%m', fecha) = ?
+    `, [row.mes])[0]?.v ?? 0
+
+    // Egresos extra (tabla Egreso) en ese mes
+    const egresosExtraMes = query(`
+      SELECT COALESCE(SUM(monto), 0) AS v
+      FROM Egreso
+      WHERE strftime('%Y-%m', fecha) = ?
+    `, [row.mes])[0]?.v ?? 0
+
+    // Ingresos extra en ese mes
+    const ingresosExtraMes = query(`
+      SELECT COALESCE(SUM(monto), 0) AS v
+      FROM Ingreso
+      WHERE strftime('%Y-%m', fecha) = ?
     `, [row.mes])[0]?.v ?? 0
 
     return {
       ...row,
-      cobrado: cobradoMes,
-      egreso: egresoMes
+      cobrado: cobradoContadoMes + cobradoCCMes + ingresosExtraMes,
+      egreso:  egresosMes + egresosExtraMes,
     }
   })
 
   // ── 6. Top 10 productos más vendidos ─────────────────────────────────────
+  // Usa COALESCE(dp.nombreProducto, pr.nombre) para sobrevivir a productos eliminados
   m.topProductos = query(`
-    SELECT pr.nombre, SUM(dp.cantidad) AS unidades, SUM(dp.subtotal) AS monto
+    SELECT COALESCE(dp.nombreProducto, pr.nombre, '(producto eliminado)') AS nombre,
+           SUM(dp.cantidad)  AS unidades,
+           SUM(dp.subtotal)  AS monto
     FROM DetallePresupuesto dp
-    JOIN Presupuesto p  ON p.idPresupuesto = dp.idPresupuesto
-    JOIN Producto   pr ON pr.idProducto    = dp.idProducto
+    JOIN Presupuesto p ON p.idPresupuesto = dp.idPresupuesto
+    LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
     WHERE p.fecha >= ? AND p.fecha <= ?
-    GROUP BY dp.idProducto
+      AND p.estado IN ('aprobado', 'pagado')
+    GROUP BY dp.idProducto, COALESCE(dp.nombreProducto, pr.nombre)
     ORDER BY unidades DESC
     LIMIT 10
   `, [desde, hasta])
 
   // ── 7. Top 10 clientes ───────────────────────────────────────────────────
+  // Usa snapshot nombreCliente/apellidoCliente del Presupuesto + LEFT JOIN por si acaso
   m.topClientes = query(`
-    SELECT c.nombre || ' ' || c.apellido AS nombre,
+    SELECT COALESCE(p.nombreCliente,  c.nombre,  'Cliente eliminado') ||
+           ' ' ||
+           COALESCE(p.apellidoCliente, c.apellido, '')               AS nombre,
            COUNT(DISTINCT p.idPresupuesto) AS presupuestos,
-           SUM(p.monto) AS monto
+           SUM(p.monto)                    AS monto
     FROM Presupuesto p
-    JOIN Cliente c ON c.idCliente = p.idCliente
+    LEFT JOIN Cliente c ON c.idCliente = p.idCliente
     WHERE p.fecha >= ? AND p.fecha <= ?
+      AND p.estado IN ('aprobado', 'pagado')
     GROUP BY p.idCliente
     ORDER BY monto DESC
     LIMIT 10
@@ -392,26 +432,37 @@ function calcularMetricas(desde, hasta) {
 
   // ── 8. Clientes únicos del período ───────────────────────────────────────
   m.clientesUnicos = query(`
-    SELECT COUNT(DISTINCT idCliente) as c FROM Presupuesto
+    SELECT COUNT(DISTINCT idCliente) AS c FROM Presupuesto
     WHERE fecha >= ? AND fecha <= ?
-      AND estado IN ('pagado','aprobado')
+      AND estado IN ('pagado', 'aprobado')
   `, [desde, hasta])[0]?.c ?? 0
 
-  // ── 9. Egresos (pedidos de compra del período) ───────────────────────────
-  // Egresos: solo pedidos efectivamente pagados
+  // ── 9. Egresos del período ────────────────────────────────────────────────
+  // CORRECCIÓN: PedidoCompra usa estadoPago (no estado)
   m.egresosPedidos = query(`
-    SELECT COALESCE(SUM(monto),0) as v FROM PedidoCompra
-    WHERE fecha >= ? AND fecha <= ? AND estado = 'pagado'
+    SELECT COALESCE(SUM(monto), 0) AS v FROM PedidoCompra
+    WHERE fecha >= ? AND fecha <= ?
+      AND estadoPago = 'pagado'
   `, [desde, hasta])[0]?.v ?? 0
 
-  // Pedidos pendientes de pago (deuda con proveedores)
+  // Egresos extra (sueldos, transporte, servicios, etc.)
+  m.egresosExtra = query(`
+    SELECT COALESCE(SUM(monto), 0) AS v FROM Egreso
+    WHERE fecha >= ? AND fecha <= ?
+  `, [desde, hasta])[0]?.v ?? 0
+
+  m.egresosTotal = m.egresosPedidos + m.egresosExtra
+
+  // Pedidos pendientes de pago — deuda con proveedores
+  // CORRECCIÓN: estadoPago (no estado)
   m.pedidosPendientes = query(`
-    SELECT COALESCE(SUM(monto),0) as v FROM PedidoCompra
-    WHERE fecha >= ? AND fecha <= ? AND estado = 'pendiente'
+    SELECT COALESCE(SUM(monto), 0) AS v FROM PedidoCompra
+    WHERE fecha >= ? AND fecha <= ?
+      AND estadoPago = 'pendiente'
   `, [desde, hasta])[0]?.v ?? 0
 
-  // ── 10. Resultado operativo estimado ─────────────────────────────────────
-  m.resultadoEstimado = m.cobradoReal - m.egresosPedidos
+  // ── 10. Resultado operativo ───────────────────────────────────────────────
+  m.resultadoEstimado = m.cobradoReal - m.egresosTotal
 
   return m
 }
@@ -517,12 +568,12 @@ export default function Estadisticas() {
           sub="en el período" />
         <KpiCard icon={Tag}         label="Descuentos dados" value={formatoMonto(m.descuentosOtorgados)} color="yellow"
           sub={`${pct(m.descuentosOtorgados, m.facturadoTotal)} del facturado`} />
-        <KpiCard icon={TrendingDown} label="Egresos pagados" value={formatoMonto(m.egresosPedidos)} color="red"
-          sub="pedidos de compra" />
+        <KpiCard icon={TrendingDown} label="Egresos pagados" value={formatoMonto(m.egresosTotal)} color="red"
+          sub={`pedidos ${formatoMonto(m.egresosPedidos)} · extra ${formatoMonto(m.egresosExtra)}`} />
         <KpiCard icon={m.resultadoEstimado >= 0 ? TrendingUp : TrendingDown}
           label="Resultado operativo" value={formatoMonto(m.resultadoEstimado)}
           color={m.resultadoEstimado >= 0 ? 'green' : 'red'}
-          sub="cobrado − egresos" />
+          sub="cobrado − egresos totales" />
       </div>
 
       {/* ── Deuda con proveedores ── */}
@@ -577,9 +628,9 @@ export default function Estadisticas() {
           </h3>
           <div className="space-y-3">
             {[
-              { label: 'Vencidos',           value: m.saldosVencidos,    color: 'text-red-400' },
-              { label: 'Vencen en 15 días',  value: m.saldosPorVencer15, color: 'text-yellow-400' },
-              { label: 'Vencen en 30 días',  value: m.saldosPorVencer30, color: 'text-brand-400' },
+              { label: 'Vencidos',              value: m.saldosVencidos,    color: 'text-red-400' },
+              { label: 'Vencen en 1–15 días',  value: m.saldosPorVencer15, color: 'text-yellow-400' },
+              { label: 'Vencen en 16–30 días', value: m.saldosPorVencer30, color: 'text-brand-400' },
             ].map(({ label, value, color }) => (
               <div key={label} className="flex justify-between items-center py-2 border-b border-surface-700/50 last:border-0">
                 <span className="text-surface-300 text-sm font-body">{label}</span>
