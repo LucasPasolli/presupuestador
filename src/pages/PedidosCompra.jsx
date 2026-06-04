@@ -489,12 +489,20 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
 
     // Para el panel de proveedor: usar objeto con snapshot si el proveedor fue borrado
     const idProv = p?.idProveedor ?? pedidoInit.idProveedor
+    const snapshotNombre = p?.nombreProveedor ?? pedidoInit.nombreProveedor
     if (idProv) {
       const prov = query('SELECT * FROM Proveedor WHERE idProveedor = ?', [idProv])[0]
-      setProveedor(prov || null)
-    } else if (p?.nombreProveedor) {
-      // Proveedor borrado pero tenemos el snapshot del nombre
-      setProveedor({ nombreComercial: p.nombreProveedor, nombreFiscal: p.nombreProveedor, idProveedor: null, _deleted: true })
+      if (prov) {
+        setProveedor(prov)
+      } else if (snapshotNombre) {
+        // Proveedor borrado: mostrar snapshot guardado en el pedido
+        setProveedor({ nombreComercial: snapshotNombre, nombreFiscal: snapshotNombre, idProveedor: null, _deleted: true })
+      } else {
+        setProveedor(null)
+      }
+    } else if (snapshotNombre) {
+      // Sin idProveedor pero hay snapshot
+      setProveedor({ nombreComercial: snapshotNombre, nombreFiscal: snapshotNombre, idProveedor: null, _deleted: true })
     } else {
       setProveedor(null)
     }
