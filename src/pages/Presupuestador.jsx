@@ -27,6 +27,9 @@ function norm(s) {
   return (s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
 }
 
+// Capitaliza la primera letra de un string (igual que ABMC)
+const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
+
 // ─── Toast ─────────────────────────────────────────────────────────────────
 
 function Toast({ message, onDone }) {
@@ -49,13 +52,21 @@ function Toast({ message, onDone }) {
 // ─── Modal nuevo cliente ────────────────────────────────────────────────────
 
 function NuevoClienteModal({ open, onClose, onCreated }) {
-  const empty = { nombre: '', apellido: '', cuit: '', domicilio: '', telefono: '', mail: '' }
+  const empty = { nombre: '', apellido: '', cuit: '', domicilio: '', telefono: '', mail: '', apodo: '', nombreComercio: '' }
   const [form, setForm]     = useState(empty)
   const [errors, setErrors] = useState({})
 
   useEffect(() => { if (!open) { setForm(empty); setErrors({}) } }, [open])
 
   function set(k, v) { setForm(p => ({ ...p, [k]: v })) }
+
+  // CUIT: dígitos y guiones. Teléfono: solo dígitos. Igual que ABMC.
+  function setField(k, v) {
+    let val = v
+    if (k === 'cuit')     val = v.replace(/[^0-9-]/g, '')
+    if (k === 'telefono') val = v.replace(/[^0-9]/g, '')
+    setForm(p => ({ ...p, [k]: val }))
+  }
 
   function guardar() {
     const e = {}
@@ -64,8 +75,18 @@ function NuevoClienteModal({ open, onClose, onCreated }) {
     setErrors(e)
     if (Object.keys(e).length) return
 
-    const id     = run(`INSERT INTO Cliente (nombre,apellido,cuit,domicilio,telefono,mail) VALUES (?,?,?,?,?,?)`,
-                       [form.nombre.trim(), form.apellido.trim(), form.cuit, form.domicilio, form.telefono, form.mail])
+    const nombre         = cap(form.nombre)
+    const apellido       = cap(form.apellido)
+    const apodo          = cap(form.apodo)
+    const nombreComercio = cap(form.nombreComercio)
+    const domicilio      = form.domicilio.replace(/\b\w/g, c => c.toUpperCase())
+
+    const id = run(
+      `INSERT INTO Cliente (nombre,apellido,cuit,domicilio,telefono,mail,apodo,nombreComercio,activo)
+       VALUES (?,?,?,?,?,?,?,?,1)`,
+      [nombre, apellido, form.cuit, domicilio,
+       form.telefono, form.mail, apodo, nombreComercio]
+    )
     const cliente = query('SELECT * FROM Cliente WHERE idCliente = ?', [id])[0]
     // Cierra primero el modal, luego notifica al padre — así el toast se monta en un árbol vivo
     onClose()
@@ -79,11 +100,17 @@ function NuevoClienteModal({ open, onClose, onCreated }) {
           <Input label="Nombre *"   value={form.nombre}   onChange={e => set('nombre', e.target.value)}   error={errors.nombre}   placeholder="Juan" />
           <Input label="Apellido *" value={form.apellido} onChange={e => set('apellido', e.target.value)} error={errors.apellido} placeholder="García" />
         </div>
-        <Input label="CUIT"      value={form.cuit}      onChange={e => set('cuit', e.target.value)}      placeholder="20-12345678-9" />
-        <Input label="Domicilio" value={form.domicilio}  onChange={e => set('domicilio', e.target.value)} placeholder="Av. Siempreviva 742" />
         <div className="grid grid-cols-2 gap-3">
-          <Input label="Teléfono" value={form.telefono} onChange={e => set('telefono', e.target.value)} placeholder="351 000-0000" />
-          <Input label="Email"    value={form.mail}      onChange={e => set('mail', e.target.value)}     placeholder="email@ejemplo.com" />
+          <Input label="Apodo"          value={form.apodo}         onChange={e => set('apodo', e.target.value)}         placeholder="Apodo o alias" />
+          <Input label="Nombre comercio" value={form.nombreComercio} onChange={e => set('nombreComercio', e.target.value)} placeholder="Nombre del local" />
+        </div>
+        <Input label="CUIT" value={form.cuit} type="tel" inputMode="numeric" pattern="[0-9-]*"
+          onChange={e => setField('cuit', e.target.value)} placeholder="20-12345678-9"  />
+        <Input label="Domicilio" value={form.domicilio} onChange={e => set('domicilio', e.target.value)} placeholder="Av. Siempreviva 742" />
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Teléfono" value={form.telefono} type="tel" inputMode="numeric" pattern="[0-9+\-() ]*"
+            onChange={e => setField('telefono', e.target.value)} placeholder="3510000000"  />
+          <Input label="Email" value={form.mail} onChange={e => set('mail', e.target.value)} placeholder="email@ejemplo.com" />
         </div>
         <div className="flex gap-2 pt-2">
           <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
@@ -113,9 +140,11 @@ function ClienteSelector({ value, onChange, onToast }) {
     setSearch(text)
     if (!text.trim()) { setResults([]); setShowDrop(false); return }
     const normText = norm(text.trim())
-    const byId = query(`SELECT * FROM Cliente WHERE CAST(idCliente AS TEXT) = ? LIMIT 1`, [text.trim()])
-    const byName = query(`SELECT * FROM Cliente LIMIT 300`)
-      .filter(c => norm(c.nombre).includes(normText) || norm(c.apellido).includes(normText))
+    // Solo clientes activos (activo = 1); los borrados desde ABMC tienen activo = 0
+    const byId = query(`SELECT * FROM Cliente WHERE CAST(idCliente AS TEXT) = ? AND activo = 1 LIMIT 1`, [text.trim()])
+    const byName = query(`SELECT * FROM Cliente WHERE activo = 1 LIMIT 300`)
+      .filter(c => norm(c.nombre).includes(normText) || norm(c.apellido).includes(normText)
+               || norm(c.apodo ?? '').includes(normText) || norm(c.nombreComercio ?? '').includes(normText))
     // Unir sin duplicados
     const seen = new Set(byId.map(c => c.idCliente))
     const rows = [...byId, ...byName.filter(c => !seen.has(c.idCliente))].slice(0, 8)

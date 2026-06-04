@@ -23,6 +23,9 @@ function fmtFecha(iso) {
 
 function today() { return new Date().toISOString().slice(0, 10) }
 
+// Capitaliza la primera letra de un string (igual que ABMC)
+const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
+
 // Calcula el próximo día 30 a partir de hoy
 function proximoDia30() {
   const now = new Date()
@@ -68,6 +71,13 @@ function NuevoProveedorModal({ open, onClose, onCreated }) {
   useEffect(() => { if (!open) { setForm(empty); setErrors({}) } }, [open])
 
   function set(k, v) { setForm(p => ({ ...p, [k]: v })) }
+  // CUIT: dígitos y guiones. Teléfono: solo dígitos. Igual que ABMC.
+  function setField(k, v) {
+    let val = v
+    if (k === 'identificacionTributaria') val = v.replace(/[^0-9-]/g, '')
+    if (k === 'telefono')                 val = v.replace(/[^0-9]/g, '')
+    setForm(p => ({ ...p, [k]: val }))
+  }
 
   function guardar() {
     const e = {}
@@ -76,10 +86,13 @@ function NuevoProveedorModal({ open, onClose, onCreated }) {
     setErrors(e)
     if (Object.keys(e).length) return
 
+    const nombreFiscal    = cap(form.nombreFiscal)
+    const nombreComercial = cap(form.nombreComercial)
+
     const id = run(
       `INSERT INTO Proveedor (nombreFiscal, nombreComercial, identificacionTributaria, telefono, email)
        VALUES (?,?,?,?,?)`,
-      [form.nombreFiscal.trim(), form.nombreComercial.trim(), form.identificacionTributaria.trim(),
+      [nombreFiscal, nombreComercial, form.identificacionTributaria.trim(),
        form.telefono.trim(), form.email.trim()]
     )
     const prov = query('SELECT * FROM Proveedor WHERE idProveedor = ?', [id])[0]
@@ -97,14 +110,13 @@ function NuevoProveedorModal({ open, onClose, onCreated }) {
           onChange={e => set('nombreComercial', e.target.value)}
           error={errors.nombreComercial}
           placeholder="Nombre por el que se lo conoce" />
-        <Input label="Identificación tributaria (CUIT)" value={form.identificacionTributaria}
-          onChange={e => set('identificacionTributaria', e.target.value)}
-          placeholder="20-12345678-9" />
+        <Input label="CUIT / RUT" value={form.identificacionTributaria} type="tel" inputMode="numeric" pattern="[0-9-]*"
+          onChange={e => setField('identificacionTributaria', e.target.value)} placeholder="20-12345678-9"  />
         <div className="grid grid-cols-2 gap-3">
-          <Input label="Teléfono" value={form.telefono}
-            onChange={e => set('telefono', e.target.value)} placeholder="351 000-0000" />
+          <Input label="Teléfono" value={form.telefono} type="tel" inputMode="numeric" pattern="[0-9+\-() ]*"
+            onChange={e => setField('telefono', e.target.value)} placeholder="3510000000"  />
           <Input label="Email" value={form.email}
-            onChange={e => set('email', e.target.value)} placeholder="proveedor@email.com" />
+            onChange={e => set('email', e.target.value)} placeholder="email@ejemplo.com" />
         </div>
         <div className="flex gap-2 pt-2">
           <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>

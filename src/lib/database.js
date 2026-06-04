@@ -73,7 +73,8 @@ function runSchema() {
       telefono       TEXT,
       mail           TEXT,
       apodo          TEXT,
-      nombreComercio TEXT
+      nombreComercio TEXT,
+      activo         INTEGER NOT NULL DEFAULT 1
     );
   `)
 
@@ -184,7 +185,7 @@ function runSchema() {
     CREATE TABLE IF NOT EXISTS Egreso (
       idEgreso    INTEGER PRIMARY KEY AUTOINCREMENT,
       fecha       TEXT NOT NULL,
-      categoria   TEXT NOT NULL CHECK(categoria IN ('Sueldo','Transporte','Comida','Servicios','Flete','Envíos','Otro')),
+      categoria   TEXT NOT NULL CHECK(categoria IN ('Sueldo','Transporte','Comida','Servicios','Flete','Envíos','ART','Seguro de vida','IVA','Ingresos Brutos','Impuesto a las ganancias','Otro')),
       descripcion TEXT NOT NULL,
       monto       REAL NOT NULL DEFAULT 0,
       metodoPago  TEXT NOT NULL DEFAULT 'efectivo' CHECK(metodoPago IN ('efectivo','transferencia','cheque'))
@@ -300,6 +301,16 @@ function runMigrations() {
     persistDB()
   }
 
+  // v20 → v21: soft-delete en Cliente — columna "activo" (1 = activo, 0 = borrado)
+  // Esto permite que el ABMC marque clientes como inactivos sin borrar el registro,
+  // preservando el historial de presupuestos y evitando que aparezcan en el buscador.
+  const colsCliente2 = db.exec(`PRAGMA table_info(Cliente)`)[0]?.values ?? []
+  if (!colsCliente2.some(r => r[1] === 'activo')) {
+    db.run(`ALTER TABLE Cliente ADD COLUMN activo INTEGER NOT NULL DEFAULT 1`)
+    db.run(`UPDATE Cliente SET activo = 1 WHERE activo IS NULL`)
+    persistDB()
+  }
+
   // v14 → v15: crea tabla Ingreso si no existe
   db.run(`
     CREATE TABLE IF NOT EXISTS Ingreso (
@@ -385,6 +396,32 @@ function runMigrations() {
       )
       WHERE apellidoCliente IS NULL
     `)
+    persistDB()
+  }
+
+  // v19 → v20: ampliar categorías de Egreso (ART, Seguro de vida, IVA, Ingresos Brutos, Impuesto a las ganancias)
+  // SQLite no permite ALTER COLUMN para cambiar el CHECK, así que recreamos la tabla si es necesario.
+  try {
+    db.run(`SAVEPOINT check_egreso_cats`)
+    db.run(`INSERT INTO Egreso (fecha, categoria, descripcion, monto, metodoPago) VALUES ('1900-01-01','ART','__test__',0,'efectivo')`)
+    db.run(`DELETE FROM Egreso WHERE descripcion='__test__'`)
+    db.run(`RELEASE SAVEPOINT check_egreso_cats`)
+  } catch {
+    db.run(`ROLLBACK TO SAVEPOINT check_egreso_cats`)
+    db.run(`RELEASE SAVEPOINT check_egreso_cats`)
+    db.run(`ALTER TABLE Egreso RENAME TO Egreso_old`)
+    db.run(`
+      CREATE TABLE Egreso (
+        idEgreso    INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha       TEXT NOT NULL,
+        categoria   TEXT NOT NULL CHECK(categoria IN ('Sueldo','Transporte','Comida','Servicios','Flete','Envíos','ART','Seguro de vida','IVA','Ingresos Brutos','Impuesto a las ganancias','Otro')),
+        descripcion TEXT NOT NULL,
+        monto       REAL NOT NULL DEFAULT 0,
+        metodoPago  TEXT NOT NULL DEFAULT 'efectivo' CHECK(metodoPago IN ('efectivo','transferencia','cheque'))
+      )
+    `)
+    db.run(`INSERT INTO Egreso SELECT * FROM Egreso_old`)
+    db.run(`DROP TABLE Egreso_old`)
     persistDB()
   }
 }

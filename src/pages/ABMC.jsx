@@ -35,6 +35,9 @@ const fmt = (n) =>
     ? Number(n).toLocaleString('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 0 })
     : '—'
 
+// Capitaliza la primera letra de un string
+const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
+
 // ─── Pagination component ─────────────────────────────────────────────────────
 
 function Pagination({ page, total, pageSize, onChange }) {
@@ -130,7 +133,7 @@ function InfoBanner({ message }) {
 
 // ─── Shared dropdown style ────────────────────────────────────────────────────
 
-const dropdownClass = "w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500"
+const dropdownClass = "w-full bg-surface-700 border border-surface-600 rounded-xl pl-3 pr-6 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500"
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CLIENTES
@@ -149,7 +152,7 @@ function Clientes() {
   const [page, setPage] = useState(1)
 
   const load = useCallback(() => {
-    setAllRows(query('SELECT * FROM Cliente ORDER BY apellido, nombre'))
+    setAllRows(query('SELECT * FROM Cliente WHERE activo = 1 ORDER BY apellido, nombre'))
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -160,23 +163,37 @@ function Clientes() {
 
   function save() {
     if (!form.nombre.trim() || !form.apellido.trim()) { setError('Nombre y Apellido son obligatorios.'); return }
+    const nombre         = cap(form.nombre)
+    const apellido       = cap(form.apellido)
+    const apodo          = cap(form.apodo)
+    const nombreComercio = cap(form.nombreComercio)
+    const domicilio      = form.domicilio.replace(/\b\w/g, c => c.toUpperCase())
     if (editId) {
       run(`UPDATE Cliente SET nombre=?,apellido=?,apodo=?,nombreComercio=?,cuit=?,domicilio=?,telefono=?,mail=? WHERE idCliente=?`,
-        [form.nombre, form.apellido, form.apodo, form.nombreComercio, form.cuit, form.domicilio, form.telefono, form.mail, editId])
+        [nombre, apellido, apodo, nombreComercio, form.cuit, domicilio, form.telefono, form.mail, editId])
     } else {
       run(`INSERT INTO Cliente(nombre,apellido,apodo,nombreComercio,cuit,domicilio,telefono,mail) VALUES(?,?,?,?,?,?,?,?)`,
-        [form.nombre, form.apellido, form.apodo, form.nombreComercio, form.cuit, form.domicilio, form.telefono, form.mail])
+        [nombre, apellido, apodo, nombreComercio, form.cuit, domicilio, form.telefono, form.mail])
     }
     setModal(false); load()
   }
 
   function del(id) {
-    try { run(`DELETE FROM Cliente WHERE idCliente=?`, [id]) }
-    catch { alert('No se puede eliminar: tiene presupuestos asociados.') }
+    run(`UPDATE Cliente SET activo=0 WHERE idCliente=?`, [id])
     setConfirm(null); load()
   }
 
-  const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }))
+  const f = (k) => (e) => {
+    let val = e.target.value
+    if (k === 'cuit') {
+      val = val.replace(/[^0-9-]/g, '')
+    } else if (k === 'telefono') {
+      val = val.replace(/[^0-9]/g, '')
+    } else if (k === 'domicilio') {
+      val = val.replace(/\b\w/g, c => c.toUpperCase())
+    }
+    setForm(p => ({ ...p, [k]: val }))
+  }
 
   const filtered = allRows.filter(r => {
     const q = search.trim().toLowerCase()
@@ -239,10 +256,10 @@ function Clientes() {
             <Input label="Apodo" value={form.apodo} onChange={f('apodo')} />
             <Input label="Nombre de comercio" value={form.nombreComercio} onChange={f('nombreComercio')} />
           </div>
-          <Input label="CUIT" value={form.cuit} onChange={f('cuit')} />
+          <Input label="CUIT" value={form.cuit} onChange={f('cuit')} type="tel" inputMode="numeric" pattern="[0-9-]*" />
           <Input label="Domicilio" value={form.domicilio} onChange={f('domicilio')} />
           <div className="grid grid-cols-2 gap-4">
-            <Input label="Teléfono" value={form.telefono} onChange={f('telefono')} />
+            <Input label="Teléfono" value={form.telefono} onChange={f('telefono')} type="tel" inputMode="numeric" pattern="[0-9+\-() ]*" />
             <Input label="Mail" value={form.mail} onChange={f('mail')} />
           </div>
           {error && <p className="text-red-400 text-xs">{error}</p>}
@@ -293,12 +310,14 @@ function Proveedores() {
 
   function save() {
     if (!form.nombreFiscal.trim()) { setError('Nombre fiscal obligatorio.'); return }
+    const nombreFiscal     = cap(form.nombreFiscal)
+    const nombreComercial  = cap(form.nombreComercial)
     if (editId) {
       run(`UPDATE Proveedor SET nombreFiscal=?,nombreComercial=?,identificacionTributaria=?,telefono=?,email=? WHERE idProveedor=?`,
-        [form.nombreFiscal, form.nombreComercial, form.identificacionTributaria, form.telefono, form.email, editId])
+        [nombreFiscal, nombreComercial, form.identificacionTributaria, form.telefono, form.email, editId])
     } else {
       run(`INSERT INTO Proveedor(nombreFiscal,nombreComercial,identificacionTributaria,telefono,email) VALUES(?,?,?,?,?)`,
-        [form.nombreFiscal, form.nombreComercial, form.identificacionTributaria, form.telefono, form.email])
+        [nombreFiscal, nombreComercial, form.identificacionTributaria, form.telefono, form.email])
     }
     setModal(false); load()
   }
@@ -308,7 +327,15 @@ function Proveedores() {
     setConfirm(null); load()
   }
 
-  const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }))
+  const f = (k) => (e) => {
+    let val = e.target.value
+    if (k === 'identificacionTributaria') {
+      val = val.replace(/[^0-9-]/g, '')
+    } else if (k === 'telefono') {
+      val = val.replace(/[^0-9]/g, '')
+    }
+    setForm(p => ({ ...p, [k]: val }))
+  }
 
   const filtered = allRows.filter(r => {
     const q = search.trim().toLowerCase()
@@ -364,9 +391,9 @@ function Proveedores() {
         <div className="space-y-4">
           <Input label="Nombre fiscal *" value={form.nombreFiscal} onChange={f('nombreFiscal')} />
           <Input label="Nombre comercial" value={form.nombreComercial} onChange={f('nombreComercial')} />
-          <Input label="CUIT / RUT" value={form.identificacionTributaria} onChange={f('identificacionTributaria')} />
+          <Input label="CUIT / RUT" value={form.identificacionTributaria} onChange={f('identificacionTributaria')} type="tel" inputMode="numeric" pattern="[0-9-]*" />
           <div className="grid grid-cols-2 gap-4">
-            <Input label="Teléfono" value={form.telefono} onChange={f('telefono')} />
+            <Input label="Teléfono" value={form.telefono} onChange={f('telefono')} type="tel" inputMode="numeric" pattern="[0-9+\-() ]*" />
             <Input label="Email" value={form.email} onChange={f('email')} />
           </div>
           {error && <p className="text-red-400 text-xs">{error}</p>}
@@ -598,6 +625,58 @@ function Pedidos() {
   function openEdit(r) { setEditRow({ ...r }); setModal(true) }
 
   function save() {
+    const pedidoActual = query(`SELECT estadoLogistico FROM PedidoCompra WHERE idPedido=?`, [editRow.idPedido])[0]
+    const estadoAnterior = pedidoActual?.estadoLogistico
+    const revirtiendo = estadoAnterior === 'recibido' && editRow.estadoLogistico === 'encargado'
+    const recibiendo  = estadoAnterior === 'encargado' && editRow.estadoLogistico === 'recibido'
+
+    if (revirtiendo) {
+      // Restar el stock que fue sumado cuando se marcó como recibido
+      const detalles = query(`SELECT * FROM DetallePedidoCompra WHERE idPedido=?`, [editRow.idPedido])
+      for (const d of detalles) {
+        if (!d.idProducto) continue
+        const prod = query(`SELECT tieneMedidas FROM Producto WHERE idProducto=?`, [d.idProducto])[0]
+        if (!prod) continue
+        if (prod.tieneMedidas && d.medida) {
+          run(`UPDATE ProductoMedida SET cantidad = MAX(0, cantidad - ?) WHERE idProducto=? AND medida=?`,
+            [d.cantidad, d.idProducto, d.medida])
+          const total = query(`SELECT COALESCE(SUM(cantidad),0) AS t FROM ProductoMedida WHERE idProducto=?`, [d.idProducto])[0].t
+          run(`UPDATE Producto SET cantidad=? WHERE idProducto=?`, [total, d.idProducto])
+        } else {
+          run(`UPDATE Producto SET cantidad = MAX(0, cantidad - ?) WHERE idProducto=?`,
+            [d.cantidad, d.idProducto])
+        }
+      }
+    }
+
+    if (recibiendo) {
+      // Sumar stock al inventario (mismo flujo que PedidosCompra.jsx)
+      const detalles = query(`SELECT * FROM DetallePedidoCompra WHERE idPedido=?`, [editRow.idPedido])
+      for (const d of detalles) {
+        if (!d.idProducto) continue
+        const prod = query(`SELECT tieneMedidas FROM Producto WHERE idProducto=?`, [d.idProducto])[0]
+        if (!prod) continue
+        if (prod.tieneMedidas && d.medida) {
+          const existe = query(
+            `SELECT idMedida FROM ProductoMedida WHERE idProducto=? AND medida=?`,
+            [d.idProducto, d.medida]
+          )[0]
+          if (existe) {
+            run(`UPDATE ProductoMedida SET cantidad = cantidad + ? WHERE idProducto=? AND medida=?`,
+              [d.cantidad, d.idProducto, d.medida])
+          } else {
+            run(`INSERT INTO ProductoMedida (idProducto, medida, cantidad) VALUES (?,?,?)`,
+              [d.idProducto, d.medida, d.cantidad])
+          }
+          const total = query(`SELECT COALESCE(SUM(cantidad),0) AS t FROM ProductoMedida WHERE idProducto=?`, [d.idProducto])[0].t
+          run(`UPDATE Producto SET cantidad=? WHERE idProducto=?`, [total, d.idProducto])
+        } else {
+          run(`UPDATE Producto SET cantidad = cantidad + ? WHERE idProducto=?`,
+            [d.cantidad, d.idProducto])
+        }
+      }
+    }
+
     run(`UPDATE PedidoCompra SET estadoPago=?,estadoLogistico=?,metodoPago=?,fechaRecepcion=?,fechaPago=? WHERE idPedido=?`,
       [editRow.estadoPago, editRow.estadoLogistico, editRow.metodoPago,
        editRow.fechaRecepcion || null, editRow.fechaPago || null, editRow.idPedido])
@@ -853,7 +932,7 @@ function Saldos() {
 // EGRESOS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const CATEGORIAS_EGRESO = ['Sueldo', 'Transporte', 'Comida', 'Servicios', 'Flete', 'Envíos', 'Otro']
+const CATEGORIAS_EGRESO = ['ART', 'Comida', 'Envíos', 'Flete', 'Impuesto a las ganancias', 'Ingresos Brutos', 'IVA', 'Seguro de vida', 'Servicios', 'Sueldo', 'Transporte', 'Otro']
 const EGRESO_BLANK = { fecha: new Date().toISOString().slice(0, 10), categoria: 'Otro', descripcion: '', monto: 0, metodoPago: 'efectivo' }
 
 function Egresos() {
@@ -883,12 +962,13 @@ function Egresos() {
   function save() {
     if (!form.descripcion.trim()) { setError('La descripción es obligatoria.'); return }
     if (!form.monto || form.monto <= 0) { setError('El monto debe ser mayor a 0.'); return }
+    const descripcion = cap(form.descripcion)
     if (editId) {
       run(`UPDATE Egreso SET fecha=?,categoria=?,descripcion=?,monto=?,metodoPago=? WHERE idEgreso=?`,
-        [form.fecha, form.categoria, form.descripcion, form.monto, form.metodoPago, editId])
+        [form.fecha, form.categoria, descripcion, form.monto, form.metodoPago, editId])
     } else {
       run(`INSERT INTO Egreso(fecha,categoria,descripcion,monto,metodoPago) VALUES(?,?,?,?,?)`,
-        [form.fecha, form.categoria, form.descripcion, form.monto, form.metodoPago])
+        [form.fecha, form.categoria, descripcion, form.monto, form.metodoPago])
     }
     setModal(false); load()
   }
@@ -923,7 +1003,7 @@ function Egresos() {
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Buscar por ID, descripción o categoría…"
+            placeholder="Buscar por descripción…"
             className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
           />
         </div>
@@ -1046,12 +1126,13 @@ function Ingresos() {
   function save() {
     if (!form.descripcion.trim()) { setError('La descripción es obligatoria.'); return }
     if (!form.monto || form.monto <= 0) { setError('El monto debe ser mayor a 0.'); return }
+    const descripcion = cap(form.descripcion)
     if (editId) {
       run(`UPDATE Ingreso SET fecha=?,descripcion=?,monto=? WHERE idIngreso=?`,
-        [form.fecha, form.descripcion, form.monto, editId])
+        [form.fecha, descripcion, form.monto, editId])
     } else {
       run(`INSERT INTO Ingreso(fecha,descripcion,monto) VALUES(?,?,?)`,
-        [form.fecha, form.descripcion, form.monto])
+        [form.fecha, descripcion, form.monto])
     }
     setModal(false); load()
   }
@@ -1182,10 +1263,11 @@ function Categorias() {
 
   function save() {
     if (!form.nombre.trim()) { setError('El nombre es obligatorio.'); return }
+    const nombre = cap(form.nombre)
     if (editId) {
-      run(`UPDATE Categoria SET nombre=? WHERE idCategoria=?`, [form.nombre.trim(), editId])
+      run(`UPDATE Categoria SET nombre=? WHERE idCategoria=?`, [nombre, editId])
     } else {
-      run(`INSERT INTO Categoria(nombre) VALUES(?)`, [form.nombre.trim()])
+      run(`INSERT INTO Categoria(nombre) VALUES(?)`, [nombre])
     }
     setModal(false); load()
   }

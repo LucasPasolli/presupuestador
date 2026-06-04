@@ -147,16 +147,23 @@ function GraficoMensual({ datos }) {
                 fill="#ef4444"
                 fillOpacity="0.9"
               />
-              {/* Label mes */}
+              {/* Label mes — centrado en el grupo de 52px (24 + 4gap + 24) */}
               <text x={x + 26} y={H + 16} textAnchor="middle"
                 fontSize="9" fill="#737373" fontFamily="DM Sans, sans-serif">
                 {mesLabel(d.mes)}
               </text>
-              {/* Valor encima */}
-              {cobradoH  > 16 && (
-                <text x={x + 26} y={H - cobradoH - 4} textAnchor="middle"
+              {/* Valor encima barra Cobrado — centrado en su propia barra (x + 12) */}
+              {cobradoH > 16 && (
+                <text x={x + 12} y={H - cobradoH - 4} textAnchor="middle"
                   fontSize="8" fill="#e2e2e2" fontFamily="JetBrains Mono, monospace">
                   {fmtCompacto(d.cobrado)}
+                </text>
+              )}
+              {/* Valor encima barra Egreso — centrado en su propia barra (x + 40) */}
+              {egresoH > 16 && (
+                <text x={x + 40} y={H - egresoH - 4} textAnchor="middle"
+                  fontSize="8" fill="#fca5a5" fontFamily="JetBrains Mono, monospace">
+                  {fmtCompacto(d.egreso)}
                 </text>
               )}
             </g>
@@ -338,19 +345,24 @@ function calcularMetricas(desde, hasta) {
     .sort((a, b) => b.monto - a.monto)
 
   // ── 5. Evolución mensual ──────────────────────────────────────────────────
-  // Obtener todos los meses con actividad en el período
-  const mesesData = query(`
-    SELECT strftime('%Y-%m', fecha) AS mes,
-           SUM(monto) AS monto,
-           COUNT(*) AS cantidad
-    FROM Presupuesto
-    WHERE fecha >= ? AND fecha <= ?
-      AND estado IN ('aprobado','pagado')
-    GROUP BY mes
-    ORDER BY mes
-  `, [desde, hasta])
+  // Generar la lista COMPLETA de meses en el rango (sin saltar meses vacíos)
+  function generarMesesEnRango(desdeStr, hastaStr) {
+    const meses = []
+    // desdeStr y hastaStr son YYYY-MM-DD; extraemos solo el YYYY-MM
+    const [dy, dm] = desdeStr.slice(0, 7).split('-').map(Number)
+    const [hy, hm] = hastaStr.slice(0, 7).split('-').map(Number)
+    let y = dy, mo = dm
+    while (y < hy || (y === hy && mo <= hm)) {
+      meses.push(`${y}-${String(mo).padStart(2, '0')}`)
+      mo++
+      if (mo > 12) { mo = 1; y++ }
+    }
+    return meses
+  }
 
-  m.evolucionMensual = mesesData.map(row => {
+  const mesesEnRango = generarMesesEnRango(desde, hasta)
+
+  m.evolucionMensual = mesesEnRango.map(mes => {
     // Cobrado contado (efectivo/transf pagados) en ese mes
     const cobradoContadoMes = query(`
       SELECT COALESCE(SUM(p.monto), 0) AS v
@@ -358,7 +370,7 @@ function calcularMetricas(desde, hasta) {
       WHERE strftime('%Y-%m', p.fecha) = ?
         AND p.metodoPago IN ('efectivo', 'transferencia')
         AND p.estado = 'pagado'
-    `, [row.mes])[0]?.v ?? 0
+    `, [mes])[0]?.v ?? 0
 
     // CC cobrados en ese mes (por fechaPago del saldo, no por fechaFin)
     const cobradoCCMes = query(`
@@ -366,7 +378,7 @@ function calcularMetricas(desde, hasta) {
       FROM Saldo s
       WHERE s.estado = 'pagado'
         AND strftime('%Y-%m', s.fechaPago) = ?
-    `, [row.mes])[0]?.v ?? 0
+    `, [mes])[0]?.v ?? 0
 
     // Egresos pagados (PedidoCompra) en ese mes — campo correcto: estadoPago
     const egresosMes = query(`
@@ -374,24 +386,24 @@ function calcularMetricas(desde, hasta) {
       FROM PedidoCompra
       WHERE estadoPago = 'pagado'
         AND strftime('%Y-%m', fecha) = ?
-    `, [row.mes])[0]?.v ?? 0
+    `, [mes])[0]?.v ?? 0
 
     // Egresos extra (tabla Egreso) en ese mes
     const egresosExtraMes = query(`
       SELECT COALESCE(SUM(monto), 0) AS v
       FROM Egreso
       WHERE strftime('%Y-%m', fecha) = ?
-    `, [row.mes])[0]?.v ?? 0
+    `, [mes])[0]?.v ?? 0
 
     // Ingresos extra en ese mes
     const ingresosExtraMes = query(`
       SELECT COALESCE(SUM(monto), 0) AS v
       FROM Ingreso
       WHERE strftime('%Y-%m', fecha) = ?
-    `, [row.mes])[0]?.v ?? 0
+    `, [mes])[0]?.v ?? 0
 
     return {
-      ...row,
+      mes,
       cobrado: cobradoContadoMes + cobradoCCMes + ingresosExtraMes,
       egreso:  egresosMes + egresosExtraMes,
     }
