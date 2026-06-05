@@ -91,7 +91,7 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
     run(`UPDATE Saldo SET estado = 'pagado', fechaPago = ? WHERE idSaldo = ?`, [hoy, saldo.idSaldo])
     run(`UPDATE Presupuesto SET estado = 'pagado' WHERE idPresupuesto = ?`, [saldo.idPresupuesto])
     setConfirmPago(false)
-    onUpdated('Saldo marcado como pagado ✓ — ingreso registrado')
+    onUpdated('Saldo marcado como pagado')
     onBack()
   }
 

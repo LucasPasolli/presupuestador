@@ -4,7 +4,8 @@ import { query } from '../lib/database'
 import { Card, PageHeader, Button } from '../components/ui'
 import {
   TrendingUp, TrendingDown, Wallet, Clock, Users, Package,
-  BarChart2, CreditCard, Tag, AlertTriangle, RefreshCw
+  BarChart2, CreditCard, Tag, AlertTriangle, RefreshCw,
+  ShoppingCart, Layers, Repeat, Truck, PieChart, CheckCircle
 } from 'lucide-react'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -22,12 +23,6 @@ function fmtCompacto(n) {
 function pct(a, b) {
   if (!b) return '—'
   return `${((a / b) * 100).toFixed(1)}%`
-}
-
-function mesLabel(yyyy_mm) {
-  const [y, m] = yyyy_mm.split('-')
-  const nombres = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic']
-  return `${nombres[parseInt(m) - 1]} ${y.slice(2)}`
 }
 
 function today() { return new Date().toISOString().slice(0, 10) }
@@ -100,87 +95,205 @@ function BarraH({ label, value, max, fmtFn = fmt, color = '#f97316', sublabel })
   )
 }
 
-// ─── Gráfico de barras verticales mensual (SVG) ────────────────────────────
+// ─── Modal: lista completa de artículos más vendidos ──────────────────────
 
-function GraficoMensual({ datos }) {
-  if (!datos.length) return (
-    <div className="flex items-center justify-center h-48 text-surface-500 text-sm font-body">
-      Sin datos suficientes para el gráfico.
-    </div>
-  )
+const PAGE_SIZE = 30
 
-  const maxVal   = Math.max(...datos.flatMap(d => [d.cobrado, d.egreso]),1)
-  const W        = 100 / datos.length   // ancho porcentual por barra
-  const H        = 180
-  const PAD      = 4
+function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
+  const [pagina, setPagina] = useState(1)
+
+  // Reset page when modal opens
+  useEffect(() => { if (open) setPagina(1) }, [open])
+
+  if (!open) return null
+
+  const totalPaginas = Math.ceil(productos.length / PAGE_SIZE)
+  const inicio       = (pagina - 1) * PAGE_SIZE
+  const pagItems     = productos.slice(inicio, inicio + PAGE_SIZE)
 
   return (
-    <div className="relative">
-      <svg viewBox={`0 0 ${datos.length * 60} ${H + 30}`} className="w-full" style={{ height: 220 }}>
-        {datos.map((d, i) => {
-          const cobradoH = Math.max(4, (d.cobrado / maxVal) * (H - 20))
-          const egresoH  = Math.max(4, (d.egreso  / maxVal) * (H - 20))
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/75" onClick={onClose} />
+      <div className="relative bg-surface-800 border border-surface-700 rounded-2xl shadow-2xl
+                      w-full max-w-3xl animate-slide-up flex flex-col max-h-[90vh]">
 
-          const x = i * 60 + PAD
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-5 border-b border-surface-700 flex-shrink-0">
+          <div>
+            <h2 className="font-body font-semibold text-white flex items-center gap-2">
+              <Package size={16} className="text-brand-500" />
+              Artículos más vendidos
+            </h2>
+            <p className="text-surface-500 text-xs font-body mt-0.5">
+              {desde} → {hasta} · {productos.length} producto{productos.length !== 1 ? 's' : ''}
+            </p>
+          </div>
+          <button onClick={onClose}
+            className="text-surface-400 hover:text-white transition-colors text-2xl leading-none w-8 h-8
+                       flex items-center justify-center rounded-lg hover:bg-surface-700">
+            ×
+          </button>
+        </div>
 
-          return (
-            <g key={d.mes}>
+        {/* Tabla */}
+        <div className="overflow-y-auto flex-1">
+          {productos.length === 0 ? (
+            <div className="text-center py-16 text-surface-500 font-body text-sm">
+              Sin ventas en el período seleccionado.
+            </div>
+          ) : (
+            <table className="w-full text-sm font-body">
+              <thead className="sticky top-0 bg-surface-800 z-10">
+                <tr className="border-b border-surface-700">
+                  <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-10">#</th>
+                  <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-20">ID</th>
+                  <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4">Producto</th>
+                  <th className="text-right text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-28">Unidades</th>
+                  <th className="text-right text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-36">Monto acumulado</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pagItems.map((p, i) => {
+                  const rank = inicio + i + 1
+                  const esTop3 = rank <= 3
+                  return (
+                    <tr key={i}
+                      className="border-b border-surface-700/40 last:border-0 hover:bg-surface-700/30 transition-colors">
+                      <td className="py-3 px-4">
+                        <span className={`font-mono text-xs font-bold
+                          ${rank === 1 ? 'text-yellow-400' :
+                            rank === 2 ? 'text-surface-300' :
+                            rank === 3 ? 'text-brand-400' : 'text-surface-600'}`}>
+                          {rank}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="text-surface-500 font-mono text-xs">
+                          {p.idProducto ?? '—'}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className={`${esTop3 ? 'text-white font-medium' : 'text-surface-200'} truncate block max-w-xs`}
+                          title={p.nombre}>
+                          {p.nombre}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <span className={`font-mono font-bold ${esTop3 ? 'text-brand-400' : 'text-surface-200'}`}>
+                          {p.unidades} u.
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <span className="font-mono text-surface-200">{fmt(p.monto)}</span>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
 
-              {/* Cobrado */}
-              <rect
-                x={x}
-                y={H - cobradoH}
-                width={24}
-                height={cobradoH}
-                rx="4"
-                fill="#10b981"
-                fillOpacity="0.9"
-              />
+        {/* Paginación */}
+        {totalPaginas > 1 && (
+          <div className="flex items-center justify-between px-6 py-4 border-t border-surface-700 flex-shrink-0">
+            <span className="text-surface-500 text-xs font-body">
+              Página {pagina} de {totalPaginas} · {productos.length} artículos
+            </span>
+            <div className="flex items-center gap-1">
+              <button onClick={() => setPagina(1)} disabled={pagina === 1}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                «
+              </button>
+              <button onClick={() => setPagina(v => Math.max(1, v - 1))} disabled={pagina === 1}
+                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                ‹ Ant.
+              </button>
 
-              {/* Egreso */}
-              <rect
-                x={x + 28}
-                y={H - egresoH}
-                width={24}
-                height={egresoH}
-                rx="4"
-                fill="#ef4444"
-                fillOpacity="0.9"
-              />
-              {/* Label mes — centrado en el grupo de 52px (24 + 4gap + 24) */}
-              <text x={x + 26} y={H + 16} textAnchor="middle"
-                fontSize="9" fill="#737373" fontFamily="DM Sans, sans-serif">
-                {mesLabel(d.mes)}
-              </text>
-              {/* Valor encima barra Cobrado — centrado en su propia barra (x + 12) */}
-              {cobradoH > 16 && (
-                <text x={x + 12} y={H - cobradoH - 4} textAnchor="middle"
-                  fontSize="8" fill="#e2e2e2" fontFamily="JetBrains Mono, monospace">
-                  {fmtCompacto(d.cobrado)}
-                </text>
-              )}
-              {/* Valor encima barra Egreso — centrado en su propia barra (x + 40) */}
-              {egresoH > 16 && (
-                <text x={x + 40} y={H - egresoH - 4} textAnchor="middle"
-                  fontSize="8" fill="#fca5a5" fontFamily="JetBrains Mono, monospace">
-                  {fmtCompacto(d.egreso)}
-                </text>
-              )}
-            </g>
-          )
-        })}
-        {/* Línea base */}
-        <line x1="0" y1={H} x2={datos.length * 60} y2={H} stroke="#3a3a3a" strokeWidth="1" />
+              {/* Páginas cercanas */}
+              {Array.from({ length: totalPaginas }, (_, i) => i + 1)
+                .filter(p => p === 1 || p === totalPaginas || Math.abs(p - pagina) <= 2)
+                .reduce((acc, p, idx, arr) => {
+                  if (idx > 0 && p - arr[idx - 1] > 1) acc.push('…')
+                  acc.push(p)
+                  return acc
+                }, [])
+                .map((item, idx) =>
+                  item === '…' ? (
+                    <span key={`sep-${idx}`} className="px-2 text-surface-600 text-xs">…</span>
+                  ) : (
+                    <button key={item} onClick={() => setPagina(item)}
+                      className={`w-8 h-8 rounded-lg text-xs font-body font-medium transition-all
+                        ${item === pagina
+                          ? 'bg-brand-500 text-white'
+                          : 'text-surface-400 hover:bg-surface-700 hover:text-white'}`}>
+                      {item}
+                    </button>
+                  )
+                )}
+
+              <button onClick={() => setPagina(v => Math.min(totalPaginas, v + 1))} disabled={pagina === totalPaginas}
+                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                Sig. ›
+              </button>
+              <button onClick={() => setPagina(totalPaginas)} disabled={pagina === totalPaginas}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                »
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─── Gráfico de dona genérico (reemplaza GraficoMensual) ──────────────────
+
+function GraficoDonaGenerico({ datos, colores }) {
+  const COLORS = colores ?? ['#f97316','#3b82f6','#eab308','#10b981','#8b5cf6','#ec4899','#14b8a6','#f43f5e']
+  if (!datos.length || datos.every(d => d.valor === 0)) return (
+    <div className="flex items-center justify-center h-32 text-surface-500 text-sm font-body">Sin datos.</div>
+  )
+  const total = datos.reduce((a, d) => a + d.valor, 0)
+  const R = 50, CX = 65, CY = 65
+  let angle = -Math.PI / 2
+  const slices = datos.map((d, i) => {
+    const frac = d.valor / total
+    const start = angle
+    angle += frac * 2 * Math.PI
+    const end = angle
+    const x1 = CX + R * Math.cos(start), y1 = CY + R * Math.sin(start)
+    const x2 = CX + R * Math.cos(end),   y2 = CY + R * Math.sin(end)
+    const large = frac > 0.5 ? 1 : 0
+    return { ...d, path: `M${CX},${CY} L${x1},${y1} A${R},${R} 0 ${large},1 ${x2},${y2} Z`,
+             color: COLORS[i % COLORS.length], frac }
+  })
+  return (
+    <div className="flex items-center gap-6">
+      <svg viewBox="0 0 130 130" className="w-32 h-32 flex-shrink-0">
+        {slices.map((s, i) => (
+          <path key={i} d={s.path} fill={s.color} fillOpacity="0.9" stroke="#1a1a1a" strokeWidth="1.5" />
+        ))}
+        <circle cx={CX} cy={CY} r={R * 0.55} fill="#1a1a1a" />
+        <text x={CX} y={CY + 4} textAnchor="middle" fontSize="9" fill="#a3a3a3" fontFamily="DM Sans">
+          {datos.length} items
+        </text>
       </svg>
-      <div className="flex items-center gap-4 mt-1 text-xs font-body text-surface-500">
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#297a03' }} />
-          Cobrado
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#ef4444' }} />
-          Egresos
-        </span>
+      <div className="space-y-1.5 flex-1">
+        {slices.map((s, i) => (
+          <div key={i} className="flex items-center justify-between text-xs font-body">
+            <span className="flex items-center gap-2 text-surface-300 truncate max-w-[55%]">
+              <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: s.color }} />
+              {s.label}
+            </span>
+            <span className="text-white font-mono">{(s.frac * 100).toFixed(1)}%</span>
+          </div>
+        ))}
       </div>
     </div>
   )
@@ -333,7 +446,7 @@ function calcularMetricas(desde, hasta) {
     .filter(s => s.fechaFin >= hoyStr)
     .slice(0, 5)
 
-  // ── 4. Mix de métodos de pago ─────────────────────────────────────────────
+  // ── 5. Mix de métodos de pago ─────────────────────────────────────────────
   const metodoLabels = { efectivo: 'Efectivo', transferencia: 'Transferencia', cc15: 'CC 15d', cc30: 'CC 30d' }
   const porMetodo = {}
   for (const p of presupuestosPeriodo) {
@@ -344,72 +457,7 @@ function calcularMetricas(desde, hasta) {
     .map(([k, v]) => ({ value: k, label: metodoLabels[k] ?? k, monto: v }))
     .sort((a, b) => b.monto - a.monto)
 
-  // ── 5. Evolución mensual ──────────────────────────────────────────────────
-  // Generar la lista COMPLETA de meses en el rango (sin saltar meses vacíos)
-  function generarMesesEnRango(desdeStr, hastaStr) {
-    const meses = []
-    // desdeStr y hastaStr son YYYY-MM-DD; extraemos solo el YYYY-MM
-    const [dy, dm] = desdeStr.slice(0, 7).split('-').map(Number)
-    const [hy, hm] = hastaStr.slice(0, 7).split('-').map(Number)
-    let y = dy, mo = dm
-    while (y < hy || (y === hy && mo <= hm)) {
-      meses.push(`${y}-${String(mo).padStart(2, '0')}`)
-      mo++
-      if (mo > 12) { mo = 1; y++ }
-    }
-    return meses
-  }
-
-  const mesesEnRango = generarMesesEnRango(desde, hasta)
-
-  m.evolucionMensual = mesesEnRango.map(mes => {
-    // Cobrado contado (efectivo/transf pagados) en ese mes
-    const cobradoContadoMes = query(`
-      SELECT COALESCE(SUM(p.monto), 0) AS v
-      FROM Presupuesto p
-      WHERE strftime('%Y-%m', p.fecha) = ?
-        AND p.metodoPago IN ('efectivo', 'transferencia')
-        AND p.estado = 'pagado'
-    `, [mes])[0]?.v ?? 0
-
-    // CC cobrados en ese mes (por fechaPago del saldo, no por fechaFin)
-    const cobradoCCMes = query(`
-      SELECT COALESCE(SUM(s.monto), 0) AS v
-      FROM Saldo s
-      WHERE s.estado = 'pagado'
-        AND strftime('%Y-%m', s.fechaPago) = ?
-    `, [mes])[0]?.v ?? 0
-
-    // Egresos pagados (PedidoCompra) en ese mes — campo correcto: estadoPago
-    const egresosMes = query(`
-      SELECT COALESCE(SUM(monto), 0) AS v
-      FROM PedidoCompra
-      WHERE estadoPago = 'pagado'
-        AND strftime('%Y-%m', fecha) = ?
-    `, [mes])[0]?.v ?? 0
-
-    // Egresos extra (tabla Egreso) en ese mes
-    const egresosExtraMes = query(`
-      SELECT COALESCE(SUM(monto), 0) AS v
-      FROM Egreso
-      WHERE strftime('%Y-%m', fecha) = ?
-    `, [mes])[0]?.v ?? 0
-
-    // Ingresos extra en ese mes
-    const ingresosExtraMes = query(`
-      SELECT COALESCE(SUM(monto), 0) AS v
-      FROM Ingreso
-      WHERE strftime('%Y-%m', fecha) = ?
-    `, [mes])[0]?.v ?? 0
-
-    return {
-      mes,
-      cobrado: cobradoContadoMes + cobradoCCMes + ingresosExtraMes,
-      egreso:  egresosMes + egresosExtraMes,
-    }
-  })
-
-  // ── 6. Top 10 productos más vendidos ─────────────────────────────────────
+  // ── 9. Top productos (top 10 para card + todos para modal) ──────────────
   // Usa COALESCE(dp.nombreProducto, pr.nombre) para sobrevivir a productos eliminados
   m.topProductos = query(`
     SELECT COALESCE(dp.nombreProducto, pr.nombre, '(producto eliminado)') AS nombre,
@@ -423,6 +471,21 @@ function calcularMetricas(desde, hasta) {
     GROUP BY dp.idProducto, COALESCE(dp.nombreProducto, pr.nombre)
     ORDER BY unidades DESC
     LIMIT 10
+  `, [desde, hasta])
+
+  // Lista completa de productos vendidos (sin límite) para el modal
+  m.todosProductosVendidos = query(`
+    SELECT dp.idProducto,
+           COALESCE(dp.nombreProducto, pr.nombre, '(producto eliminado)') AS nombre,
+           SUM(dp.cantidad)  AS unidades,
+           SUM(dp.subtotal)  AS monto
+    FROM DetallePresupuesto dp
+    JOIN Presupuesto p ON p.idPresupuesto = dp.idPresupuesto
+    LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
+    WHERE p.fecha >= ? AND p.fecha <= ?
+      AND p.estado IN ('aprobado', 'pagado')
+    GROUP BY dp.idProducto, COALESCE(dp.nombreProducto, pr.nombre)
+    ORDER BY unidades DESC
   `, [desde, hasta])
 
   // ── 7. Top 10 clientes ───────────────────────────────────────────────────
@@ -450,7 +513,6 @@ function calcularMetricas(desde, hasta) {
   `, [desde, hasta])[0]?.c ?? 0
 
   // ── 9. Egresos del período ────────────────────────────────────────────────
-  // CORRECCIÓN: PedidoCompra usa estadoPago (no estado)
   m.egresosPedidos = query(`
     SELECT COALESCE(SUM(monto), 0) AS v FROM PedidoCompra
     WHERE fecha >= ? AND fecha <= ?
@@ -476,6 +538,107 @@ function calcularMetricas(desde, hasta) {
   // ── 10. Resultado operativo ───────────────────────────────────────────────
   m.resultadoEstimado = m.cobradoReal - m.egresosTotal
 
+  // ── 11. Tasa de conversión de presupuestos ────────────────────────────────
+  const todosLosPres = query(`
+    SELECT estado FROM Presupuesto
+    WHERE fecha >= ? AND fecha <= ?
+  `, [desde, hasta])
+  const totalTodos   = todosLosPres.length
+  const totalConvertidos = todosLosPres.filter(p => ['aprobado','pagado'].includes(p.estado)).length
+  const totalRechazados  = todosLosPres.filter(p => p.estado === 'rechazado').length
+  const totalBorradores  = todosLosPres.filter(p => p.estado === 'borrador').length
+  m.tasaConversion = totalTodos ? (totalConvertidos / totalTodos) * 100 : 0
+  m.totalTodosEstados = totalTodos
+  m.totalRechazados = totalRechazados
+  m.totalBorradores = totalBorradores
+
+  // ── 12. Stock crítico (global, independiente del período) ─────────────────
+  m.stockCritico = query(`
+    SELECT p.nombre, p.cantidad, p.puntoReposicion,
+           c.nombre AS categoria
+    FROM Producto p
+    LEFT JOIN Categoria c ON c.idCategoria = p.idCategoria
+    WHERE p.puntoReposicion > 0
+      AND p.cantidad <= p.puntoReposicion
+    ORDER BY (p.cantidad * 1.0 / NULLIF(p.puntoReposicion, 0)) ASC
+    LIMIT 10
+  `)
+  m.cantidadStockCritico = query(`
+    SELECT COUNT(*) AS c FROM Producto
+    WHERE puntoReposicion > 0 AND cantidad <= puntoReposicion
+  `)[0]?.c ?? 0
+
+  // ── 13. Top categorías por ventas ─────────────────────────────────────────
+  m.topCategorias = query(`
+    SELECT COALESCE(cat.nombre, 'Sin categoría') AS nombre,
+           SUM(dp.cantidad)  AS unidades,
+           SUM(dp.subtotal)  AS monto
+    FROM DetallePresupuesto dp
+    JOIN Presupuesto p ON p.idPresupuesto = dp.idPresupuesto
+    LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
+    LEFT JOIN Categoria cat ON cat.idCategoria = pr.idCategoria
+    WHERE p.fecha >= ? AND p.fecha <= ?
+      AND p.estado IN ('aprobado','pagado')
+    GROUP BY cat.idCategoria, cat.nombre
+    ORDER BY monto DESC
+    LIMIT 8
+  `, [desde, hasta])
+
+  // ── 14. Egresos por categoría ─────────────────────────────────────────────
+  m.egresosPorCategoria = query(`
+    SELECT categoria AS label, SUM(monto) AS monto
+    FROM Egreso
+    WHERE fecha >= ? AND fecha <= ?
+    GROUP BY categoria
+    ORDER BY monto DESC
+  `, [desde, hasta])
+
+  // ── 15. Top proveedores por volumen de compra ─────────────────────────────
+  m.topProveedores = query(`
+    SELECT COALESCE(nombreProveedor, 'Sin proveedor') AS nombre,
+           COUNT(*) AS pedidos,
+           SUM(monto) AS monto
+    FROM PedidoCompra
+    WHERE fecha >= ? AND fecha <= ?
+    GROUP BY COALESCE(nombreProveedor, 'Sin proveedor')
+    ORDER BY monto DESC
+    LIMIT 8
+  `, [desde, hasta])
+
+  // ── 16. Clientes recurrentes vs nuevos ────────────────────────────────────
+  // "Recurrente" = tuvo presupuesto aprobado/pagado ANTES del período actual
+  const clientesDelPeriodo = query(`
+    SELECT DISTINCT idCliente FROM Presupuesto
+    WHERE fecha >= ? AND fecha <= ?
+      AND estado IN ('aprobado','pagado')
+  `, [desde, hasta])
+
+  let recurrentes = 0
+  for (const { idCliente } of clientesDelPeriodo) {
+    const anterior = query(`
+      SELECT COUNT(*) AS c FROM Presupuesto
+      WHERE idCliente = ? AND fecha < ?
+        AND estado IN ('aprobado','pagado')
+    `, [idCliente, desde])[0]?.c ?? 0
+    if (anterior > 0) recurrentes++
+  }
+  m.clientesRecurrentes = recurrentes
+  m.clientesNuevos = clientesDelPeriodo.length - recurrentes
+
+  // ── 17. Margen bruto estimado (precio venta vs. precio proveedor) ─────────
+  const margenData = query(`
+    SELECT SUM(dp.subtotal) AS ventaTotal,
+           SUM(dp.cantidad * COALESCE(pr.precioProveedor, 0)) AS costoTotal
+    FROM DetallePresupuesto dp
+    JOIN Presupuesto p ON p.idPresupuesto = dp.idPresupuesto
+    LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
+    WHERE p.fecha >= ? AND p.fecha <= ?
+      AND p.estado IN ('aprobado','pagado')
+  `, [desde, hasta])[0] ?? {}
+  m.margenBrutoMonto = (margenData.ventaTotal ?? 0) - (margenData.costoTotal ?? 0)
+  m.margenBrutoPct = margenData.ventaTotal
+    ? (m.margenBrutoMonto / margenData.ventaTotal) * 100 : 0
+
   return m
 }
 
@@ -495,6 +658,7 @@ export default function Estadisticas() {
   const [desdeCustom, setDesdeCustom] = useState('')
   const [hastaCustom, setHastaCustom] = useState(today())
   const [metricas,  setMetricas]  = useState(null)
+  const [modalProductos, setModalProductos] = useState(false)
 
   const desde = rangoIdx < 4 ? RANGOS[rangoIdx].desde() : desdeCustom
   const hasta = rangoIdx < 4 ? RANGOS[rangoIdx].hasta() : hastaCustom
@@ -602,18 +766,161 @@ export default function Estadisticas() {
         </div>
       )}
 
-      {/* ── Evolución mensual ── */}
-      <Card className="p-6">
-        <h3 className="font-body font-semibold text-white text-sm mb-4 flex items-center gap-2">
-          <BarChart2 size={15} className="text-brand-500" />
-          Evolución mensual — Cobrado vs. Egresos
-        </h3>
-        {m.evolucionMensual.length === 0 ? (
-          <p className="text-surface-500 text-sm font-body py-8 text-center">Sin datos en el período.</p>
-        ) : (
-          <GraficoMensual datos={m.evolucionMensual} />
-        )}
-      </Card>
+      {/* ── Nuevas métricas: Conversión + Margen + Stock crítico ── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <KpiCard icon={CheckCircle} label="Tasa de conversión" color="green"
+          value={`${m.tasaConversion.toFixed(1)}%`}
+          sub={`${m.totalTodosEstados} pres. totales en el período`} />
+        <KpiCard icon={TrendingDown} label="Rechazados" color="red"
+          value={m.totalRechazados}
+          sub={`${m.totalBorradores} en borrador`} />
+        <KpiCard icon={Layers} label="Margen bruto estimado" color="violet"
+          value={`${m.margenBrutoPct.toFixed(1)}%`}
+          sub={formatoMonto(m.margenBrutoMonto)} />
+        <KpiCard icon={AlertTriangle} label="Stock crítico" color="yellow"
+          value={m.cantidadStockCritico}
+          sub="productos bajo punto de repo." />
+      </div>
+
+      {/* ── Clientes recurrentes vs nuevos + Egresos por categoría ── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card className="p-6">
+          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
+            <Repeat size={15} className="text-brand-500" />
+            Clientes recurrentes vs. nuevos
+          </h3>
+          {m.clientesUnicos === 0 ? (
+            <p className="text-surface-500 text-sm font-body">Sin datos en el período.</p>
+          ) : (
+            <>
+              <GraficoDonaGenerico
+                datos={[
+                  { label: 'Recurrentes', valor: m.clientesRecurrentes },
+                  { label: 'Nuevos',      valor: m.clientesNuevos },
+                ]}
+                colores={['#10b981','#3b82f6']}
+              />
+              <div className="mt-4 grid grid-cols-2 gap-3">
+                <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3 text-center">
+                  <p className="text-emerald-400 font-mono font-bold text-2xl">{m.clientesRecurrentes}</p>
+                  <p className="text-surface-400 text-xs font-body mt-1">Recurrentes</p>
+                </div>
+                <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-3 text-center">
+                  <p className="text-blue-400 font-mono font-bold text-2xl">{m.clientesNuevos}</p>
+                  <p className="text-surface-400 text-xs font-body mt-1">Nuevos</p>
+                </div>
+              </div>
+            </>
+          )}
+        </Card>
+
+        <Card className="p-6">
+          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
+            <PieChart size={15} className="text-brand-500" />
+            Egresos por categoría
+          </h3>
+          {m.egresosPorCategoria.length === 0 ? (
+            <p className="text-surface-500 text-sm font-body">Sin egresos en el período.</p>
+          ) : (
+            <>
+              <GraficoDonaGenerico
+                datos={m.egresosPorCategoria.map(e => ({ label: e.label, valor: e.monto }))}
+              />
+              <div className="mt-4 space-y-1.5">
+                {m.egresosPorCategoria.slice(0, 5).map((e, i) => (
+                  <div key={i} className="flex justify-between text-xs font-body">
+                    <span className="text-surface-400 truncate">{e.label}</span>
+                    <span className="text-white font-mono">{formatoMonto(e.monto)}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </Card>
+      </div>
+
+      {/* ── Top categorías + Top proveedores ── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card className="p-6">
+          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
+            <Layers size={15} className="text-brand-500" />
+            Ventas por categoría de producto
+          </h3>
+          {m.topCategorias.length === 0 ? (
+            <p className="text-surface-500 text-sm font-body">Sin ventas en el período.</p>
+          ) : (
+            <div className="space-y-3">
+              {m.topCategorias.map((cat, i) => (
+                <BarraH key={i}
+                  label={`${i+1}. ${cat.nombre}`}
+                  value={cat.monto}
+                  max={m.topCategorias[0]?.monto ?? 1}
+                  sublabel={`${cat.unidades} u.`}
+                  color={i === 0 ? '#8b5cf6' : i < 3 ? '#a78bfa' : '#6b7280'}
+                />
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <Card className="p-6">
+          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
+            <Truck size={15} className="text-brand-500" />
+            Top proveedores por compras
+          </h3>
+          {m.topProveedores.length === 0 ? (
+            <p className="text-surface-500 text-sm font-body">Sin pedidos en el período.</p>
+          ) : (
+            <div className="space-y-3">
+              {m.topProveedores.map((prov, i) => (
+                <BarraH key={i}
+                  label={`${i+1}. ${prov.nombre}`}
+                  value={prov.monto}
+                  max={m.topProveedores[0]?.monto ?? 1}
+                  sublabel={`${prov.pedidos} ped.`}
+                  color={i === 0 ? '#ec4899' : i < 3 ? '#f472b6' : '#6b7280'}
+                />
+              ))}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* ── Stock crítico detalle ── */}
+      {m.stockCritico.length > 0 && (
+        <Card className="p-6">
+          <h3 className="font-body font-semibold text-white text-sm mb-4 flex items-center gap-2">
+            <AlertTriangle size={15} className="text-yellow-500" />
+            Productos bajo punto de reposición
+          </h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-body">
+              <thead>
+                <tr className="text-surface-500 uppercase tracking-widest border-b border-surface-700">
+                  <th className="text-left pb-2 pr-4">Producto</th>
+                  <th className="text-left pb-2 pr-4">Categoría</th>
+                  <th className="text-right pb-2 pr-4">Stock actual</th>
+                  <th className="text-right pb-2">Punto repo.</th>
+                </tr>
+              </thead>
+              <tbody>
+                {m.stockCritico.map((prod, i) => {
+                  const pct = prod.puntoReposicion > 0 ? (prod.cantidad / prod.puntoReposicion) * 100 : 100
+                  const alerta = pct === 0 ? 'text-red-400' : pct <= 50 ? 'text-yellow-400' : 'text-orange-400'
+                  return (
+                    <tr key={i} className="border-b border-surface-700/40 last:border-0">
+                      <td className="py-2.5 pr-4 text-surface-200 truncate max-w-[180px]">{prod.nombre}</td>
+                      <td className="py-2.5 pr-4 text-surface-400">{prod.categoria ?? '—'}</td>
+                      <td className={`py-2.5 pr-4 text-right font-mono font-bold ${alerta}`}>{prod.cantidad}</td>
+                      <td className="py-2.5 text-right font-mono text-surface-400">{prod.puntoReposicion}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       {/* ── Dos columnas: mix de pago + saldos por vencer ── */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -667,13 +974,33 @@ export default function Estadisticas() {
         </Card>
       </div>
 
+      {/* ── Modal top artículos ── */}
+      <ModalTopProductos
+        open={modalProductos}
+        onClose={() => setModalProductos(false)}
+        productos={m.todosProductosVendidos ?? []}
+        desde={desde}
+        hasta={hasta}
+      />
+
       {/* ── Top productos y clientes ── */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card className="p-6">
-          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
+        <Card className="p-6 overflow-hidden">
+          <div
+            className="cursor-pointer -m-6 p-6 hover:bg-brand-500/5 transition-all duration-200 group"
+            onClick={() => setModalProductos(true)}
+          >
+          <h3 className="font-body font-semibold text-white text-sm mb-1 flex items-center gap-2">
             <Package size={15} className="text-brand-500" />
-            Top 10 productos más vendidos
+            Top artículos más vendidos
+            <span className="ml-auto text-brand-500/70 text-xs font-body font-normal
+                             group-hover:text-brand-400 transition-colors flex items-center gap-1">
+              Ver todos →
+            </span>
           </h3>
+          <p className="text-surface-500 text-xs font-body mb-4">
+            Top 10 · cliqueá para ver la lista completa ({m.todosProductosVendidos?.length ?? 0} artículos)
+          </p>
           {m.topProductos.length === 0 ? (
             <p className="text-surface-500 text-sm font-body">Sin ventas en el período.</p>
           ) : (
@@ -690,6 +1017,7 @@ export default function Estadisticas() {
               ))}
             </div>
           )}
+          </div>
         </Card>
 
         <Card className="p-6">
