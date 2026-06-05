@@ -1,6 +1,6 @@
 // src/pages/Historial.jsx
 import { useState, useEffect, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import Presupuestador from './Presupuestador'
 import { query, run } from '../lib/database'
 import { Card, PageHeader, Button, Badge, Modal } from '../components/ui'
@@ -491,6 +491,7 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
 
 export default function Historial() {
   const navigate = useNavigate()
+  const location = useLocation()
   const [presupuestos, setPresupuestos] = useState([])
   const [search,       setSearch]       = useState('')
   const [filterMetodo, setFilterMetodo] = useState('all')
@@ -546,6 +547,26 @@ export default function Historial() {
 
   useEffect(() => { load() }, [load])
 
+  // Si venimos del Presupuestador con state.verPresupuesto, abrir el detalle directamente
+  useEffect(() => {
+    const id = location.state?.verPresupuesto
+    if (!id) return
+    const p = query(
+      `SELECT p.*,
+              COALESCE(c.nombre,  p.nombreCliente)   AS clienteNombre,
+              COALESCE(c.apellido,p.apellidoCliente) AS clienteApellido,
+              s.estado AS saldoEstado
+       FROM Presupuesto p
+       LEFT JOIN Cliente c ON c.idCliente = p.idCliente
+       LEFT JOIN Saldo   s ON s.idPresupuesto = p.idPresupuesto
+       WHERE p.idPresupuesto = ?`,
+      [id]
+    )[0]
+    if (p) setSelected(p)
+    // Limpiar el state para que no se reactive en re-renders
+    navigate(location.pathname, { replace: true, state: {} })
+  }, [location.state?.verPresupuesto])
+
   const paginated  = presupuestos.slice((page-1)*PAGE_SIZE, page*PAGE_SIZE)
   const totalPages = Math.max(1, Math.ceil(presupuestos.length/PAGE_SIZE))
   const totalMonto = presupuestos.filter(p => p.estado === 'pagado' || (p.saldoEstado === 'pagado')).reduce((a,p) => a+p.monto, 0)
@@ -563,27 +584,29 @@ export default function Historial() {
     return sortDir === 'asc' ? <ChevronUp size={13} className="inline ml-1" /> : <ChevronDown size={13} className="inline ml-1" />
   }
 
+  function irADetalle(id) {
+    setEditando(null)
+    const pActualizado = query(
+      `SELECT p.*,
+              COALESCE(c.nombre,  p.nombreCliente)   AS clienteNombre,
+              COALESCE(c.apellido,p.apellidoCliente) AS clienteApellido,
+              s.estado AS saldoEstado
+       FROM Presupuesto p
+       LEFT JOIN Cliente c ON c.idCliente = p.idCliente
+       LEFT JOIN Saldo   s ON s.idPresupuesto = p.idPresupuesto
+       WHERE p.idPresupuesto = ?`,
+      [id]
+    )[0]
+    if (pActualizado) setSelected(pActualizado)
+    load()
+  }
+
   // ── Modo edición: muestra el Presupuestador con datos cargados ──
   if (editando) return (
     <Presupuestador
       presupuestoEditar={editando}
-      onEditarVolver={(id) => {
-        setEditando(null)
-        // Recarga y vuelve al detalle del presupuesto actualizado
-        const pActualizado = query(
-          `SELECT p.*,
-                  COALESCE(c.nombre,  p.nombreCliente)   AS clienteNombre,
-                  COALESCE(c.apellido,p.apellidoCliente) AS clienteApellido,
-                  s.estado AS saldoEstado
-           FROM Presupuesto p
-           LEFT JOIN Cliente c ON c.idCliente = p.idCliente
-           LEFT JOIN Saldo   s ON s.idPresupuesto = p.idPresupuesto
-           WHERE p.idPresupuesto = ?`,
-          [id]
-        )[0]
-        if (pActualizado) setSelected(pActualizado)
-        load()
-      }}
+      onEditarVolver={irADetalle}
+      onVerHistorial={irADetalle}
     />
   )
 

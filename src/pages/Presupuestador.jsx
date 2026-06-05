@@ -1,9 +1,10 @@
 // src/pages/Presupuestador.jsx
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
+import { useNavigate } from 'react-router-dom'
 import { query, run } from '../lib/database'
 import { Button, Card, PageHeader, Modal, Input } from '../components/ui'
-import { Plus, Trash2, Search, UserPlus, CheckCircle2, AlertCircle, Download, FileText, ArrowLeft } from 'lucide-react'
+import { Plus, Trash2, Search, UserPlus, CheckCircle2, AlertCircle, Download, FileText, ArrowLeft, X } from 'lucide-react'
 
 // ─── Constantes ────────────────────────────────────────────────────────────
 
@@ -708,7 +709,8 @@ async function generarPDFPresupuesto(idPresupuesto) {
 
 const ITEM_EMPTY = () => ({ _uid: Math.random().toString(36).slice(2), idProducto: '', nombreProducto: '', cantidad: 1, precioUnitario: 0, medida: null })
 
-export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
+export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVerHistorial }) {
+  const navigate = useNavigate()
   // ── Modo edición: cargar datos existentes ──
   const modoEdicion = !!presupuestoEditar
 
@@ -899,7 +901,10 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
   if (guardado) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70">
-        <div className="max-w-lg w-full bg-surface-800 border border-surface-700 rounded-2xl p-10 space-y-4 text-center animate-slide-up">
+        <div className="relative max-w-lg w-full bg-surface-800 border border-surface-700 rounded-2xl p-10 pt-8 space-y-4 text-center animate-slide-up">
+          <button onClick={nuevo} className="absolute top-3 right-3 p-1 text-surface-400 hover:text-white transition-colors">
+            <X size={20} />
+          </button>
           <CheckCircle2 size={52} className="text-emerald-400 mx-auto" />
           <h2 className="font-display text-3xl text-white tracking-widest">GUARDADO</h2>
           <div className="bg-surface-700/60 border border-surface-600 rounded-xl px-5 py-4 text-left space-y-2">
@@ -923,6 +928,12 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
           <div className="flex flex-col gap-2 pt-2">
             <Button icon={Download} className="w-full" onClick={() => generarPDFPresupuesto(guardado.idPresupuesto)}>
               Descargar PDF del Presupuesto
+            </Button>
+            <Button icon={FileText} variant="secondary" className="w-full" onClick={() => {
+              if (onVerHistorial) onVerHistorial(guardado.idPresupuesto)
+              else navigate('/historial', { state: { verPresupuesto: guardado.idPresupuesto } })
+            }}>
+              Ver presupuesto
             </Button>
             <Button variant="secondary" className="w-full" onClick={nuevo}>
               Nuevo Presupuesto
