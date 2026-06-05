@@ -10,20 +10,21 @@ import {
 import {
   Users, Truck, FileText, ShoppingCart,
   Wallet, TrendingDown, TrendingUp, Tag, Plus, Pencil, Trash2,
-  AlertTriangle, Info,
+  AlertTriangle, Info, PiggyBank, ArrowDownCircle,
 } from 'lucide-react'
 
 // ─── Tabs config ─────────────────────────────────────────────────────────────
 
 const TABS = [
-  { key: 'clientes',       label: 'Clientes',      icon: Users,         color: 'from-brand-500 to-brand-600' },
-  { key: 'proveedores',    label: 'Proveedores',    icon: Truck,         color: 'from-brand-500 to-brand-600' },
-  { key: 'presupuestos',   label: 'Presupuestos',   icon: FileText,      color: 'from-brand-500 to-brand-600' },
-  { key: 'pedidos',        label: 'Pedidos',        icon: ShoppingCart,  color: 'from-brand-500 to-brand-600' },
-  { key: 'saldos',         label: 'Saldos',         icon: Wallet,        color: 'from-brand-500 to-brand-600' },
-  { key: 'egresos',        label: 'Egresos',        icon: TrendingDown,  color: 'from-brand-500 to-brand-600' },
-  { key: 'ingresos',       label: 'Ingresos',       icon: TrendingUp,    color: 'from-brand-500 to-brand-600' },
-  { key: 'categorias',     label: 'Categorías',     icon: Tag,           color: 'from-brand-500 to-brand-600' },
+  { key: 'clientes',       label: 'Clientes',      icon: Users,            color: 'from-brand-500 to-brand-600' },
+  { key: 'proveedores',    label: 'Proveedores',    icon: Truck,            color: 'from-brand-500 to-brand-600' },
+  { key: 'presupuestos',   label: 'Presupuestos',   icon: FileText,         color: 'from-brand-500 to-brand-600' },
+  { key: 'pedidos',        label: 'Pedidos',        icon: ShoppingCart,     color: 'from-brand-500 to-brand-600' },
+  { key: 'saldos',         label: 'Saldos',         icon: Wallet,           color: 'from-brand-500 to-brand-600' },
+  { key: 'egresos',        label: 'Egresos',        icon: TrendingDown,     color: 'from-brand-500 to-brand-600' },
+  { key: 'ingresos',       label: 'Ingresos',       icon: TrendingUp,       color: 'from-brand-500 to-brand-600' },
+  { key: 'inversiones',    label: 'Inversiones',    icon: PiggyBank,        color: 'from-brand-500 to-brand-600' },
+  { key: 'categorias',     label: 'Categorías',     icon: Tag,              color: 'from-brand-500 to-brand-600' },
 ]
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -933,7 +934,7 @@ function Saldos() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const CATEGORIAS_EGRESO = ['ART', 'Comida', 'Envíos', 'Flete', 'Impuesto a las ganancias', 'Ingresos Brutos', 'IVA', 'Seguro de vida', 'Servicios', 'Sueldo', 'Transporte', 'Otro']
-const EGRESO_BLANK = { fecha: new Date().toISOString().slice(0, 10), categoria: 'Otro', descripcion: '', monto: 0, metodoPago: 'efectivo' }
+const EGRESO_BLANK = { fecha: new Date().toISOString().slice(0, 10), categoria: 'Otro', descripcion: '', monto: '', metodoPago: 'efectivo' }
 
 function Egresos() {
   const [allRows, setAllRows] = useState([])
@@ -961,14 +962,14 @@ function Egresos() {
 
   function save() {
     if (!form.descripcion.trim()) { setError('La descripción es obligatoria.'); return }
-    if (!form.monto || form.monto <= 0) { setError('El monto debe ser mayor a 0.'); return }
+    if (!form.monto || Number(form.monto) <= 0) { setError('El monto debe ser mayor a 0.'); return }
     const descripcion = cap(form.descripcion)
     if (editId) {
       run(`UPDATE Egreso SET fecha=?,categoria=?,descripcion=?,monto=?,metodoPago=? WHERE idEgreso=?`,
-        [form.fecha, form.categoria, descripcion, form.monto, form.metodoPago, editId])
+        [form.fecha, form.categoria, descripcion, Number(form.monto), form.metodoPago, editId])
     } else {
       run(`INSERT INTO Egreso(fecha,categoria,descripcion,monto,metodoPago) VALUES(?,?,?,?,?)`,
-        [form.fecha, form.categoria, descripcion, form.monto, form.metodoPago])
+        [form.fecha, form.categoria, descripcion, Number(form.monto), form.metodoPago])
     }
     setModal(false); load()
   }
@@ -979,7 +980,7 @@ function Egresos() {
   }
 
   const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }))
-  const fn = (k) => (e) => setForm(p => ({ ...p, [k]: Number(e.target.value) }))
+  const fn = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value === '' ? '' : Number(e.target.value) }))
 
   const filtered = allRows.filter(r => {
     const q = search.trim().toLowerCase()
@@ -1066,6 +1067,7 @@ function Egresos() {
             placeholder="Ej: Sueldo Marzo — Empleado X" />
           <div className="grid grid-cols-2 gap-4">
             <Input label="Monto *" type="number" min="0" value={form.monto} onChange={fn('monto')}
+              placeholder="Ej: 50000"
               className="[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" />
             <Select label="Método de pago" value={form.metodoPago} onChange={f('metodoPago')}>
               <option value="efectivo">Efectivo</option>
@@ -1099,7 +1101,8 @@ function Egresos() {
 // INGRESOS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const INGRESO_BLANK = { fecha: new Date().toISOString().slice(0, 10), descripcion: '', monto: 0 }
+const CATEGORIAS_INGRESO = ['FCI', 'Plazo fijo', 'Acciones', 'Otro']
+const INGRESO_BLANK = { fecha: new Date().toISOString().slice(0, 10), categoria: 'Otro', descripcion: '', monto: '' }
 
 function Ingresos() {
   const [allRows, setAllRows] = useState([])
@@ -1111,6 +1114,7 @@ function Ingresos() {
   const [search, setSearch] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+  const [filtCat, setFiltCat] = useState('')
   const [page, setPage] = useState(1)
 
   const load = useCallback(() => {
@@ -1118,21 +1122,21 @@ function Ingresos() {
   }, [])
 
   useEffect(() => { load() }, [load])
-  useEffect(() => { setPage(1) }, [search, dateFrom, dateTo])
+  useEffect(() => { setPage(1) }, [search, dateFrom, dateTo, filtCat])
 
   function openCreate() { setForm({ ...INGRESO_BLANK }); setEditId(null); setError(''); setModal(true) }
   function openEdit(r) { setForm({ ...r }); setEditId(r.idIngreso); setError(''); setModal(true) }
 
   function save() {
     if (!form.descripcion.trim()) { setError('La descripción es obligatoria.'); return }
-    if (!form.monto || form.monto <= 0) { setError('El monto debe ser mayor a 0.'); return }
+    if (!form.monto || Number(form.monto) <= 0) { setError('El monto debe ser mayor a 0.'); return }
     const descripcion = cap(form.descripcion)
     if (editId) {
-      run(`UPDATE Ingreso SET fecha=?,descripcion=?,monto=? WHERE idIngreso=?`,
-        [form.fecha, descripcion, form.monto, editId])
+      run(`UPDATE Ingreso SET fecha=?,categoria=?,descripcion=?,monto=? WHERE idIngreso=?`,
+        [form.fecha, form.categoria, descripcion, Number(form.monto), editId])
     } else {
-      run(`INSERT INTO Ingreso(fecha,descripcion,monto) VALUES(?,?,?)`,
-        [form.fecha, descripcion, form.monto])
+      run(`INSERT INTO Ingreso(fecha,categoria,descripcion,monto) VALUES(?,?,?,?)`,
+        [form.fecha, form.categoria, descripcion, Number(form.monto)])
     }
     setModal(false); load()
   }
@@ -1143,16 +1147,17 @@ function Ingresos() {
   }
 
   const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }))
-  const fn = (k) => (e) => setForm(p => ({ ...p, [k]: Number(e.target.value) }))
+  const fn = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value === '' ? '' : Number(e.target.value) }))
 
   const filtered = allRows.filter(r => {
     const q = search.trim().toLowerCase()
+    const matchCat = !filtCat || r.categoria === filtCat
     const matchFrom = !dateFrom || r.fecha >= dateFrom
     const matchTo = !dateTo || r.fecha <= dateTo
-    if (!q) return matchFrom && matchTo
-    if (/^\d+$/.test(q)) return String(r.idIngreso) === q && matchFrom && matchTo
-    const matchQ = r.descripcion.toLowerCase().includes(q)
-    return matchQ && matchFrom && matchTo
+    if (!q) return matchCat && matchFrom && matchTo
+    if (/^\d+$/.test(q)) return String(r.idIngreso) === q && matchCat && matchFrom && matchTo
+    const matchQ = r.descripcion.toLowerCase().includes(q) || (r.categoria || '').toLowerCase().includes(q)
+    return matchQ && matchCat && matchFrom && matchTo
   })
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idIngreso === confirm)
@@ -1177,16 +1182,23 @@ function Ingresos() {
           <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
             className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
         </div>
+        <div>
+          <select value={filtCat} onChange={e => setFiltCat(e.target.value)} className={dropdownClass + ' w-auto'}>
+            <option value="">Todas las categorías</option>
+            {CATEGORIAS_INGRESO.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
         <Button icon={Plus} onClick={openCreate}>Nuevo ingreso</Button>
       </div>
 
       <Card>
-        <Table headers={['#', 'Fecha', 'Descripción', 'Monto', '']}
+        <Table headers={['#', 'Fecha', 'Categoría', 'Descripción', 'Monto', '']}
           empty={paged.length === 0 ? 'Sin ingresos registrados' : null}>
           {paged.map(r => (
             <Tr key={r.idIngreso}>
               <Td className="text-surface-500 font-mono text-xs">#{r.idIngreso}</Td>
               <Td className="text-surface-400">{r.fecha}</Td>
+              <Td><Badge color="blue">{r.categoria ?? 'Otro'}</Badge></Td>
               <Td>{r.descripcion}</Td>
               <Td className="text-green-300 font-semibold">{fmt(r.monto)}</Td>
               <Td>
@@ -1203,10 +1215,16 @@ function Ingresos() {
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar ingreso' : 'Nuevo ingreso'}>
         <div className="space-y-4">
-          <Input label="Fecha *" type="date" value={form.fecha} onChange={f('fecha')} />
+          <div className="grid grid-cols-2 gap-4">
+            <Input label="Fecha *" type="date" value={form.fecha} onChange={f('fecha')} />
+            <Select label="Categoría" value={form.categoria} onChange={f('categoria')}>
+              {CATEGORIAS_INGRESO.map(c => <option key={c} value={c}>{c}</option>)}
+            </Select>
+          </div>
           <Input label="Descripción *" value={form.descripcion} onChange={f('descripcion')}
-            placeholder="Ej: Venta mayorista — Marzo" />
+            placeholder="Ej: Ingreso de FCI — Renta Variable" />
           <Input label="Monto *" type="number" min="0" value={form.monto} onChange={fn('monto')}
+            placeholder="Ej: 120000"
             className="[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" />
           {error && <p className="text-red-400 text-xs">{error}</p>}
           <div className="flex gap-3 pt-2">
@@ -1220,10 +1238,333 @@ function Ingresos() {
         details={confirmRow ? [
           ['ID', `#${confirmRow.idIngreso}`],
           ['Fecha', confirmRow.fecha],
+          ['Categoría', confirmRow.categoria ?? '—'],
           ['Descripción', confirmRow.descripcion],
           ['Monto', fmt(confirmRow.monto)],
         ] : []}
         message="¿Eliminar este ingreso?"
+      />
+    </div>
+  )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INVERSIONES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const CATEGORIAS_INV = ['FCI', 'Plazo fijo', 'Acciones', 'Otro']
+const INV_BLANK = { fecha: new Date().toISOString().slice(0, 10), categoria: 'FCI', descripcion: '', monto: '' }
+
+function Inversiones() {
+  const [allRows, setAllRows] = useState([])
+  const [modal, setModal] = useState(false)
+  const [modalRetiro, setModalRetiro] = useState(false)
+  const [form, setForm] = useState(INV_BLANK)
+  const [editId, setEditId] = useState(null)
+  const [confirm, setConfirm] = useState(null)
+  const [error, setError] = useState('')
+  const [search, setSearch] = useState('')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
+  const [filtCat, setFiltCat] = useState('')
+  const [page, setPage] = useState(1)
+  // Para retiro: categoría seleccionada y monto
+  const [retirarCat, setRetirarCat] = useState('FCI')
+  const [retirarMonto, setRetirarMonto] = useState('')
+  const [retirarFecha, setRetirarFecha] = useState(new Date().toISOString().slice(0, 10))
+  const [errorRetiro, setErrorRetiro] = useState('')
+
+  const load = useCallback(() => {
+    setAllRows(query('SELECT * FROM Inversion ORDER BY fecha DESC, idInversion DESC'))
+  }, [])
+
+  useEffect(() => { load() }, [load])
+  useEffect(() => { setPage(1) }, [search, dateFrom, dateTo, filtCat])
+
+  function openCreate() { setForm({ ...INV_BLANK }); setEditId(null); setError(''); setModal(true) }
+  function openEdit(r) { setForm({ ...r }); setEditId(r.idInversion); setError(''); setModal(true) }
+
+  function save() {
+    if (!form.descripcion.trim()) { setError('La descripción es obligatoria.'); return }
+    if (!form.monto || Number(form.monto) <= 0) { setError('El monto debe ser mayor a 0.'); return }
+    const descripcion = cap(form.descripcion)
+    if (editId) {
+      const original = allRows.find(r => r.idInversion === editId)
+      if (original?.estado === 'retirado') {
+        // Para retiros: calcular cuánto hay disponible SIN contar este retiro
+        const disponibleSinEste = allRows
+          .filter(r => r.categoria === original.categoria && r.idInversion !== editId)
+          .reduce((a, r) => a + (r.estado === 'invertido' ? r.monto : -r.monto), 0)
+        if (Number(form.monto) > disponibleSinEste) {
+          setError(`El retiro no puede superar el disponible de ${fmt(disponibleSinEste)}.`); return
+        }
+        // Solo actualizar fecha y monto — categoría y estado se preservan del original
+        run(`UPDATE Inversion SET fecha=?,monto=? WHERE idInversion=?`,
+          [form.fecha, Number(form.monto), editId])
+      } else {
+        run(`UPDATE Inversion SET fecha=?,categoria=?,descripcion=?,monto=?,estado=? WHERE idInversion=?`,
+          [form.fecha, form.categoria, descripcion, Number(form.monto), form.estado ?? 'invertido', editId])
+      }
+    } else {
+      run(`INSERT INTO Inversion(fecha,categoria,descripcion,monto,estado) VALUES(?,?,?,?,?)`,
+        [form.fecha, form.categoria, descripcion, Number(form.monto), 'invertido'])
+    }
+    setModal(false); load()
+  }
+
+  function del(id) {
+    run(`DELETE FROM Inversion WHERE idInversion=?`, [id])
+    setConfirm(null); load()
+  }
+
+  function abrirRetiro() {
+    setRetirarCat('FCI'); setRetirarMonto('')
+    setRetirarFecha(new Date().toISOString().slice(0, 10))
+    setErrorRetiro(''); setModalRetiro(true)
+  }
+
+  function guardarRetiro() {
+    const monto = Number(retirarMonto)
+    if (!retirarMonto || monto <= 0) { setErrorRetiro('El monto debe ser mayor a 0.'); return }
+    const disponible = allRows
+      .filter(r => r.categoria === retirarCat)
+      .reduce((a, r) => a + (r.estado === 'invertido' ? r.monto : -Math.abs(r.monto)), 0)
+    if (monto > disponible) {
+      setErrorRetiro(`El monto supera el disponible de ${fmt(disponible)} en ${retirarCat}.`); return
+    }
+    run(`INSERT INTO Inversion(fecha,categoria,descripcion,monto,estado) VALUES(?,?,?,?,?)`,
+      [retirarFecha, retirarCat, `Retiro ${retirarCat}`, monto, 'retirado'])
+    setModalRetiro(false); load()
+  }
+
+  const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }))
+  const fn = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value === '' ? '' : Number(e.target.value) }))
+
+  // Totales por categoría (invertido - retirado)
+  const totalesPorCat = CATEGORIAS_INV.map(cat => {
+    const rows = allRows.filter(r => r.categoria === cat)
+    const invertido = rows.filter(r => r.estado === 'invertido').reduce((a, r) => a + r.monto, 0)
+    const retirado  = rows.filter(r => r.estado === 'retirado').reduce((a, r) => a + r.monto, 0)
+    return { cat, neto: invertido - retirado, invertido, retirado }
+  }).filter(t => t.invertido > 0 || t.retirado > 0)
+
+  const totalGeneral = totalesPorCat.reduce((a, t) => a + t.neto, 0)
+
+  const filtered = allRows.filter(r => {
+    const q = search.trim().toLowerCase()
+    const matchCat = !filtCat || r.categoria === filtCat
+    const matchFrom = !dateFrom || r.fecha >= dateFrom
+    const matchTo = !dateTo || r.fecha <= dateTo
+    if (!q) return matchCat && matchFrom && matchTo
+    if (/^\d+$/.test(q)) return String(r.idInversion) === q && matchCat && matchFrom && matchTo
+    return (r.descripcion.toLowerCase().includes(q) || r.categoria.toLowerCase().includes(q)) && matchCat && matchFrom && matchTo
+  })
+  const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const confirmRow = allRows.find(r => r.idInversion === confirm)
+
+  return (
+    <div className="space-y-4">
+      {/* Resumen por categoría — siempre visible */}
+      <div className="border-t border-surface-700/60" />
+      <div className="space-y-2">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {CATEGORIAS_INV.map(cat => {
+            const t = totalesPorCat.find(t => t.cat === cat)
+            const neto = t?.neto ?? 0
+            const invertido = t?.invertido ?? 0
+            const retirado = t?.retirado ?? 0
+            return (
+              <div key={cat} className="rounded-2xl p-4" style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.25)' }}>
+                <p className="text-xs uppercase tracking-widest font-body" style={{ color: '#a5b4fc' }}>{cat}</p>
+                <p className={`font-mono font-bold text-2xl mt-1`} style={{ color: neto > 0 ? '#c7d2fe' : neto < 0 ? '#f87171' : '#6b7280' }}>
+                  {fmt(neto)}
+                </p>
+              </div>
+            )
+          })}
+        </div>
+        <div className="rounded-2xl px-5 py-4 flex items-center justify-between" style={{ background: 'rgba(139,92,246,0.1)', border: '1px solid rgba(139,92,246,0.3)' }}>
+          <div>
+            <p className="text-xs uppercase tracking-widest font-body" style={{ color: '#c4b5fd' }}>Total invertido neto</p>
+          </div>
+          <p className="font-mono font-bold text-2xl" style={{ color: totalGeneral > 0 ? '#ddd6fe' : totalGeneral < 0 ? '#f87171' : '#6b7280' }}>
+            {fmt(totalGeneral)}
+          </p>
+        </div>
+      </div>
+
+      {/* Separador sutil entre resumen de inversiones y controles */}
+      <div className="border-t border-surface-700/60" />
+
+      <div className="flex gap-2 items-center w-full flex-wrap">
+        <div className="flex-1 min-w-[160px]">
+          <input type="text" value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="Buscar por ID o descripción…"
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500" />
+        </div>
+        <div>
+          <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+        </div>
+        <div>
+          <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+        </div>
+        <div>
+          <select value={filtCat} onChange={e => setFiltCat(e.target.value)} className={dropdownClass + ' w-auto'}>
+            <option value="">Todas las categorías</option>
+            {CATEGORIAS_INV.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <Button icon={ArrowDownCircle} variant="secondary" onClick={abrirRetiro}>Registrar retiro</Button>
+        <Button icon={Plus} onClick={openCreate} className="bg-teal-600/80 hover:bg-teal-500/90 border-teal-500/50 text-white">Nueva inversión</Button>
+      </div>
+
+      <Card>
+        <Table headers={['#', 'Fecha', 'Categoría', 'Descripción', 'Estado', 'Monto', '']}
+          empty={paged.length === 0 ? 'Sin inversiones registradas' : null}>
+          {paged.map(r => (
+            <Tr key={r.idInversion}>
+              <Td className="text-surface-500 font-mono text-xs">#{r.idInversion}</Td>
+              <Td className="text-surface-400">{r.fecha}</Td>
+              <Td><Badge color="violet">{r.categoria}</Badge></Td>
+              <Td>{r.descripcion}</Td>
+              <Td><Badge color={r.estado === 'invertido' ? 'green' : 'red'}>{r.estado.charAt(0).toUpperCase() + r.estado.slice(1)}</Badge></Td>
+              <Td className={`font-semibold ${r.estado === 'invertido' ? 'text-emerald-300' : 'text-red-300'}`}>
+                {r.estado === 'retirado' ? '−' : ''}{fmt(r.monto)}
+              </Td>
+              <Td>
+                <div className="flex gap-2 justify-end">
+                  <Button variant="ghost" size="sm" icon={Pencil} onClick={() => openEdit(r)} />
+                  <Button variant="ghost" size="sm" icon={Trash2} className="hover:text-red-400" onClick={() => setConfirm(r.idInversion)} />
+                </div>
+              </Td>
+            </Tr>
+          ))}
+        </Table>
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+      </Card>
+
+      {/* Modal nueva inversión / editar */}
+      <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar inversión' : 'Nueva inversión'}>
+        <div className="space-y-4">
+          {(() => {
+            const original = allRows.find(r => r.idInversion === editId)
+            const esRetiro = original?.estado === 'retirado'
+            const disponibleSinEste = esRetiro
+              ? allRows.filter(r => r.categoria === original.categoria && r.idInversion !== editId)
+                  .reduce((a, r) => a + (r.estado === 'invertido' ? r.monto : -r.monto), 0)
+              : null
+            return (
+              <>
+                {editId ? (
+                  /* Edición: mostrar categoría y estado como solo lectura */
+                  <>
+                    <div className="grid grid-cols-2 gap-3 bg-surface-700/40 rounded-xl p-3">
+                      <div>
+                        <p className="text-surface-500 text-xs font-body mb-0.5">Categoría</p>
+                        <p className="text-surface-300 text-sm font-body">{form.categoria}</p>
+                      </div>
+                      <div>
+                        <p className="text-surface-500 text-xs font-body mb-0.5">Estado</p>
+                        <Badge color={form.estado === 'invertido' ? 'green' : 'red'}>{form.estado}</Badge>
+                      </div>
+                    </div>
+                    <Input label="Fecha *" type="date" value={form.fecha} onChange={f('fecha')} />
+                    {!esRetiro && (
+                      <Input label="Descripción *" value={form.descripcion} onChange={f('descripcion')}
+                        placeholder="Ej: FCI Renta Variable — Apertura" />
+                    )}
+                    <div>
+                      <Input
+                        label={esRetiro ? `Monto a retirar * (máx. ${fmt(disponibleSinEste)})` : 'Monto *'}
+                        type="number" min="0"
+                        placeholder="Ej: 100000"
+                        value={form.monto === '' ? '' : form.monto}
+                        onChange={e => setForm(p => ({ ...p, monto: e.target.value === '' ? '' : Number(e.target.value) }))}
+                        className="[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" />
+                      {esRetiro && Number(form.monto) > disponibleSinEste && form.monto !== '' && (
+                        <p className="text-red-400 text-xs mt-1">Supera el disponible de {fmt(disponibleSinEste)}</p>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  /* Creación: todos los campos */
+                  <>
+                    <div className="grid grid-cols-2 gap-4">
+                      <Input label="Fecha *" type="date" value={form.fecha} onChange={f('fecha')} />
+                      <Select label="Categoría" value={form.categoria} onChange={f('categoria')}>
+                        {CATEGORIAS_INV.map(c => <option key={c} value={c}>{c}</option>)}
+                      </Select>
+                    </div>
+                    <Input label="Descripción *" value={form.descripcion} onChange={f('descripcion')}
+                      placeholder="Ej: FCI Renta Variable — Apertura" />
+                    <Input label="Monto *" type="number" min="0"
+                      placeholder="Ej: 100000"
+                      value={form.monto === '' ? '' : form.monto}
+                      onChange={e => setForm(p => ({ ...p, monto: e.target.value === '' ? '' : Number(e.target.value) }))}
+                      className="[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" />
+                  </>
+                )}
+              </>
+            )
+          })()}
+          {error && <p className="text-red-400 text-xs">{error}</p>}
+          <div className="flex gap-3 pt-2">
+            <Button variant="secondary" className="flex-1" onClick={() => setModal(false)}>Cancelar</Button>
+            <Button className="flex-1" onClick={save}>Guardar</Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Modal retiro */}
+      <Modal open={modalRetiro} onClose={() => setModalRetiro(false)} title="Registrar retiro de inversión">
+        <div className="space-y-4">
+          <Select label="Categoría a retirar" value={retirarCat} onChange={e => { setRetirarCat(e.target.value); setRetirarMonto(0); setErrorRetiro('') }}>
+            {CATEGORIAS_INV.map(c => {
+              const t = totalesPorCat.find(t => t.cat === c)
+              return <option key={c} value={c}>{c}{t ? ` — disponible ${fmt(t.neto)}` : ' — sin fondos'}</option>
+            })}
+          </Select>
+          <Input label="Fecha *" type="date" value={retirarFecha} onChange={e => setRetirarFecha(e.target.value)} />
+          <div>
+            {(() => {
+              const disponible = totalesPorCat.find(t => t.cat === retirarCat)?.neto ?? 0
+              const excede = Number(retirarMonto) > disponible
+              return (
+                <>
+                  <Input
+                    label={`Monto a retirar * (máx. ${fmt(disponible)})`}
+                    type="number" min="0" max={disponible}
+                    placeholder="Ej: 50000"
+                    value={retirarMonto}
+                    onChange={e => { setRetirarMonto(e.target.value); setErrorRetiro('') }}
+                    className="[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" />
+                  {excede && retirarMonto !== '' && (
+                    <p className="text-red-400 text-xs mt-1">Supera el disponible de {fmt(disponible)}</p>
+                  )}
+                </>
+              )
+            })()}
+          </div>
+          {errorRetiro && <p className="text-red-400 text-xs">{errorRetiro}</p>}
+          <div className="flex gap-3 pt-2">
+            <Button variant="secondary" className="flex-1" onClick={() => setModalRetiro(false)}>Cancelar</Button>
+            <Button variant="danger" className="flex-1" onClick={guardarRetiro}>Confirmar retiro</Button>
+          </div>
+        </div>
+      </Modal>
+
+      <ConfirmModal open={!!confirm} onClose={() => setConfirm(null)} onConfirm={() => del(confirm)}
+        details={confirmRow ? [
+          ['ID', `#${confirmRow.idInversion}`],
+          ['Fecha', confirmRow.fecha],
+          ['Categoría', confirmRow.categoria],
+          ['Descripción', confirmRow.descripcion],
+          ['Monto', fmt(confirmRow.monto)],
+          ['Estado', confirmRow.estado],
+        ] : []}
+        message="¿Eliminar este registro de inversión?"
       />
     </div>
   )
@@ -1360,6 +1701,7 @@ const PANEL = {
   saldos:       Saldos,
   egresos:      Egresos,
   ingresos:     Ingresos,
+  inversiones:  Inversiones,
   categorias:   Categorias,
 }
 
@@ -1367,27 +1709,40 @@ export default function ABMC() {
   const [active, setActive] = useState('clientes')
   const ActivePanel = PANEL[active]
 
+  const TabBtn = ({ tab }) => {
+    const { key, label, icon: Icon, color } = tab
+    return (
+      <button
+        key={key}
+        onClick={() => setActive(key)}
+        className={`flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-sm font-body border transition-all duration-200 flex-1 min-w-0
+          ${active === key
+            ? 'bg-surface-700 border-surface-500 text-white shadow-lg'
+            : 'bg-surface-800 border-surface-700 text-surface-400 hover:text-white hover:border-surface-600'
+          }`}
+      >
+        <div className={`w-5 h-5 rounded-md bg-gradient-to-br ${color} flex items-center justify-center shrink-0`}>
+          <Icon size={11} className="text-white" />
+        </div>
+        <span className="truncate hidden sm:inline">{label}</span>
+      </button>
+    )
+  }
+
+  const row1 = TABS.slice(0, 5)
+  const row2 = TABS.slice(5)
+
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <PageHeader title="ABMC" subtitle="Administración" />
 
-      <div className="flex gap-2 w-full">
-        {TABS.map(({ key, label, icon: Icon, color }) => (
-          <button
-            key={key}
-            onClick={() => setActive(key)}
-            className={`flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-sm font-body border transition-all duration-200 flex-1 min-w-0
-              ${active === key
-                ? 'bg-surface-700 border-surface-500 text-white shadow-lg'
-                : 'bg-surface-800 border-surface-700 text-surface-400 hover:text-white hover:border-surface-600'
-              }`}
-          >
-            <div className={`w-5 h-5 rounded-md bg-gradient-to-br ${color} flex items-center justify-center shrink-0`}>
-              <Icon size={11} className="text-white" />
-            </div>
-            <span className="truncate hidden sm:inline">{label}</span>
-          </button>
-        ))}
+      <div className="space-y-2">
+        <div className="flex gap-2 w-full">
+          {row1.map(tab => <TabBtn key={tab.key} tab={tab} />)}
+        </div>
+        <div className="flex gap-2 w-full">
+          {row2.map(tab => <TabBtn key={tab.key} tab={tab} />)}
+        </div>
       </div>
 
       <div className="animate-fade-in" key={active}>

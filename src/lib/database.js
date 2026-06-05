@@ -13,7 +13,7 @@ import { PRODUCTOS_SEED, CLIENTES_SEED, PROVEEDORES_SEED } from './seedData.js'
 let db = null
 
 // Incrementar esta key cada vez que el schema cambie para forzar re-creación de la BD local.
-const DB_STORAGE_KEY = 'motoparts_db_v7'
+const DB_STORAGE_KEY = 'motoparts_db_v8'
 
 // ─── Persistencia local (solo sql.js) ────────────────────────────────────────
 
@@ -259,11 +259,28 @@ function runSchema() {
     CREATE TABLE IF NOT EXISTS Ingreso (
       idIngreso   INTEGER PRIMARY KEY AUTOINCREMENT,
       fecha       TEXT    NOT NULL,
+      categoria   TEXT    NOT NULL DEFAULT 'Otro' CHECK(categoria IN ('FCI','Plazo fijo','Acciones','Otro')),
       descripcion TEXT    NOT NULL,
       monto       REAL    NOT NULL DEFAULT 0
     );
   `)
   db.run(`CREATE INDEX IF NOT EXISTS idx_ingreso_fecha ON Ingreso(fecha);`)
+
+  // ── Inversion ─────────────────────────────────────────────────────────────
+  // estado: 'invertido' = capital activo, 'retirado' = capital retirado parcial/total.
+  // Los retiros se registran como filas con monto negativo y estado 'retirado'.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS Inversion (
+      idInversion INTEGER PRIMARY KEY AUTOINCREMENT,
+      fecha       TEXT    NOT NULL,
+      categoria   TEXT    NOT NULL CHECK(categoria IN ('FCI','Plazo fijo','Acciones','Otro')),
+      descripcion TEXT    NOT NULL,
+      monto       REAL    NOT NULL,
+      estado      TEXT    NOT NULL DEFAULT 'invertido' CHECK(estado IN ('invertido','retirado'))
+    );
+  `)
+  db.run(`CREATE INDEX IF NOT EXISTS idx_inversion_fecha     ON Inversion(fecha);`)
+  db.run(`CREATE INDEX IF NOT EXISTS idx_inversion_categoria ON Inversion(categoria);`)
 
   // ── Seed inicial ──────────────────────────────────────────────────────────
   const catCount = db.exec(`SELECT COUNT(*) FROM Categoria`)[0].values[0][0]
