@@ -30,20 +30,6 @@ const SECTIONS = [
     accent:      'from-emerald-500 to-emerald-600',
   },
   {
-    to:          '/facturas',
-    icon:        Receipt,
-    label:       'Facturas',
-    description: 'Generá y exportá documentos de factura en PDF por período.',
-    accent:      'from-violet-500 to-violet-600',
-  },
-  {
-    to:          '/estadisticas',
-    icon:        BarChart2,
-    label:       'Estadísticas',
-    description: 'Ingresos, egresos y métricas clave del negocio.',
-    accent:      'from-yellow-500 to-yellow-600',
-  },
-  {
     to:          '/pedidos',
     icon:        ShoppingCart,
     label:       'Pedidos de Compra',
@@ -56,6 +42,20 @@ const SECTIONS = [
     label:       'Saldos',
     description: 'Seguimiento de cobros pendientes por cuenta corriente.',
     accent:      'from-cyan-500 to-cyan-600',
+  },
+  {
+    to:          '/facturas',
+    icon:        Receipt,
+    label:       'Facturas',
+    description: 'Generá y exportá documentos de factura en PDF por período.',
+    accent:      'from-violet-500 to-violet-600',
+  },
+  {
+    to:          '/estadisticas',
+    icon:        BarChart2,
+    label:       'Estadísticas',
+    description: 'Ingresos, egresos y métricas clave del negocio.',
+    accent:      'from-yellow-500 to-yellow-600',
   },
   {
     to:          '/abmc',
@@ -95,19 +95,6 @@ export default function Dashboard() {
         <h1 className="font-display text-6xl text-white tracking-widest leading-none">
           POWDER
         </h1>
-      </div>
-
-      <div className="grid grid-cols-3 gap-4 animate-slide-up" style={{ animationDelay: '0.05s' }}>
-        {[
-          { label: 'Presupuestos', value: stats.presupuestos },
-          { label: 'Saldos pendientes', value: stats.pendientes },
-          { label: 'Productos', value: stats.productos },
-        ].map(({ label, value }) => (
-          <div key={label} className="bg-surface-800 border border-surface-700 rounded-2xl p-5">
-            <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">{label}</p>
-            <p className="font-display text-4xl text-white tracking-wider">{value}</p>
-          </div>
-        ))}
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">

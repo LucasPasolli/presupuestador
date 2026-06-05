@@ -627,21 +627,6 @@ export default function Historial() {
     <div className="max-w-7xl mx-auto space-y-6">
       <PageHeader title="Historial" subtitle="Presupuestos emitidos" />
 
-      {/* Resumen */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        {[
-          { label:'Total',             value: presupuestos.length },
-          { label:'Facturado',         value: fmt(totalMonto) },
-          { label:'Saldos pendientes', value: pendCobro },
-          { label:'Aprobados',         value: presupuestos.filter(p=>p.estado==='aprobado').length },
-        ].map(({label,value}) => (
-          <div key={label} className="bg-surface-800 border border-surface-700 rounded-xl p-4">
-            <p className="text-surface-400 text-xs uppercase tracking-widest font-body">{label}</p>
-            <p className="font-display text-2xl text-white tracking-widest mt-0.5">{value}</p>
-          </div>
-        ))}
-      </div>
-
       {/* Filtros */}
       <Card className="p-4">
         <div className="flex flex-wrap gap-3 items-end">

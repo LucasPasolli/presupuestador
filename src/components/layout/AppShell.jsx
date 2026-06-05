@@ -11,10 +11,10 @@ const NAV_ITEMS = [
   { to: '/presupuestador', icon: FileText,         label: 'Presupuestador' },
   { to: '/historial',      icon: Clock,            label: 'Historial'      },
   { to: '/inventario',     icon: Package,          label: 'Inventario'     },
-  { to: '/facturas',       icon: Receipt,          label: 'Facturas'       },
-  { to: '/estadisticas',   icon: BarChart2,        label: 'Estadísticas'   },
   { to: '/pedidos',        icon: ShoppingCart,     label: 'Pedidos'        },
   { to: '/saldos',         icon: Wallet,           label: 'Saldos'         },
+  { to: '/facturas',       icon: Receipt,          label: 'Facturas'       },
+  { to: '/estadisticas',   icon: BarChart2,        label: 'Estadísticas'   },
   { to: '/abmc',           icon: Settings2,        label: 'ABMC'           },
 ]
 

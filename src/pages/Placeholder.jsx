@@ -1,6 +1,4 @@
 // src/pages/Placeholder.jsx
-// Temporary placeholder used for pages not yet built.
-// Replace each one with the real implementation in subsequent steps.
 
 export function Presupuestador() {
   return <PageShell title="Presupuestador" emoji="📝" description="Aquí se cargará el módulo de presupuestación." />
