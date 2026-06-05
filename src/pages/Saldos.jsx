@@ -1,5 +1,6 @@
 // src/pages/Saldos.jsx
 import { useState, useEffect, useCallback } from 'react'
+import { useLocation } from 'react-router-dom'
 import { query, run } from '../lib/database'
 import { Card, PageHeader, Button, Badge, Modal } from '../components/ui'
 import {
@@ -302,13 +303,23 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
 // ─── Lista de saldos ────────────────────────────────────────────────────────
 
 export default function Saldos() {
+  const location = useLocation()
   const [saldos,     setSaldos]     = useState([])
   const [selected,   setSelected]   = useState(null)
-  const [filterEst,  setFilterEst]  = useState('pendiente')   // por defecto solo pendientes
+  const [filterEst,  setFilterEst]  = useState('pendiente')
   const [search,     setSearch]     = useState('')
-  const [sortDias,   setSortDias]   = useState('asc')         // ordenar por urgencia
+  const [sortDias,   setSortDias]   = useState('asc')
   const [page,       setPage]       = useState(1)
   const [toast,      setToast]      = useState('')
+
+  // Si venimos desde Historial con un saldo pre-seleccionado, abrirlo directo
+  useEffect(() => {
+    if (location.state?.saldoInicial) {
+      setSelected(location.state.saldoInicial)
+      // Limpiar el state para que no persista si el usuario navega de vuelta
+      window.history.replaceState({}, '')
+    }
+  }, [location.state])
 
   const load = useCallback(() => {
     let sql = `

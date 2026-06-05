@@ -26,14 +26,13 @@ function today() { return new Date().toISOString().slice(0, 10) }
 // Capitaliza la primera letra de un string (igual que ABMC)
 const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
 
-// Calcula el próximo día 30 a partir de hoy
-function proximoDia30() {
-  const now = new Date()
-  const year  = now.getMonth() === 11 ? now.getFullYear() + 1 : now.getFullYear()
-  const month = now.getMonth() === 11 ? 0 : now.getMonth() + 1
-  const d30 = new Date(year, month, 30)
-  const [y, m, dd] = d30.toISOString().slice(0, 10).split('-')
-  return `${dd}/${m}/${y}`
+// Calcula la fecha de vencimiento del echeck: 30 días corridos desde la fecha de emisión
+// fechaIso puede ser 'YYYY-MM-DD' (pedido guardado) o undefined/null (pedido nuevo → usa hoy)
+function fechaVencimientoEcheck(fechaIso) {
+  const base = fechaIso ? new Date(fechaIso + 'T00:00:00') : new Date()
+  base.setDate(base.getDate() + 30)
+  const [y, m, d] = base.toISOString().slice(0, 10).split('-')
+  return `${d}/${m}/${y}`
 }
 
 // Estado visual del pedido (logístico)
@@ -590,7 +589,7 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
   const estadoLog         = pedido.estadoLogistico ?? 'encargado'
   const cfg               = ESTADO_CONFIG[estadoLog] ?? ESTADO_CONFIG.encargado
   const esEcheck          = pedido.metodoPago === 'echeck'
-  const dia30             = proximoDia30()
+  const dia30             = fechaVencimientoEcheck(pedido.fecha)
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 animate-slide-up">
@@ -849,7 +848,7 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
   const total = items.reduce((acc, it) =>
     acc + (parseInt(it.cantidad) || 0) * (parseFloat(String(it.precioUnitario).replace(',', '.')) || 0), 0)
 
-  const dia30 = proximoDia30()
+  const dia30 = fechaVencimientoEcheck()
 
   function updateItem(idx, key, val) {
     setItems(prev => prev.map((it, i) => i === idx ? { ...it, [key]: val } : it))

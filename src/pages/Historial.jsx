@@ -1,11 +1,12 @@
 // src/pages/Historial.jsx
 import { useState, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import Presupuestador from './Presupuestador'
 import { query, run } from '../lib/database'
 import { Card, PageHeader, Button, Badge, Modal } from '../components/ui'
 import {
   Search, ChevronDown, ChevronUp, ArrowLeft, FileText,
-  Clock, CheckCircle2, XCircle, ThumbsUp, AlertCircle, Trash2, Download, Pencil, X
+  Clock, CheckCircle2, XCircle, ThumbsUp, AlertCircle, Trash2, Download, Pencil, X, Wallet
 } from 'lucide-react'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -170,7 +171,7 @@ function descontarStock(idPresupuesto) {
 
 // ─── Vista detalle ─────────────────────────────────────────────────────────
 
-function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar }) {
+function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar, onNavigarSaldo }) {
   const [pres,       setPres]       = useState(presInit)
   const [detalles,   setDetalles]   = useState([])
   const [cliente,    setCliente]    = useState(null)
@@ -418,14 +419,41 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
       </Card>
 
       {saldo && (
-        <Card className="p-5">
-          <div className="flex flex-wrap items-center gap-6">
-            <div><p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Saldo</p><p className="text-white font-mono text-sm">#{saldo.idSaldo}</p></div>
-            <div><p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Vence</p><p className="text-white text-sm">{fmtFecha(saldo.fechaFin)}</p></div>
-            <div><p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Estado</p><Badge color={saldo.estado==='pagado'?'green':'yellow'}>{saldo.estado==='pagado'?'Cobrado':'Pendiente'}</Badge></div>
-            <div><p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Monto</p><p className="text-brand-400 font-mono font-bold">{fmt(saldo.monto)}</p></div>
-          </div>
-        </Card>
+        <div
+          className="cursor-pointer group"
+          onClick={() => onNavigarSaldo && onNavigarSaldo(saldo)}
+        >
+          <Card className="p-5 group-hover:border-brand-500/40 group-hover:bg-surface-700/20 transition-all">
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-surface-400 text-xs uppercase tracking-widest font-body flex items-center gap-1.5">
+                <Wallet size={11} />Saldo asociado
+              </p>
+              <span className="text-brand-400 text-xs font-body flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                Ver en Saldos →
+              </span>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="bg-surface-700 rounded-xl p-3">
+                <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Saldo</p>
+                <p className="text-white font-mono text-sm font-bold">#{saldo.idSaldo}</p>
+              </div>
+              <div className="bg-surface-700 rounded-xl p-3">
+                <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Vence</p>
+                <p className="text-white text-sm font-mono">{fmtFecha(saldo.fechaFin)}</p>
+              </div>
+              <div className="bg-surface-700 rounded-xl p-3">
+                <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Estado</p>
+                <Badge color={saldo.estado === 'pagado' ? 'green' : 'yellow'}>
+                  {saldo.estado === 'pagado' ? 'Cobrado' : 'Pendiente'}
+                </Badge>
+              </div>
+              <div className="bg-surface-700 rounded-xl p-3">
+                <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Monto</p>
+                <p className="text-brand-400 font-mono font-bold">{fmt(saldo.monto)}</p>
+              </div>
+            </div>
+          </Card>
+        </div>
       )}
 
       {/* Modales estado */}
@@ -462,6 +490,7 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
 // ─── Lista ─────────────────────────────────────────────────────────────────
 
 export default function Historial() {
+  const navigate = useNavigate()
   const [presupuestos, setPresupuestos] = useState([])
   const [search,       setSearch]       = useState('')
   const [filterMetodo, setFilterMetodo] = useState('all')
@@ -564,6 +593,10 @@ export default function Historial() {
       onBack={()=>{ setSelected(null); load() }}
       onUpdated={load}
       onEditar={(id) => { setEditando(id); setSelected(null) }}
+      onNavigarSaldo={(saldo) => {
+        setSelected(null)
+        navigate('/saldos', { state: { saldoInicial: saldo } })
+      }}
     />
   )
 
