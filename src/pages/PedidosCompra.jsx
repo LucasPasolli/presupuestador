@@ -1023,6 +1023,16 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
             </tbody>
           </table>
         </div>
+        {items.length > 0 && (
+          <div className="px-4 py-3 border-t border-surface-700/50">
+            <button
+              onClick={addItem}
+              className="flex items-center gap-2 text-brand-400 hover:text-brand-300 text-sm font-body transition-colors">
+              <Plus size={15} />
+              Agregar ítem
+            </button>
+          </div>
+        )}
         {items.length === 0 && (
           <div className="text-center py-10 text-surface-500 font-body text-sm">
             Sin ítems. Hacé clic en "Agregar ítem" para empezar.

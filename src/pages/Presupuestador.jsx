@@ -898,8 +898,8 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
   // ── Pantalla de éxito ──
   if (guardado) {
     return (
-      <div className="max-w-lg mx-auto mt-16 text-center animate-slide-up">
-        <div className="bg-surface-800 border border-surface-700 rounded-2xl p-10 space-y-4">
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70">
+        <div className="max-w-lg w-full bg-surface-800 border border-surface-700 rounded-2xl p-10 space-y-4 text-center animate-slide-up">
           <CheckCircle2 size={52} className="text-emerald-400 mx-auto" />
           <h2 className="font-display text-3xl text-white tracking-widest">GUARDADO</h2>
           <div className="bg-surface-700/60 border border-surface-600 rounded-xl px-5 py-4 text-left space-y-2">
@@ -999,6 +999,16 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver }) {
             </tbody>
           </table>
         </div>
+        {items.length > 0 && (
+          <div className="px-4 py-3 border-t border-surface-700/50">
+            <button
+              onClick={addItem}
+              className="flex items-center gap-2 text-brand-400 hover:text-brand-300 text-sm font-body transition-colors">
+              <Plus size={15} />
+              Agregar ítem
+            </button>
+          </div>
+        )}
         {items.length === 0 && (
           <div className="text-center py-10 text-surface-500 font-body text-sm">
             Sin ítems. Hacé clic en "Agregar ítem" para empezar.

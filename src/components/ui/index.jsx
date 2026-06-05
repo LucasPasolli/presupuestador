@@ -1,5 +1,6 @@
 // src/components/ui/index.jsx
 // Shared primitive components used throughout the app.
+import { createPortal } from 'react-dom'
 
 // ─── Button ───────────────────────────────────────────────────────────────
 
@@ -200,7 +201,7 @@ export function Td({ children, className = '' }) {
 
 export function Modal({ open, onClose, title, children, width = 'max-w-lg' }) {
   if (!open) return null
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/70" onClick={onClose} />
       <div
@@ -218,7 +219,8 @@ export function Modal({ open, onClose, title, children, width = 'max-w-lg' }) {
         </div>
         <div className="p-6">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
