@@ -469,6 +469,7 @@ function Presupuestos() {
   }
 
   function del(id) {
+    run(`DELETE FROM Saldo WHERE idPresupuesto=?`, [id])
     run(`DELETE FROM Presupuesto WHERE idPresupuesto=?`, [id])
     setConfirm(null); load()
   }
