@@ -320,13 +320,15 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
       {/* Totales */}
       <Card className="p-6">
         {(() => {
-          // subtotalConPromo: suma de los subtotales de cada ítem (precio con promo * cant)
+          // precioLista: suma de precioUnitario * cantidad (precio de catálogo, antes de promos)
+          const precioLista     = detalles.reduce((acc, d) => acc + (parseFloat(d.precioUnitario) || 0) * (parseFloat(d.cantidad) || 0), 0)
+          // subtotalConPromo: suma de subtotales (precio con promo ya aplicada * cantidad)
+          // Equivale a pres.montoOriginal, pero lo recalculamos desde los detalles para precisión.
           const subtotalConPromo = detalles.reduce((acc, d) => acc + (parseFloat(d.subtotal) || 0), 0)
-          // ahorroPromo: diferencia entre precio de lista y precio ya con promos
-          const ahorroPromo  = (pres.montoOriginal || 0) - subtotalConPromo
-          // ajusteMetodo: diferencia entre monto final guardado y subtotal con promos.
-          // Esto representa ÚNICAMENTE el ajuste del método de pago (descuento o recargo),
-          // sin mezclar los descuentos de las promociones de productos.
+          // ahorroPromo: diferencia entre precio de lista y subtotal con promos aplicadas
+          const ahorroPromo  = precioLista - subtotalConPromo
+          // ajusteMetodo: diferencia entre monto final y subtotal con promos.
+          // Representa ÚNICAMENTE el ajuste del método de pago (descuento efectivo/transf o recargo CC).
           const ajusteMetodo = (parseFloat(pres.monto) || 0) - subtotalConPromo
           return (
             <div className="ml-auto w-fit min-w-[280px] space-y-2 text-sm font-body">
@@ -334,7 +336,7 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
               {/* Subtotal precio lista */}
               <div className="flex justify-between gap-8">
                 <span className="text-surface-400 shrink-0">Subtotal (lista):</span>
-                <span className="text-surface-200 font-mono text-right">{fmt(pres.montoOriginal)}</span>
+                <span className="text-surface-200 font-mono text-right">{fmt(precioLista)}</span>
               </div>
 
               {/* Ahorro por promociones — solo si existe */}
