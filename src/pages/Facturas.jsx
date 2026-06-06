@@ -47,7 +47,7 @@ function cargarDatos(desde, hasta) {
       AND (
         (s.idSaldo IS NOT NULL AND s.estado = 'pagado' AND s.fechaPago >= ? AND s.fechaPago <= ?)
         OR
-        (s.idSaldo IS NULL AND p.fecha >= ? AND p.fecha <= ?)
+        (s.idSaldo IS NULL AND p.metodoPago NOT IN ('cc15','cc30') AND p.fecha >= ? AND p.fecha <= ?)
       )
     ORDER BY p.idCliente, p.idPresupuesto
   `, [desde, hasta, desde, hasta])

@@ -3,8 +3,10 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { query, run } from '../lib/database'
+import { aplicarPromociones, calcularTotales } from '../lib/promociones'
+import { generarPDFPresupuesto } from '../lib/pdfPresupuesto'
 import { Button, Card, PageHeader, Modal, Input } from '../components/ui'
-import { Plus, Trash2, Search, UserPlus, CheckCircle2, AlertCircle, Download, FileText, ArrowLeft, X } from 'lucide-react'
+import { Plus, Trash2, Search, UserPlus, CheckCircle2, AlertCircle, Download, FileText, ArrowLeft, X, Tag } from 'lucide-react'
 
 // ─── Constantes ────────────────────────────────────────────────────────────
 
@@ -23,12 +25,10 @@ function fmt(n) {
   return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(n ?? 0)
 }
 
-// Elimina tildes para búsquedas insensibles a acentos
 function norm(s) {
   return (s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
 }
 
-// Capitaliza la primera letra de un string (igual que ABMC)
 const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
 
 // ─── Toast ─────────────────────────────────────────────────────────────────
@@ -61,7 +61,6 @@ function NuevoClienteModal({ open, onClose, onCreated }) {
 
   function set(k, v) { setForm(p => ({ ...p, [k]: v })) }
 
-  // CUIT: dígitos y guiones. Teléfono: solo dígitos. Igual que ABMC.
   function setField(k, v) {
     let val = v
     if (k === 'cuit')     val = v.replace(/[^0-9-]/g, '')
@@ -89,7 +88,6 @@ function NuevoClienteModal({ open, onClose, onCreated }) {
        form.telefono, form.mail, apodo, nombreComercio]
     )
     const cliente = query('SELECT * FROM Cliente WHERE idCliente = ?', [id])[0]
-    // Cierra primero el modal, luego notifica al padre — así el toast se monta en un árbol vivo
     onClose()
     setTimeout(() => onCreated(cliente), 0)
   }
@@ -141,12 +139,10 @@ function ClienteSelector({ value, onChange, onToast }) {
     setSearch(text)
     if (!text.trim()) { setResults([]); setShowDrop(false); return }
     const normText = norm(text.trim())
-    // Solo clientes activos (activo = 1); los borrados desde ABMC tienen activo = 0
     const byId = query(`SELECT * FROM Cliente WHERE CAST(idCliente AS TEXT) = ? AND activo = 1 LIMIT 1`, [text.trim()])
     const byName = query(`SELECT * FROM Cliente WHERE activo = 1 LIMIT 300`)
       .filter(c => norm(c.nombre).includes(normText) || norm(c.apellido).includes(normText)
                || norm(c.apodo ?? '').includes(normText) || norm(c.nombreComercio ?? '').includes(normText))
-    // Unir sin duplicados
     const seen = new Set(byId.map(c => c.idCliente))
     const rows = [...byId, ...byName.filter(c => !seen.has(c.idCliente))].slice(0, 8)
     setResults(rows)
@@ -163,14 +159,11 @@ function ClienteSelector({ value, onChange, onToast }) {
 
   function abrirNuevo() {
     setShowDrop(false)
-    // pequeño delay para que el dropdown cierre visualmente antes de abrir el modal
     setTimeout(() => setShowNew(true), 50)
   }
 
-  // onCreated recibe el cliente ya guardado → selecciona + dispara toast
   function handleCreated(cliente) {
     seleccionar(cliente)
-    // El toast se dispara aquí, en el padre, no dentro del modal que se desmonta
     onToast('Cliente creado correctamente ✓')
   }
 
@@ -233,11 +226,14 @@ function ClienteSelector({ value, onChange, onToast }) {
   )
 }
 
-// Dropdown renderizado inline — ver ItemRow
-
 // ─── Fila de ítem ───────────────────────────────────────────────────────────
+// CAMBIOS vs. versión original:
+//  · Recibe `itemConPromo` (objeto enriquecido por aplicarPromociones) además de `item`.
+//  · Si hay precioConPromo, muestra precio original tachado + precio promo en verde.
+//  · El subtotal se calcula con el precio promocional cuando aplica.
+//  · Badge de nombre de promo junto al precio.
 
-function ItemRow({ uid, item, index, onUpdate, onRemove, onClearError, onStockError }) {
+function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearError, onStockError }) {
   const [nombreSearch,   setNombreSearch]   = useState(item.nombreProducto || '')
   const [nombreResults,  setNombreResults]  = useState([])
   const [showDrop,       setShowDrop]       = useState(false)
@@ -255,6 +251,13 @@ function ItemRow({ uid, item, index, onUpdate, onRemove, onClearError, onStockEr
   const [showPriceTooltip, setShowPriceTooltip] = useState(false)
   const [priceTooltipPos,  setPriceTooltipPos]  = useState({ top: 0, left: 0 })
 
+  // Precio efectivo (con o sin promo)
+  const precioEfectivo = itemConPromo?.precioConPromo != null
+    ? itemConPromo.precioConPromo
+    : (parseFloat(item.precioUnitario) || 0)
+
+  const tienePromo = itemConPromo?.precioConPromo != null
+
   useEffect(() => {
     const handler = e => {
       if (
@@ -266,7 +269,6 @@ function ItemRow({ uid, item, index, onUpdate, onRemove, onClearError, onStockEr
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  // Recalcula posición del dropdown cuando se muestra o al hacer scroll/resize
   useEffect(() => {
     if (!showDrop || !inputRef.current) return
     const update = () => {
@@ -279,7 +281,6 @@ function ItemRow({ uid, item, index, onUpdate, onRemove, onClearError, onStockEr
     return () => { window.removeEventListener('scroll', update, true); window.removeEventListener('resize', update) }
   }, [showDrop])
 
-  // Cargar medidas cuando cambia el producto seleccionado
   useEffect(() => {
     if (!item.idProducto) { setMedidas([]); return }
     const prod = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(item.idProducto)])[0]
@@ -321,7 +322,6 @@ function ItemRow({ uid, item, index, onUpdate, onRemove, onClearError, onStockEr
     setNombreSearch(text)
     onClearError()
     onUpdate(uid, 'nombreProducto', text)
-    // Si había un producto seleccionado y el usuario modifica el nombre, limpiar el ID y precio
     if (item.idProducto) {
       onUpdate(uid, 'idProducto', '')
       onUpdate(uid, 'precioUnitario', 0)
@@ -367,7 +367,6 @@ function ItemRow({ uid, item, index, onUpdate, onRemove, onClearError, onStockEr
         setPriceWarning(!p.precioUnitario)
         checkStock(p.idProducto, null, item.cantidad)
       } else {
-        // ID no existe — limpiamos nombre y precio, no rellenamos nada
         setNombreSearch('')
         onUpdate(uid, 'nombreProducto', '')
         onUpdate(uid, 'precioUnitario', 0)
@@ -375,7 +374,6 @@ function ItemRow({ uid, item, index, onUpdate, onRemove, onClearError, onStockEr
         setIdError(`Sin producto con ID ${clean}`)
       }
     } else {
-      // ID vacío → limpiar todo el producto
       setNombreSearch('')
       onUpdate(uid, 'nombreProducto', '')
       onUpdate(uid, 'precioUnitario', 0)
@@ -427,7 +425,7 @@ function ItemRow({ uid, item, index, onUpdate, onRemove, onClearError, onStockEr
         )}
       </td>
 
-      {/* Nombre — dropdown renderizado via portal para escapar del overflow de la tabla */}
+      {/* Nombre */}
       <td className="py-2 px-2 min-w-[200px]" ref={wrapRef}>
         <input ref={inputRef} value={nombreSearch} onChange={e => buscarPorNombre(e.target.value)}
           placeholder="Nombre del producto..."
@@ -486,25 +484,47 @@ function ItemRow({ uid, item, index, onUpdate, onRemove, onClearError, onStockEr
         )}
       </td>
 
-      {/* Precio — read only */}
-      <td className="py-2 px-2 w-36">
-        <div ref={priceRef}
-             className={`w-full rounded-lg px-2 py-1.5 text-sm font-mono cursor-not-allowed select-none
-                        ${priceWarning
-                          ? 'bg-yellow-900/40 border border-yellow-500 text-yellow-300'
-                          : 'bg-surface-800 border border-surface-700 text-surface-300'}`}
-             onMouseEnter={() => {
-               if (priceWarning) {
-                 const r = priceRef.current?.getBoundingClientRect()
-                 if (r) setPriceTooltipPos({ top: r.top + window.scrollY - 36, left: r.left + window.scrollX })
-                 setShowPriceTooltip(true)
-               }
-             }}
-             onMouseLeave={() => setShowPriceTooltip(false)}>
-          {item.precioUnitario ? fmt(parseFloat(item.precioUnitario)) : (
-            priceWarning
-              ? <span className="text-yellow-400 text-xs">Sin precio ⚠</span>
-              : <span className="text-surface-600">—</span>
+      {/* Precio — con soporte de promociones */}
+      <td className="py-2 px-2 w-44">
+        <div ref={priceRef} className="space-y-0.5">
+          {tienePromo ? (
+            <>
+              {/* Precio original tachado */}
+              <div className="text-surface-500 text-xs font-mono line-through">
+                {fmt(parseFloat(item.precioUnitario))}
+              </div>
+              {/* Precio promocional */}
+              <div className="text-emerald-400 text-sm font-mono font-semibold">
+                {fmt(precioEfectivo)}
+              </div>
+              {/* Badge de promo */}
+              <div className="flex items-center gap-1 mt-0.5">
+                <Tag size={10} className="text-emerald-500 flex-shrink-0" />
+                <span className="text-emerald-500 text-[10px] font-body truncate max-w-[100px]">
+                  {itemConPromo.promoAplicada}
+                </span>
+              </div>
+            </>
+          ) : (
+            <div
+              className={`rounded-lg px-2 py-1.5 text-sm font-mono cursor-not-allowed select-none
+                         ${priceWarning
+                           ? 'bg-yellow-900/40 border border-yellow-500 text-yellow-300'
+                           : 'bg-surface-800 border border-surface-700 text-surface-300'}`}
+              onMouseEnter={() => {
+                if (priceWarning) {
+                  const r = priceRef.current?.getBoundingClientRect()
+                  if (r) setPriceTooltipPos({ top: r.top + window.scrollY - 36, left: r.left + window.scrollX })
+                  setShowPriceTooltip(true)
+                }
+              }}
+              onMouseLeave={() => setShowPriceTooltip(false)}>
+              {item.precioUnitario ? fmt(parseFloat(item.precioUnitario)) : (
+                priceWarning
+                  ? <span className="text-yellow-400 text-xs">Sin precio ⚠</span>
+                  : <span className="text-surface-600">—</span>
+              )}
+            </div>
           )}
         </div>
         {priceWarning && showPriceTooltip && createPortal(
@@ -517,10 +537,10 @@ function ItemRow({ uid, item, index, onUpdate, onRemove, onClearError, onStockEr
         )}
       </td>
 
-      {/* Subtotal */}
+      {/* Subtotal — usa precio efectivo */}
       <td className="py-2 px-3 text-right w-36">
-        <span className="text-surface-200 text-sm font-mono">
-          {fmt((parseInt(item.cantidad) || 0) * (parseFloat(item.precioUnitario) || 0))}
+        <span className={`text-sm font-mono ${tienePromo ? 'text-emerald-300' : 'text-surface-200'}`}>
+          {fmt((parseInt(item.cantidad) || 0) * precioEfectivo)}
         </span>
       </td>
 
@@ -603,115 +623,11 @@ function MetodoPagoSelector({ metodoPago, onMetodoPago, excepcionFactor, onExcep
   )
 }
 
-// ─── Componente principal ───────────────────────────────────────────────────
-
-// ─── Generador PDF de presupuesto ──────────────────────────────────────────
-
-async function generarPDFPresupuesto(idPresupuesto) {
-  const { default: jsPDF }     = await import('jspdf')
-  const { default: autoTable } = await import('jspdf-autotable')
-
-  const pres = query('SELECT p.*, c.nombre AS cNombre, c.apellido AS cApellido, c.cuit, c.telefono, c.mail FROM Presupuesto p JOIN Cliente c ON c.idCliente = p.idCliente WHERE p.idPresupuesto = ?', [idPresupuesto])[0]
-  if (!pres) return
-
-  const detalles = query(`
-    SELECT dp.*, pr.nombre AS nombreProducto
-    FROM DetallePresupuesto dp
-    LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
-    WHERE dp.idPresupuesto = ?
-    ORDER BY dp.idDetalle
-  `, [idPresupuesto])
-
-  const metodoLabel = { efectivo:'Efectivo', transferencia:'Transferencia', cc15:'CC 15 días', cc30:'CC 30 días' }
-  const fmtFecha = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${d}/${m}/${y}` }
-
-  const doc  = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
-  const PW   = 210
-  const ML   = 14
-
-  // Encabezado naranja
-  doc.setFillColor(200, 200, 200)
-  doc.rect(0, 0, PW, 18, 'F')
-  doc.setFontSize(13); doc.setFont('helvetica', 'bold'); doc.setTextColor(50,50,50)
-  doc.text('CLAUDIO RER GROUP', ML, 12)
-
-  // Datos cabecera
-  doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(50,50,50)
-  doc.text(`PRESUPUESTO #${idPresupuesto}`, ML, 28)
-  doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(100,100,100)
-  doc.text(`Fecha: ${fmtFecha(pres.fecha)}`, ML, 34)
-  doc.text(`Método de pago: ${metodoLabel[pres.metodoPago] ?? pres.metodoPago}`, ML, 39)
-
-  // Datos cliente
-  doc.setFontSize(9); doc.setFont('helvetica','bold'); doc.setTextColor(50,50,50)
-  doc.text('CLIENTE', PW - ML - 70, 26)
-  doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(100,100,100)
-  doc.text(`${pres.cNombre} ${pres.cApellido}`, PW - ML - 70, 32)
-  if (pres.cuit)    doc.text(`CUIT: ${pres.cuit}`,       PW - ML - 70, 37)
-  if (pres.telefono) doc.text(`Tel: ${pres.telefono}`,    PW - ML - 70, 42)
-  if (pres.mail)    doc.text(pres.mail,                   PW - ML - 70, 47)
-
-  // Tabla de ítems
-  autoTable(doc, {
-    startY: 55,
-    margin: { left: ML, right: ML },
-    head: [['Producto', 'Medida', 'Cant.', 'Precio Unit.', 'Subtotal']],
-    body: detalles.map(d => [
-      d.nombreProducto ?? `#${d.idProducto}`,
-      d.medida ?? '—',
-      d.cantidad,
-      fmt(d.precioUnitario),
-      fmt(d.subtotal),
-    ]),
-    styles:     { fontSize: 8, cellPadding: 2.5, textColor: [50,50,50] },
-    headStyles: { fillColor: [200,200,200], textColor: [60,60,60], fontStyle: 'bold' },
-    alternateRowStyles: { fillColor: [245,245,245] },
-    columnStyles: {
-      0: { cellWidth: 'auto' },
-      1: { cellWidth: 22, halign: 'center' },
-      2: { cellWidth: 16, halign: 'center' },
-      3: { cellWidth: 34, halign: 'right' },
-      4: { cellWidth: 34, halign: 'right' },
-    },
-  })
-
-  const finalY = doc.lastAutoTable.finalY + 6
-
-  // Totales
-  doc.setDrawColor(220,220,220); doc.line(ML, finalY, PW - ML, finalY)
-  doc.setFontSize(8.5); doc.setFont('helvetica','normal'); doc.setTextColor(100,100,100)
-  doc.text('Subtotal (precio lista):', PW - ML - 70, finalY + 7)
-  doc.setFont('helvetica','normal'); doc.setTextColor(50,50,50)
-  doc.text(fmt(pres.montoOriginal), PW - ML, finalY + 7, { align: 'right' })
-
-  const ajuste = pres.monto - pres.montoOriginal
-  if (ajuste !== 0) {
-    // Calcular el porcentaje real a partir del factor aplicado
-    const factorAplicado = pres.montoOriginal > 0 ? pres.monto / pres.montoOriginal : 1
-    const pctDiff = ((factorAplicado - 1) * 100)
-    const pctLabel = pctDiff < 0
-      ? `${Math.abs(pctDiff).toFixed(1)}% descuento`
-      : `${pctDiff.toFixed(1)}% recargo`
-    doc.setFontSize(8.5); doc.setTextColor(100,100,100)
-    doc.text(`Ajuste (${pctLabel}):`, PW - ML - 70, finalY + 13)
-    doc.setTextColor(50,50,50)
-    doc.text(`${ajuste < 0 ? '- ' : '+ '}${fmt(Math.abs(ajuste))}`, PW - ML, finalY + 13, { align: 'right' })
-  }
-
-  doc.setFillColor(200,200,200)
-  doc.roundedRect(ML, finalY + 18, PW - ML*2, 12, 2, 2, 'F')
-  doc.setFontSize(10); doc.setFont('helvetica','bold'); doc.setTextColor(50,50,50)
-  doc.text('TOTAL', ML + 4, finalY + 26)
-  doc.text(fmt(pres.monto), PW - ML - 4, finalY + 26, { align: 'right' })
-
-  doc.save(`Presupuesto_${idPresupuesto}_${pres.cNombre}_${pres.cApellido}.pdf`)
-}
 
 const ITEM_EMPTY = () => ({ _uid: Math.random().toString(36).slice(2), idProducto: '', nombreProducto: '', cantidad: 1, precioUnitario: 0, medida: null })
 
 export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVerHistorial }) {
   const navigate = useNavigate()
-  // ── Modo edición: cargar datos existentes ──
   const modoEdicion = !!presupuestoEditar
 
   function cargarDatosEdicion() {
@@ -741,7 +657,6 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
 
     const esExcepcionDB = pres.esExcepcion === 1
     const factorDB = pres.montoOriginal > 0 ? pres.monto / pres.montoOriginal : 1
-    // Convertir factor → porcentaje para el campo de excepción: factor=0.92 → pct='8'
     const pctDB = esExcepcionDB ? String(((1 - factorDB) * 100).toFixed(4).replace(/\.?0+$/, '')) : ''
 
     const itemsDB = detalles.map(d => ({
@@ -774,16 +689,23 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
   const [guardado,           setGuardado]            = useState(null)
   const [error,              setError]               = useState('')
   const [toast,              setToast]               = useState('')
-  const [stockErrors,        setStockErrors]         = useState({})  // { idx: bool }
+  const [stockErrors,        setStockErrors]         = useState({})
 
   const esExcepcion = metodoPago === 'excepcion'
   const factorReal  = esExcepcion
     ? excepcionFactor
     : (METODOS_BASE.find(m => m.value === metodoPago)?.factor ?? 1)
 
-  const subtotalOriginal = items.reduce((acc, it) =>
-    acc + (parseInt(it.cantidad) || 0) * (parseFloat(it.precioUnitario) || 0), 0)
-  const totalFinal = subtotalOriginal * factorReal
+  // ── Aplicar promociones al carrito actual ──
+  // Se recalcula en cada render para reflejar cambios de ítems y cantidad en tiempo real.
+  const itemsConPromo = aplicarPromociones(items)
+
+  // ── Totales con soporte de promos ──
+  const { subtotalSinPromo, subtotalConPromo, ahorro, totalFinal } =
+    calcularTotales(itemsConPromo, factorReal)
+
+  // Alias para retrocompatibilidad con la pantalla de éxito y el guardar()
+  const subtotalOriginal = subtotalSinPromo
 
   function updateItem(uid, key, val) {
     setItems(prev => prev.map(it => it._uid === uid ? { ...it, [key]: val } : it))
@@ -811,7 +733,6 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
       if (existe.tieneMedidas && !it.medida) { setError(`Seleccioná una medida para el producto ID ${it.idProducto}.`); return }
     }
 
-    // Verificar que todos los ítems tengan precio definido
     for (const it of validItems) {
       if (!parseFloat(it.precioUnitario)) {
         setError(`El producto "${it.nombreProducto || 'ID ' + it.idProducto}" no tiene precio definido. Asignalo desde Inventario.`)
@@ -819,7 +740,6 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
       }
     }
 
-    // Verificar stock suficiente para todos los ítems
     for (const it of validItems) {
       const prod = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(it.idProducto)])[0]
       if (!prod) continue
@@ -837,54 +757,55 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
     }
 
     const fecha = today()
-    // Para excepción guardamos el sub-método base en la columna metodoPago de la DB
     const metodoDb = esExcepcion ? excepcionSubMetodo : metodoPago
+
+    // Mapear items con sus datos de promo para persistir snapshots
+    const itemsConPromoValidos = itemsConPromo.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
 
     let presupuestoReal
 
     if (modoEdicion) {
-      // ── UPDATE: sobreescribir el presupuesto existente ──
       run(
         `UPDATE Presupuesto SET idCliente=?, nombreCliente=?, apellidoCliente=?, metodoPago=?, montoOriginal=?, monto=?, esExcepcion=? WHERE idPresupuesto=?`,
-        [cliente.idCliente, cliente.nombre, cliente.apellido, metodoDb, subtotalOriginal, totalFinal, esExcepcion ? 1 : 0, presupuestoEditar]
+        [cliente.idCliente, cliente.nombre, cliente.apellido, metodoDb, subtotalSinPromo, totalFinal, esExcepcion ? 1 : 0, presupuestoEditar]
       )
-      // Reemplazar todos los detalles
       run(`DELETE FROM DetallePresupuesto WHERE idPresupuesto = ?`, [presupuestoEditar])
-      for (const it of validItems) {
-        const precio   = parseFloat(it.precioUnitario) || 0
-        const cantidad = parseInt(it.cantidad)
+      for (const it of itemsConPromoValidos) {
+        const precio       = parseFloat(it.precioUnitario) || 0
+        const precioFinal  = it.precioConPromo != null ? it.precioConPromo : precio
+        const cantidad     = parseInt(it.cantidad)
         run(
-          `INSERT INTO DetallePresupuesto (idPresupuesto, idProducto, nombreProducto, medida, cantidad, precioUnitario, subtotal) VALUES (?,?,?,?,?,?,?)`,
-          [presupuestoEditar, parseInt(it.idProducto), it.nombreProducto || null, it.medida || null, cantidad, precio, cantidad * precio]
+          `INSERT INTO DetallePresupuesto (idPresupuesto, idProducto, nombreProducto, medida, cantidad, precioUnitario, subtotal, precioConPromo, idPromocion) VALUES (?,?,?,?,?,?,?,?,?)`,
+          [presupuestoEditar, parseInt(it.idProducto), it.nombreProducto || null, it.medida || null,
+           cantidad, precio, cantidad * precioFinal,
+           it.precioConPromo ?? null, it.idPromocion ?? null]
         )
       }
       presupuestoReal = presupuestoEditar
-      // Volver al historial/detalle directamente
       if (onEditarVolver) { onEditarVolver(presupuestoReal); return }
     } else {
-      // ── INSERT: presupuesto nuevo ──
       const idPresupuesto = run(
         `INSERT INTO Presupuesto (idCliente, nombreCliente, apellidoCliente, fecha, metodoPago, montoOriginal, monto, estado, esExcepcion) VALUES (?,?,?,?,?,?,?,'borrador',?)`,
-        [cliente.idCliente, cliente.nombre, cliente.apellido, fecha, metodoDb, subtotalOriginal, totalFinal, esExcepcion ? 1 : 0]
+        [cliente.idCliente, cliente.nombre, cliente.apellido, fecha, metodoDb, subtotalSinPromo, totalFinal, esExcepcion ? 1 : 0]
       )
-      // Verificamos leyendo el ID real de la DB por si last_insert_rowid fue afectado
       presupuestoReal = query('SELECT MAX(idPresupuesto) as id FROM Presupuesto WHERE idCliente = ? AND fecha = ?', [cliente.idCliente, fecha])[0]?.id ?? idPresupuesto
 
-      for (const it of validItems) {
-        const precio   = parseFloat(it.precioUnitario) || 0
-        const cantidad = parseInt(it.cantidad)
+      for (const it of itemsConPromoValidos) {
+        const precio      = parseFloat(it.precioUnitario) || 0
+        const precioFinal = it.precioConPromo != null ? it.precioConPromo : precio
+        const cantidad    = parseInt(it.cantidad)
         run(
-          `INSERT INTO DetallePresupuesto (idPresupuesto, idProducto, nombreProducto, medida, cantidad, precioUnitario, subtotal) VALUES (?,?,?,?,?,?,?)`,
-          [idPresupuesto, parseInt(it.idProducto), it.nombreProducto || null, it.medida || null, cantidad, precio, cantidad * precio]
+          `INSERT INTO DetallePresupuesto (idPresupuesto, idProducto, nombreProducto, medida, cantidad, precioUnitario, subtotal, precioConPromo, idPromocion) VALUES (?,?,?,?,?,?,?,?,?)`,
+          [idPresupuesto, parseInt(it.idProducto), it.nombreProducto || null, it.medida || null,
+           cantidad, precio, cantidad * precioFinal,
+           it.precioConPromo ?? null, it.idPromocion ?? null]
         )
       }
     }
 
-    // El saldo CC se crea solo cuando el presupuesto sea APROBADO desde Historial
     const esCuenta = metodoPago === 'cc15' || metodoPago === 'cc30' ||
                      (esExcepcion && (excepcionSubMetodo === 'cc15' || excepcionSubMetodo === 'cc30'))
 
-    // Capturamos todos los datos necesarios para la pantalla de éxito ANTES de resetear
     const metodoLabel = esExcepcion
       ? `Excepción (${METODOS_BASE.find(m => m.value === excepcionSubMetodo)?.label})`
       : METODOS_BASE.find(m => m.value === metodoPago)?.label ?? metodoPago
@@ -1005,7 +926,17 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
             </thead>
             <tbody>
               {items.map((item, idx) => (
-                <ItemRow key={item._uid} uid={item._uid} item={item} index={idx} onUpdate={updateItem} onRemove={removeItem} onClearError={() => setError('')} onStockError={handleStockError} />
+                <ItemRow
+                  key={item._uid}
+                  uid={item._uid}
+                  item={item}
+                  itemConPromo={itemsConPromo[idx]}
+                  index={idx}
+                  onUpdate={updateItem}
+                  onRemove={removeItem}
+                  onClearError={() => setError('')}
+                  onStockError={handleStockError}
+                />
               ))}
             </tbody>
           </table>
@@ -1031,18 +962,36 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
       <Card className="p-6">
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
           <div className="space-y-2 text-sm font-body">
+
+            {/* Precio lista */}
             <div className="flex justify-between gap-12">
               <span className="text-surface-400">Subtotal (precio lista):</span>
-              <span className="text-surface-200 font-mono">{fmt(subtotalOriginal)}</span>
+              <span className="text-surface-200 font-mono">{fmt(subtotalSinPromo)}</span>
             </div>
+
+            {/* Ahorro por promociones — solo si hay diferencia */}
+            {ahorro > 0 && (
+              <div className="flex justify-between gap-12 items-center">
+                <span className="flex items-center gap-1.5 text-emerald-400">
+                  <Tag size={12} />
+                  Ahorro por promociones:
+                </span>
+                <span className="text-emerald-400 font-mono font-medium">
+                  − {fmt(ahorro)}
+                </span>
+              </div>
+            )}
+
+            {/* Ajuste por método de pago — se aplica sobre el subtotal ya promociado */}
             <div className="flex justify-between gap-12">
               <span className="text-surface-400">Ajuste ({metodoLabel}):</span>
               <span className={`font-mono font-medium ${factorReal < 1 ? 'text-emerald-400' : factorReal > 1 ? 'text-red-400' : 'text-surface-400'}`}>
                 {factorReal === 1 ? '—' : factorReal < 1
-                  ? `- ${fmt(subtotalOriginal - totalFinal)}`
-                  : `+ ${fmt(totalFinal - subtotalOriginal)}`}
+                  ? `- ${fmt(subtotalConPromo - totalFinal)}`
+                  : `+ ${fmt(totalFinal - subtotalConPromo)}`}
               </span>
             </div>
+
             <div className="border-t border-surface-700 pt-2 flex justify-between gap-12">
               <span className="text-white font-semibold">Total a pagar:</span>
               <span className="text-brand-400 font-mono font-bold text-lg">{fmt(totalFinal)}</span>
@@ -1050,7 +999,6 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
           </div>
 
           <div className="flex flex-col gap-2 items-end">
-            {/* Área de error con altura reservada — el botón nunca se mueve */}
             <div className="h-9 flex items-center justify-end">
               {error && (
                 <div className="flex items-center gap-2 text-red-400 text-xs bg-red-500/10 border border-red-500/30

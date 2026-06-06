@@ -2,7 +2,7 @@
 import { Link } from 'react-router-dom'
 import {
   FileText, Clock, Package, Receipt,
-  BarChart2, ShoppingCart, Wallet, ArrowRight, Settings2
+  BarChart2, ShoppingCart, Wallet, ArrowRight, Tag
 } from 'lucide-react'
 import { useEffect, useState, useCallback } from 'react'
 import { query } from '../lib/database'
@@ -58,11 +58,11 @@ const SECTIONS = [
     accent:      'from-yellow-500 to-yellow-600',
   },
   {
-    to:          '/abmc',
-    icon:        Settings2,
-    label:       'ABMC',
-    description: 'Administración completa de clientes, productos, egresos y más.',
-    accent:      'from-surface-400 to-surface-500',
+    to:          '/promociones',
+    icon:        Tag,
+    label:       'Promociones',
+    description: 'Creá y gestioná promociones, descuentos especiales y ofertas activas.',
+    accent:      'from-orange-500 to-orange-600',
   },
 ]
 

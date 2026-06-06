@@ -107,9 +107,13 @@ function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
 
   if (!open) return null
 
-  const totalPaginas = Math.ceil(productos.length / PAGE_SIZE)
+  const MAX_PRODUCTOS = 180
+  const productosMostrados = productos.slice(0, MAX_PRODUCTOS)
+  const hayMas = productos.length > MAX_PRODUCTOS
+
+  const totalPaginas = Math.ceil(productosMostrados.length / PAGE_SIZE)
   const inicio       = (pagina - 1) * PAGE_SIZE
-  const pagItems     = productos.slice(inicio, inicio + PAGE_SIZE)
+  const pagItems     = productosMostrados.slice(inicio, inicio + PAGE_SIZE)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -125,7 +129,7 @@ function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
               Artículos más vendidos
             </h2>
             <p className="text-surface-500 text-xs font-body mt-0.5">
-              {desde} → {hasta} · {productos.length} producto{productos.length !== 1 ? 's' : ''}
+              {desde} → {hasta} · {hayMas ? `Mostrando los 180 más vendidos de ${productos.length}` : `${productos.length} productos`}
             </p>
           </div>
           <button onClick={onClose}
@@ -198,7 +202,7 @@ function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
         {totalPaginas > 1 && (
           <div className="flex items-center justify-between px-6 py-4 border-t border-surface-700 flex-shrink-0">
             <span className="text-surface-500 text-xs font-body">
-              Página {pagina} de {totalPaginas} · {productos.length} artículos
+              Página {pagina} de {totalPaginas} · {productosMostrados.length} artículos
             </span>
             <div className="flex items-center gap-1">
               <button onClick={() => setPagina(1)} disabled={pagina === 1}
@@ -372,14 +376,60 @@ function calcularMetricas(desde, hasta) {
   m.totalPresupuestos = presupuestosPeriodo.length
   m.ticketPromedio    = m.totalPresupuestos ? m.facturadoTotal / m.totalPresupuestos : 0
 
-  // Descuentos = montoOriginal > monto (efectivo/transf con precio especial)
-  m.descuentosOtorgados = presupuestosPeriodo.reduce((a, p) => {
-    const diff = (p.montoOriginal ?? 0) - p.monto
+  // ── Cálculo de descuentos ────────────────────────────────────────────────
+  // DetallePresupuesto.precioUnitario = precio de lista del producto al momento del presupuesto
+  // DetallePresupuesto.precioConPromo = precio efectivo con promo (null si no hubo promo)
+  // DetallePresupuesto.subtotal       = (precioConPromo ?? precioUnitario) * cantidad
+  // Presupuesto.montoOriginal         = suma de subtotales (ya incluye descuentos de promo)
+  // Presupuesto.monto                 = montoOriginal * factor método de pago
+  //
+  // Por lo tanto:
+  //   precio lista por pres  = SUM(dp.precioUnitario * dp.cantidad)
+  //   subtotal con promos    = SUM(dp.subtotal)  ≡  pres.montoOriginal
+  //   descuentosPromos       = precio lista - subtotal con promos
+  //   descuentosMetodoPago   = subtotal con promos - monto final  (solo si monto < subtotalConPromo)
+  //   recargosCC             = monto final - subtotal con promos  (solo si monto > subtotalConPromo)
+  //   descuentosOtorgados    = precio lista - monto final
+
+  // Subtotal con promos aplicadas por presupuesto (antes del factor de método de pago)
+  const subtotalConPromosPorPres = presupuestosPeriodo.length > 0 ? query(`
+    SELECT dp.idPresupuesto,
+           SUM(dp.subtotal) AS subtotalConPromos
+    FROM DetallePresupuesto dp
+    WHERE dp.idPresupuesto IN (${presupuestosPeriodo.map(() => '?').join(',')})
+    GROUP BY dp.idPresupuesto
+  `, presupuestosPeriodo.map(p => p.idPresupuesto)) : []
+
+  const mapaSubtotal = Object.fromEntries(
+    subtotalConPromosPorPres.map(r => [r.idPresupuesto, r.subtotalConPromos ?? 0])
+  )
+
+  // montoOriginal = precio de lista puro (sin promos, sin método de pago)
+  // mapaSubtotal  = subtotal con promos (sin método de pago)
+  // monto         = total final (con promos + método de pago)
+
+  m.descuentosPromos = presupuestosPeriodo.reduce((a, p) => {
+    const lista       = p.montoOriginal ?? p.monto
+    const conPromos   = mapaSubtotal[p.idPresupuesto] ?? lista
+    const diff = lista - conPromos
     return a + (diff > 0 ? diff : 0)
   }, 0)
-  // Recargos = monto > montoOriginal (CC con interés)
+
+  m.descuentosMetodoPago = presupuestosPeriodo.reduce((a, p) => {
+    const conPromos = mapaSubtotal[p.idPresupuesto] ?? (p.montoOriginal ?? p.monto)
+    const diff = conPromos - p.monto
+    return a + (diff > 0 ? diff : 0)
+  }, 0)
+
   m.recargosCC = presupuestosPeriodo.reduce((a, p) => {
-    const diff = p.monto - (p.montoOriginal ?? 0)
+    const conPromos = mapaSubtotal[p.idPresupuesto] ?? (p.montoOriginal ?? p.monto)
+    const diff = p.monto - conPromos
+    return a + (diff > 0 ? diff : 0)
+  }, 0)
+
+  // Total combinado (precio lista → monto final)
+  m.descuentosOtorgados = presupuestosPeriodo.reduce((a, p) => {
+    const diff = (p.montoOriginal ?? p.monto) - p.monto
     return a + (diff > 0 ? diff : 0)
   }, 0)
 
@@ -663,7 +713,7 @@ const RANGOS = [
 
 export default function Estadisticas() {
   const [mostrarExacto, setMostrarExacto] = useState(false)
-  const [rangoIdx,  setRangoIdx]  = useState(1)
+  const [rangoIdx,  setRangoIdx]  = useState(0)
   const [desdeCustom, setDesdeCustom] = useState('')
   const [hastaCustom, setHastaCustom] = useState(today())
   const [metricas,  setMetricas]  = useState(null)
@@ -731,6 +781,13 @@ export default function Estadisticas() {
               <input type="date" value={hastaCustom} onChange={e => setHastaCustom(e.target.value)}
                 className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
                            font-body focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+              <button
+                onClick={() => { setRangoIdx(0); setDesdeCustom(''); setHastaCustom(today()) }}
+                className="px-3 py-2 rounded-xl text-sm font-body border bg-surface-700 border-surface-600
+                           text-surface-400 hover:border-red-500/50 hover:text-red-400 transition-all"
+              >
+                Limpiar Filtros
+              </button>
             </div>
           )}
         </div>
@@ -757,7 +814,7 @@ export default function Estadisticas() {
         <KpiCard icon={Clock}       label="Saldos Pendientes CC"    value={formatoMonto(m.pendienteCC)}       color="yellow"
           sub="Saldos sin cobrar" />
         <KpiCard icon={Tag}         label="Descuentos dados" value={formatoMonto(m.descuentosOtorgados)} color="yellow"
-          sub={`${pct(m.descuentosOtorgados, m.facturadoTotal)} del facturado`} />
+          sub={`${pct(m.descuentosOtorgados, m.facturadoTotal + m.descuentosOtorgados - m.recargosCC)} del precio de lista`} />
         <KpiCard icon={AlertTriangle} label="Stock crítico" color="yellow"
           value={m.cantidadStockCritico}
           sub="productos bajo punto de repo." />
@@ -774,36 +831,22 @@ export default function Estadisticas() {
           sub="en el período" />
       </div>
 
-      {/* ── Clientes recurrentes vs nuevos + Egresos por categoría ── */}
+      {/* ── 1. Métodos de Pago + Egresos por categoría ── */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Card className="p-6">
           <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
-            <Repeat size={15} className="text-brand-500" />
-            Clientes recurrentes vs. nuevos
+            <CreditCard size={15} className="text-brand-500" />
+            Métodos de Pago
           </h3>
-          {m.clientesUnicos === 0 ? (
-            <p className="text-surface-500 text-sm font-body">Sin datos en el período.</p>
-          ) : (
-            <>
-              <GraficoDonaGenerico
-                datos={[
-                  { label: 'Recurrentes', valor: m.clientesRecurrentes },
-                  { label: 'Nuevos',      valor: m.clientesNuevos },
-                ]}
-                colores={['#10b981','#3b82f6']}
-              />
-              <div className="mt-4 grid grid-cols-2 gap-3">
-                <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3 text-center">
-                  <p className="text-emerald-400 font-mono font-bold text-2xl">{m.clientesRecurrentes}</p>
-                  <p className="text-surface-400 text-xs font-body mt-1">Recurrentes</p>
-                </div>
-                <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-3 text-center">
-                  <p className="text-blue-400 font-mono font-bold text-2xl">{m.clientesNuevos}</p>
-                  <p className="text-surface-400 text-xs font-body mt-1">Nuevos</p>
-                </div>
+          <GraficoDona datos={m.mixMetodos} />
+          <div className="mt-4 space-y-2">
+            {m.mixMetodos.map(mp => (
+              <div key={mp.value} className="flex justify-between text-xs font-body">
+                <span className="text-surface-400">{mp.label}</span>
+                <span className="text-white font-mono">{fmt(mp.monto)}</span>
               </div>
-            </>
-          )}
+            ))}
+          </div>
         </Card>
 
         <Card className="p-6">
@@ -831,105 +874,6 @@ export default function Estadisticas() {
         </Card>
       </div>
 
-      {/* ── Top categorías + Top proveedores ── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card className="p-6">
-          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
-            <Layers size={15} className="text-brand-500" />
-            Ventas por categoría de producto
-          </h3>
-          {m.topCategorias.length === 0 ? (
-            <p className="text-surface-500 text-sm font-body">Sin ventas en el período.</p>
-          ) : (
-            <div className="space-y-3">
-              {m.topCategorias.map((cat, i) => (
-                <BarraH key={i}
-                  label={`${i+1}. ${cat.nombre}`}
-                  value={cat.monto}
-                  max={m.topCategorias[0]?.monto ?? 1}
-                  sublabel={`${cat.unidades} u.`}
-                  color={i === 0 ? '#8b5cf6' : i < 3 ? '#a78bfa' : '#6b7280'}
-                />
-              ))}
-            </div>
-          )}
-        </Card>
-
-        <Card className="p-6">
-          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
-            <Truck size={15} className="text-brand-500" />
-            Top proveedores por compras
-          </h3>
-          {m.topProveedores.length === 0 ? (
-            <p className="text-surface-500 text-sm font-body">Sin pedidos en el período.</p>
-          ) : (
-            <div className="space-y-3">
-              {m.topProveedores.map((prov, i) => (
-                <BarraH key={i}
-                  label={`${i+1}. ${prov.nombre}`}
-                  value={prov.monto}
-                  max={m.topProveedores[0]?.monto ?? 1}
-                  sublabel={`${prov.pedidos} ped.`}
-                  color={i === 0 ? '#ec4899' : i < 3 ? '#f472b6' : '#6b7280'}
-                />
-              ))}
-            </div>
-          )}
-        </Card>
-      </div>
-
-      {/* ── Dos columnas: mix de pago + saldos por vencer ── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card className="p-6">
-          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
-            <CreditCard size={15} className="text-brand-500" />
-            Mix de métodos de pago
-          </h3>
-          <GraficoDona datos={m.mixMetodos} />
-          <div className="mt-4 space-y-2">
-            {m.mixMetodos.map(mp => (
-              <div key={mp.value} className="flex justify-between text-xs font-body">
-                <span className="text-surface-400">{mp.label}</span>
-                <span className="text-white font-mono">{fmt(mp.monto)}</span>
-              </div>
-            ))}
-          </div>
-        </Card>
-
-        <Card className="p-6">
-          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
-            <AlertTriangle size={15} className="text-yellow-500" />
-            Saldos pendientes globales
-          </h3>
-          <div className="space-y-3">
-            {[
-              { label: 'Vencidos',              value: m.saldosVencidos,    color: 'text-red-400' },
-              { label: 'Vencen en 1–15 días',  value: m.saldosPorVencer15, color: 'text-yellow-400' },
-              { label: 'Vencen en 16–30 días', value: m.saldosPorVencer30, color: 'text-brand-400' },
-            ].map(({ label, value, color }) => (
-              <div key={label} className="flex justify-between items-center py-2 border-b border-surface-700/50 last:border-0">
-                <span className="text-surface-300 text-sm font-body">{label}</span>
-                <span className={`font-mono font-bold text-sm ${color}`}>{fmt(value)}</span>
-              </div>
-            ))}
-          </div>
-
-          {m.proxSaldos.length > 0 && (
-            <div className="mt-4">
-              <p className="text-surface-500 text-xs uppercase tracking-widest font-body mb-2">Próximos vencimientos</p>
-              <div className="space-y-1">
-                {m.proxSaldos.map((s, i) => (
-                  <div key={i} className="flex justify-between text-xs font-body">
-                    <span className="text-surface-400 truncate">{s.nombre} {s.apellido}</span>
-                    <span className="text-white font-mono ml-2">{fmt(s.monto)}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </Card>
-      </div>
-
       {/* ── Modal top artículos ── */}
       <ModalTopProductos
         open={modalProductos}
@@ -939,7 +883,7 @@ export default function Estadisticas() {
         hasta={hasta}
       />
 
-      {/* ── Top productos y clientes ── */}
+      {/* ── 2. Top artículos más vendidos + Top clientes ── */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Card className="p-6 overflow-hidden">
           <div
@@ -999,23 +943,141 @@ export default function Estadisticas() {
         </Card>
       </div>
 
-      {/* ── Resumen de descuentos y recargos ── */}
+      {/* ── 3. Saldos pendientes globales + Clientes recurrentes vs. nuevos ── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card className="p-6">
+          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
+            <AlertTriangle size={15} className="text-yellow-500" />
+            Saldos pendientes globales
+          </h3>
+          <div className="space-y-3">
+            {[
+              { label: 'Vencidos',              value: m.saldosVencidos,    color: 'text-red-400' },
+              { label: 'Vencen en 1–15 días',  value: m.saldosPorVencer15, color: 'text-yellow-400' },
+              { label: 'Vencen en 16–30 días', value: m.saldosPorVencer30, color: 'text-brand-400' },
+            ].map(({ label, value, color }) => (
+              <div key={label} className="flex justify-between items-center py-2 border-b border-surface-700/50 last:border-0">
+                <span className="text-surface-300 text-sm font-body">{label}</span>
+                <span className={`font-mono font-bold text-sm ${color}`}>{fmt(value)}</span>
+              </div>
+            ))}
+          </div>
+
+          {m.proxSaldos.length > 0 && (
+            <div className="mt-4">
+              <p className="text-surface-500 text-xs uppercase tracking-widest font-body mb-2">Próximos vencimientos</p>
+              <div className="space-y-1">
+                {m.proxSaldos.map((s, i) => (
+                  <div key={i} className="flex justify-between text-xs font-body">
+                    <span className="text-surface-400 truncate">{s.nombre} {s.apellido}</span>
+                    <span className="text-white font-mono ml-2">{fmt(s.monto)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </Card>
+
+        <Card className="p-6">
+          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
+            <Repeat size={15} className="text-brand-500" />
+            Clientes recurrentes vs. nuevos
+          </h3>
+          {m.clientesUnicos === 0 ? (
+            <p className="text-surface-500 text-sm font-body">Sin datos en el período.</p>
+          ) : (
+            <>
+              <GraficoDonaGenerico
+                datos={[
+                  { label: 'Recurrentes', valor: m.clientesRecurrentes },
+                  { label: 'Nuevos',      valor: m.clientesNuevos },
+                ]}
+                colores={['#10b981','#3b82f6']}
+              />
+              <div className="mt-4 grid grid-cols-2 gap-3">
+                <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3 text-center">
+                  <p className="text-emerald-400 font-mono font-bold text-2xl">{m.clientesRecurrentes}</p>
+                  <p className="text-surface-400 text-xs font-body mt-1">Recurrentes</p>
+                </div>
+                <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-3 text-center">
+                  <p className="text-blue-400 font-mono font-bold text-2xl">{m.clientesNuevos}</p>
+                  <p className="text-surface-400 text-xs font-body mt-1">Nuevos</p>
+                </div>
+              </div>
+            </>
+          )}
+        </Card>
+      </div>
+
+      {/* ── 4. Ventas por categoría de producto + Top proveedores ── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card className="p-6">
+          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
+            <Layers size={15} className="text-brand-500" />
+            Ventas por categoría de producto
+          </h3>
+          {m.topCategorias.length === 0 ? (
+            <p className="text-surface-500 text-sm font-body">Sin ventas en el período.</p>
+          ) : (
+            <div className="space-y-3">
+              {m.topCategorias.map((cat, i) => (
+                <BarraH key={i}
+                  label={`${i+1}. ${cat.nombre}`}
+                  value={cat.monto}
+                  max={m.topCategorias[0]?.monto ?? 1}
+                  sublabel={`${cat.unidades} u.`}
+                  color={i === 0 ? '#8b5cf6' : i < 3 ? '#a78bfa' : '#6b7280'}
+                />
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <Card className="p-6">
+          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
+            <Truck size={15} className="text-brand-500" />
+            Top proveedores por compras
+          </h3>
+          {m.topProveedores.length === 0 ? (
+            <p className="text-surface-500 text-sm font-body">Sin pedidos en el período.</p>
+          ) : (
+            <div className="space-y-3">
+              {m.topProveedores.map((prov, i) => (
+                <BarraH key={i}
+                  label={`${i+1}. ${prov.nombre}`}
+                  value={prov.monto}
+                  max={m.topProveedores[0]?.monto ?? 1}
+                  sublabel={`${prov.pedidos} ped.`}
+                  color={i === 0 ? '#ec4899' : i < 3 ? '#f472b6' : '#6b7280'}
+                />
+              ))}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* ── 5. Impacto de descuentos y recargos (full width) ── */}
       <Card className="p-6">
         <h3 className="font-body font-semibold text-white text-sm mb-4 flex items-center gap-2">
           <Tag size={15} className="text-brand-500" />
           Impacto de descuentos y recargos
         </h3>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
           <div className="bg-surface-700/40 rounded-xl p-4 text-center">
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Precio de lista total</p>
             <p className="font-mono font-bold text-white text-xl">
-              {fmt(m.facturadoTotal - m.recargosCC + m.descuentosOtorgados)}
+              {fmt(m.facturadoTotal + m.descuentosOtorgados - m.recargosCC)}
             </p>
           </div>
           <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4 text-center">
-            <p className="text-emerald-400 text-xs uppercase tracking-widest font-body mb-1">Descuentos otorgados</p>
-            <p className="font-mono font-bold text-emerald-400 text-xl">- {fmt(m.descuentosOtorgados)}</p>
-            <p className="text-surface-500 text-xs mt-1 font-body">Efectivo + Transferencia</p>
+            <p className="text-emerald-400 text-xs uppercase tracking-widest font-body mb-1">Desc. por promociones</p>
+            <p className="font-mono font-bold text-emerald-400 text-xl">- {fmt(m.descuentosPromos)}</p>
+            <p className="text-surface-500 text-xs mt-1 font-body">Promos de producto</p>
+          </div>
+          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4 text-center">
+            <p className="text-emerald-400 text-xs uppercase tracking-widest font-body mb-1">Desc. por método de pago</p>
+            <p className="font-mono font-bold text-emerald-400 text-xl">- {fmt(m.descuentosMetodoPago)}</p>
+            <p className="text-surface-500 text-xs mt-1 font-body">Efectivo · Transferencia</p>
           </div>
           <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 text-center">
             <p className="text-red-400 text-xs uppercase tracking-widest font-body mb-1">Recargos CC cobrados</p>
