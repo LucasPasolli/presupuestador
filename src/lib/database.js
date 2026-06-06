@@ -49,18 +49,11 @@ export async function initDB() {
   }
 
   runSchema()
+  runMigrations()   // ← migraciones aditivas sobre BDs ya existentes
   return db
 }
 
 // ─── Schema completo ─────────────────────────────────────────────────────────
-// Refleja el estado actual del modelo de datos.
-// Tipos elegidos para máxima compatibilidad con PostgreSQL / Supabase:
-//   · SERIAL PRIMARY KEY        → AUTOINCREMENT en SQLite; SERIAL en PG
-//   · NUMERIC(12,2)             → REAL en SQLite; NUMERIC en PG (sin pérdida de precisión)
-//   · BOOLEAN / 0|1             → INTEGER CHECK en SQLite; BOOLEAN en PG
-//   · DATE / TIMESTAMPTZ        → TEXT en SQLite; DATE/TIMESTAMPTZ en PG
-//
-// Los índices cubren las columnas usadas habitualmente en WHERE, JOIN y ORDER BY.
 
 function runSchema() {
 
@@ -85,8 +78,6 @@ function runSchema() {
   `)
 
   // ── Cliente ──────────────────────────────────────────────────────────────
-  // activo: soft-delete (1 = activo, 0 = inactivo).
-  // Preserva el historial de presupuestos sin exponer el cliente en búsquedas.
   db.run(`
     CREATE TABLE IF NOT EXISTS Cliente (
       idCliente      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,7 +95,6 @@ function runSchema() {
   db.run(`CREATE INDEX IF NOT EXISTS idx_cliente_activo ON Cliente(activo);`)
 
   // ── Producto ─────────────────────────────────────────────────────────────
-  // tieneMedidas: indica si el producto usa la tabla ProductoMedida para el stock.
   db.run(`
     CREATE TABLE IF NOT EXISTS Producto (
       idProducto      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,7 +111,6 @@ function runSchema() {
   db.run(`CREATE INDEX IF NOT EXISTS idx_producto_categoria ON Producto(idCategoria);`)
 
   // ── ProductoMedida ───────────────────────────────────────────────────────
-  // Stock por medida para productos que lo requieren (ej: rulimanes).
   db.run(`
     CREATE TABLE IF NOT EXISTS ProductoMedida (
       idMedida   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,9 +123,6 @@ function runSchema() {
   `)
 
   // ── Presupuesto ──────────────────────────────────────────────────────────
-  // nombreCliente / apellidoCliente: snapshot del cliente al momento de creación.
-  // Garantiza que renombrar o eliminar un cliente no afecte el historial ni el PDF.
-  // esExcepcion: indica precios fuera de la lista regular.
   db.run(`
     CREATE TABLE IF NOT EXISTS Presupuesto (
       idPresupuesto   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,8 +143,6 @@ function runSchema() {
   db.run(`CREATE INDEX IF NOT EXISTS idx_presupuesto_fecha   ON Presupuesto(fecha);`)
 
   // ── DetallePresupuesto ───────────────────────────────────────────────────
-  // nombreProducto: snapshot del nombre del producto.
-  // Garantiza que renombrar o eliminar un producto no destruya el dato histórico.
   db.run(`
     CREATE TABLE IF NOT EXISTS DetallePresupuesto (
       idDetalle      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,27 +161,21 @@ function runSchema() {
   db.run(`CREATE INDEX IF NOT EXISTS idx_detallepres_producto    ON DetallePresupuesto(idProducto);`)
 
   // ── Saldo ────────────────────────────────────────────────────────────────
-  // Registra saldos pendientes de presupuestos aprobados con cuenta corriente.
   db.run(`
     CREATE TABLE IF NOT EXISTS Saldo (
       idSaldo       INTEGER PRIMARY KEY AUTOINCREMENT,
       idPresupuesto INTEGER NOT NULL UNIQUE,
       idCliente     INTEGER NOT NULL,
       fechaInicio   TEXT    NOT NULL,
-      fechaFin      TEXT    NOT NULL,
-      fechaPago     TEXT,
-      monto         REAL    NOT NULL,
-      estado        TEXT    NOT NULL DEFAULT 'pendiente' CHECK(estado IN ('pendiente','pagado')),
+      fechaVto      TEXT,
+      monto         REAL    NOT NULL DEFAULT 0,
+      pagado        INTEGER NOT NULL DEFAULT 0 CHECK(pagado IN (0,1)),
       FOREIGN KEY (idPresupuesto) REFERENCES Presupuesto(idPresupuesto) ON DELETE CASCADE,
       FOREIGN KEY (idCliente)     REFERENCES Cliente(idCliente)         ON DELETE RESTRICT
     );
   `)
-  db.run(`CREATE INDEX IF NOT EXISTS idx_saldo_cliente ON Saldo(idCliente);`)
-  db.run(`CREATE INDEX IF NOT EXISTS idx_saldo_estado  ON Saldo(estado);`)
 
   // ── PedidoCompra ─────────────────────────────────────────────────────────
-  // nombreProveedor: snapshot del proveedor.
-  // Garantiza que eliminar un proveedor no haga desaparecer el nombre en el historial.
   db.run(`
     CREATE TABLE IF NOT EXISTS PedidoCompra (
       idPedido        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -218,7 +196,6 @@ function runSchema() {
   db.run(`CREATE INDEX IF NOT EXISTS idx_pedido_estadologistico ON PedidoCompra(estadoLogistico);`)
 
   // ── DetallePedidoCompra ──────────────────────────────────────────────────
-  // nombreProducto: snapshot del nombre del producto al momento del pedido.
   db.run(`
     CREATE TABLE IF NOT EXISTS DetallePedidoCompra (
       idDetallePedido INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -267,8 +244,6 @@ function runSchema() {
   db.run(`CREATE INDEX IF NOT EXISTS idx_ingreso_fecha ON Ingreso(fecha);`)
 
   // ── Inversion ─────────────────────────────────────────────────────────────
-  // estado: 'invertido' = capital activo, 'retirado' = capital retirado parcial/total.
-  // Los retiros se registran como filas con monto negativo y estado 'retirado'.
   db.run(`
     CREATE TABLE IF NOT EXISTS Inversion (
       idInversion INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -287,8 +262,6 @@ function runSchema() {
   if (catCount === 0) {
     db.run(`BEGIN TRANSACTION`)
 
-    // 1. Proveedores
-    // seedData usa "nombreComercio" pero el schema tiene "nombreComercial"
     for (const p of PROVEEDORES_SEED) {
       db.run(
         `INSERT INTO Proveedor (nombreFiscal, nombreComercial, identificacionTributaria, telefono, email)
@@ -297,14 +270,11 @@ function runSchema() {
       )
     }
 
-    // 2. Categorías únicas extraídas de los productos + "General" como fallback
     const categorias = ['General', ...new Set(PRODUCTOS_SEED.map(p => p.categoria).filter(Boolean))]
     for (const nombre of categorias) {
       db.run(`INSERT OR IGNORE INTO Categoria (nombre) VALUES (?)`, [nombre])
     }
 
-    // 3. Clientes
-    // seedData usa "domicilioComercio" pero el schema tiene "domicilio"
     for (const c of CLIENTES_SEED) {
       db.run(
         `INSERT INTO Cliente (nombre, apellido, cuit, domicilio, telefono, mail, apodo, nombreComercio, activo)
@@ -322,10 +292,6 @@ function runSchema() {
       )
     }
 
-    // 4. Productos
-    // Resolvemos idCategoria en tiempo de seed.
-    // proveedorIndex es el índice 0-based en PROVEEDORES_SEED; como los insertamos
-    // en orden y SQLite asigna AUTOINCREMENT desde 1, idProveedor = proveedorIndex + 1.
     for (const prod of PRODUCTOS_SEED) {
       const catNombre   = prod.categoria ?? 'General'
       const catResult   = db.exec(`SELECT idCategoria FROM Categoria WHERE nombre = ?`, [catNombre])
@@ -350,13 +316,64 @@ function runSchema() {
   }
 }
 
-// ─── Helpers de acceso ───────────────────────────────────────────────────────
+// ─── Migraciones aditivas ─────────────────────────────────────────────────────
+// Se ejecutan después del schema base, sobre BDs ya existentes.
+// Cada bloque es idempotente: usa IF NOT EXISTS o verifica columnas antes de alterar.
+
+function runMigrations() {
+
+  // ── M1: Tabla Promocion ────────────────────────────────────────────────────
+  // Soporta tres tipos de promo y tres alcances distintos.
+  // Las columnas idProducto e idCategoria son nullable según el alcance elegido.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS Promocion (
+      idPromocion  INTEGER PRIMARY KEY AUTOINCREMENT,
+      nombre       TEXT    NOT NULL,
+      descripcion  TEXT,
+      tipo         TEXT    NOT NULL CHECK(tipo IN ('porcentaje_producto','2x1','precio_fijo')),
+      alcance      TEXT    NOT NULL CHECK(alcance IN ('producto','categoria','global')),
+      idProducto   INTEGER,
+      idCategoria  INTEGER,
+      fechaInicio  TEXT    NOT NULL,
+      fechaFin     TEXT    NOT NULL,
+      valor        REAL,
+      activo       INTEGER NOT NULL DEFAULT 1 CHECK(activo IN (0,1)),
+      FOREIGN KEY (idProducto)  REFERENCES Producto(idProducto)   ON DELETE SET NULL,
+      FOREIGN KEY (idCategoria) REFERENCES Categoria(idCategoria) ON DELETE SET NULL
+    );
+  `)
+  db.run(`CREATE INDEX IF NOT EXISTS idx_promocion_activo      ON Promocion(activo);`)
+  db.run(`CREATE INDEX IF NOT EXISTS idx_promocion_fechas      ON Promocion(fechaInicio, fechaFin);`)
+  db.run(`CREATE INDEX IF NOT EXISTS idx_promocion_producto    ON Promocion(idProducto);`)
+  db.run(`CREATE INDEX IF NOT EXISTS idx_promocion_categoria   ON Promocion(idCategoria);`)
+
+  // ── M2: Columnas nuevas en DetallePresupuesto ─────────────────────────────
+  // SQLite no soporta ALTER TABLE ADD COLUMN IF NOT EXISTS directamente,
+  // pero sí ignora el error si la columna ya existe con el patrón try/catch implícito
+  // de sql.js. Usamos un SAVEPOINT para que el fallo no rompa la transacción externa.
+
+  _addColumnIfMissing('DetallePresupuesto', 'precioConPromo', 'REAL')
+  _addColumnIfMissing('DetallePresupuesto', 'idPromocion',    'INTEGER')
+}
 
 /**
- * Ejecuta una consulta SELECT y devuelve un array de objetos.
- * En la migración a Supabase reemplazar por:
- *   const { data, error } = await supabase.from('tabla').select(...)
+ * Agrega una columna a una tabla si todavía no existe.
+ * Usa SAVEPOINT para que el fallo (columna duplicada) sea silencioso.
  */
+function _addColumnIfMissing(tabla, columna, tipo) {
+  try {
+    db.run(`SAVEPOINT add_col`)
+    db.run(`ALTER TABLE ${tabla} ADD COLUMN ${columna} ${tipo}`)
+    db.run(`RELEASE SAVEPOINT add_col`)
+  } catch (_) {
+    // La columna ya existe → rollback del savepoint, continuar normalmente
+    db.run(`ROLLBACK TO SAVEPOINT add_col`)
+    db.run(`RELEASE SAVEPOINT add_col`)
+  }
+}
+
+// ─── Helpers de acceso ───────────────────────────────────────────────────────
+
 export function query(sql, params = []) {
   if (!db) throw new Error('BD no inicializada')
   const result = db.exec(sql, params)
@@ -367,14 +384,6 @@ export function query(sql, params = []) {
   )
 }
 
-/**
- * Ejecuta una sentencia INSERT / UPDATE / DELETE y devuelve el último rowid.
- * IMPORTANTE: se lee last_insert_rowid() ANTES de persistDB(), ya que
- * db.export() resetea ese valor a 0.
- *
- * En la migración a Supabase reemplazar por:
- *   const { data, error } = await supabase.from('tabla').insert(...).select()
- */
 export function run(sql, params = []) {
   if (!db) throw new Error('BD no inicializada')
   db.run(sql, params)

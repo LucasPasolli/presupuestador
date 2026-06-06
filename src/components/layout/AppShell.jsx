@@ -2,7 +2,7 @@
 import { NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, FileText, Clock, Package, Receipt,
-  BarChart2, ShoppingCart, Wallet, Settings2, LogOut,
+  BarChart2, ShoppingCart, Wallet, Settings2, LogOut, Tag,
 } from 'lucide-react'
 import { useAuth } from '../../lib/AuthContext'
 
@@ -15,6 +15,7 @@ const NAV_ITEMS = [
   { to: '/saldos',         icon: Wallet,           label: 'Saldos'         },
   { to: '/facturas',       icon: Receipt,          label: 'Facturas'       },
   { to: '/estadisticas',   icon: BarChart2,        label: 'Estadísticas'   },
+  { to: '/promociones',    icon: Tag,              label: 'Promociones'    },
   { to: '/abmc',           icon: Settings2,        label: 'ABMC'           },
 ]
 

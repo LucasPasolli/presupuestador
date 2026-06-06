@@ -3,118 +3,14 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import Presupuestador from './Presupuestador'
 import { query, run } from '../lib/database'
+import { generarPDFPresupuesto } from '../lib/pdfPresupuesto'
 import { Card, PageHeader, Button, Badge, Modal } from '../components/ui'
 import {
   Search, ChevronDown, ChevronUp, ArrowLeft, FileText,
-  Clock, CheckCircle2, XCircle, ThumbsUp, AlertCircle, Trash2, Download, Pencil, X, Wallet
+  Clock, CheckCircle2, XCircle, ThumbsUp, AlertCircle, Trash2, Download, Pencil, X, Wallet, Tag
 } from 'lucide-react'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
-
-// ─── Generador PDF (compartido con Presupuestador) ──────────────────────────
-
-async function generarPDFPresupuesto(idPresupuesto) {
-  const { default: jsPDF }     = await import('jspdf')
-  const { default: autoTable } = await import('jspdf-autotable')
-
-  const pres = query(`
-    SELECT p.*,
-           COALESCE(c.nombre,  p.nombreCliente)   AS cNombre,
-           COALESCE(c.apellido,p.apellidoCliente) AS cApellido,
-           c.cuit, c.telefono, c.mail
-    FROM Presupuesto p
-    LEFT JOIN Cliente c ON c.idCliente = p.idCliente
-    WHERE p.idPresupuesto = ?
-  `, [idPresupuesto])[0]
-  if (!pres) return
-
-  const detalles = query(`
-    SELECT dp.*,
-           COALESCE(dp.nombreProducto, pr.nombre, '(producto eliminado #' || dp.idProducto || ')') AS nombreProducto
-    FROM DetallePresupuesto dp
-    LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
-    WHERE dp.idPresupuesto = ?
-    ORDER BY dp.idDetalle
-  `, [idPresupuesto])
-
-  const metodoLabel = { efectivo:'Efectivo', transferencia:'Transferencia', cc15:'CC 15 días', cc30:'CC 30 días' }
-  const fmtFechaLocal = iso => { if(!iso) return '—'; const [y,m,d]=iso.split('-'); return `${d}/${m}/${y}` }
-
-  const doc  = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
-  const PW   = 210
-  const ML   = 14
-
-  doc.setFillColor(200, 200, 200)
-  doc.rect(0, 0, PW, 18, 'F')
-  doc.setFontSize(13); doc.setFont('helvetica', 'bold'); doc.setTextColor(50,50,50)
-  doc.text('CLAUDIO RER GROUP', ML, 12)
-
-  doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(50,50,50)
-  doc.text(`PRESUPUESTO #${idPresupuesto}`, ML, 28)
-  doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(100,100,100)
-  doc.text(`Fecha: ${fmtFechaLocal(pres.fecha)}`, ML, 34)
-  doc.text(`Método de pago: ${metodoLabel[pres.metodoPago] ?? pres.metodoPago}`, ML, 39)
-
-  doc.setFontSize(9); doc.setFont('helvetica','bold'); doc.setTextColor(50,50,50)
-  doc.text('CLIENTE', PW - ML - 70, 26)
-  doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(100,100,100)
-  doc.text(`${pres.cNombre} ${pres.cApellido}`, PW - ML - 70, 32)
-  if (pres.cuit)     doc.text(`CUIT: ${pres.cuit}`,    PW - ML - 70, 37)
-  if (pres.telefono) doc.text(`Tel: ${pres.telefono}`, PW - ML - 70, 42)
-  if (pres.mail)     doc.text(pres.mail,               PW - ML - 70, 47)
-
-  autoTable(doc, {
-    startY: 55,
-    margin: { left: ML, right: ML },
-    head: [['Producto', 'Medida', 'Cant.', 'Precio Unit.', 'Subtotal']],
-    body: detalles.map(d => [
-      d.nombreProducto ?? `#${d.idProducto}`,
-      d.medida ?? '—',
-      d.cantidad,
-      fmt(d.precioUnitario),
-      fmt(d.subtotal),
-    ]),
-    styles:     { fontSize: 8, cellPadding: 2.5, textColor: [50,50,50] },
-    headStyles: { fillColor: [200,200,200], textColor: [60,60,60], fontStyle: 'bold' },
-    alternateRowStyles: { fillColor: [245,245,245] },
-    columnStyles: {
-      0: { cellWidth: 'auto' },
-      1: { cellWidth: 22, halign: 'center' },
-      2: { cellWidth: 16, halign: 'center' },
-      3: { cellWidth: 34, halign: 'right' },
-      4: { cellWidth: 34, halign: 'right' },
-    },
-  })
-
-  const finalY = doc.lastAutoTable.finalY + 6
-
-  doc.setDrawColor(220,220,220); doc.line(ML, finalY, PW - ML, finalY)
-  doc.setFontSize(8.5); doc.setFont('helvetica','normal'); doc.setTextColor(100,100,100)
-  doc.text('Subtotal (precio lista):', PW - ML - 70, finalY + 7)
-  doc.setFont('helvetica','normal'); doc.setTextColor(50,50,50)
-  doc.text(fmt(pres.montoOriginal), PW - ML, finalY + 7, { align: 'right' })
-
-  const ajuste = pres.monto - pres.montoOriginal
-  if (ajuste !== 0) {
-    const factorAplicado = pres.montoOriginal > 0 ? pres.monto / pres.montoOriginal : 1
-    const pctDiff = ((factorAplicado - 1) * 100)
-    const pctLbl  = pctDiff < 0
-      ? `${Math.abs(pctDiff).toFixed(1)}% descuento`
-      : `${pctDiff.toFixed(1)}% recargo`
-    doc.setFontSize(8.5); doc.setTextColor(100,100,100)
-    doc.text(`Ajuste (${pctLbl}):`, PW - ML - 70, finalY + 13)
-    doc.setTextColor(50,50,50)
-    doc.text(`${ajuste < 0 ? '- ' : '+ '}${fmt(Math.abs(ajuste))}`, PW - ML, finalY + 13, { align: 'right' })
-  }
-
-  doc.setFillColor(200,200,200)
-  doc.roundedRect(ML, finalY + 18, PW - ML*2, 12, 2, 2, 'F')
-  doc.setFontSize(10); doc.setFont('helvetica','bold'); doc.setTextColor(50,50,50)
-  doc.text('TOTAL', ML + 4, finalY + 26)
-  doc.text(fmt(pres.monto), PW - ML - 4, finalY + 26, { align: 'right' })
-
-  doc.save(`Presupuesto_${idPresupuesto}_${pres.cNombre}_${pres.cApellido}.pdf`)
-}
 
 
 
@@ -206,15 +102,33 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
   const esExcepcion = pres.esExcepcion === 1
   const estado      = ESTADOS[pres.estado] ?? ESTADOS.borrador
   const metodo      = METODOS_PAGO[pres.metodoPago] ?? { label: pres.metodoPago, badge: 'gray' }
-  const ajuste      = pres.monto - pres.montoOriginal
   const puedeActuar = pres.estado === 'borrador' || pres.estado === 'aprobado'
 
+  // ── Factor real del MÉTODO DE PAGO ─────────────────────────────────────
+  // Fuente de verdad: factores fijos definidos en METODOS_BASE.
+  // Para excepciones, el factor se deriva de (monto / subtotalConPromo), donde
+  // subtotalConPromo = suma de detalles (ya con descuentos de promo aplicados).
+  // NO se usa pres.monto / pres.montoOriginal porque eso mezclaría promos + método.
+  const METODOS_FACTOR = {
+    efectivo:      0.95,
+    transferencia: 0.95,
+    cc15:          1.00,
+    cc30:          1.105,
+  }
 
-  // Factor real aplicado — siempre se calcula de los montos reales guardados.
-  // Esto es la fuente de verdad: si montoOriginal=100 y monto=92, factor=0.92 = 8% descuento.
-  // Para CC15 (precio de lista) montoOriginal === monto, factor = 1.00.
-  const factorReal = pres.montoOriginal > 0 ? pres.monto / pres.montoOriginal : 1
-  // Texto descriptivo del ajuste, siempre derivado del factor real
+  // subtotalConPromo calculado en tiempo de render (igual que en el bloque de Totales)
+  // Lo calculamos aquí para poder derivar factorReal antes del JSX.
+  const _subtotalConPromo = detalles.reduce((acc, d) => acc + (parseFloat(d.subtotal) || 0), 0)
+
+  let factorReal
+  if (esExcepcion) {
+    // Para excepción: factor = monto / subtotalConPromo (ajuste manual sobre subtotal ya con promos)
+    factorReal = _subtotalConPromo > 0 ? (parseFloat(pres.monto) || 0) / _subtotalConPromo : 1
+  } else {
+    // Para métodos estándar: siempre usamos el factor fijo del método
+    factorReal = METODOS_FACTOR[pres.metodoPago] ?? 1
+  }
+
   const ajusteLabel = pctLabel(factorReal)
 
   function cambiarEstado(nuevoEstado) {
@@ -378,8 +292,23 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
                         <td className="py-3 px-4 text-white font-body">{d.nombreProducto ?? `#${d.idProducto}`}</td>
                         <td className="py-3 px-4">{d.medida ? <Badge color="blue">{d.medida}</Badge> : <span className="text-surface-500 text-xs">—</span>}</td>
                         <td className="py-3 px-4 text-surface-200 font-mono text-center">{d.cantidad}</td>
-                        <td className="py-3 px-4 text-surface-200 font-mono">{fmt(d.precioUnitario)}</td>
-                        <td className="py-3 px-4 text-surface-200 font-mono font-medium">{fmt(d.subtotal)}</td>
+                        <td className="py-3 px-4">
+                          {d.precioConPromo != null ? (
+                            <div className="space-y-0.5">
+                              <div className="text-surface-500 text-xs font-mono line-through">{fmt(d.precioUnitario)}</div>
+                              <div className="text-emerald-400 text-sm font-mono font-semibold">{fmt(d.precioConPromo)}</div>
+                              <div className="flex items-center gap-1 mt-0.5">
+                                <Tag size={10} className="text-emerald-500 flex-shrink-0" />
+                                <span className="text-emerald-500 text-[10px] font-body">
+                                  −{Math.round((1 - d.precioConPromo / d.precioUnitario) * 100)}%
+                                </span>
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="text-surface-200 font-mono">{fmt(d.precioUnitario)}</span>
+                          )}
+                        </td>
+                        <td className={`py-3 px-4 font-mono font-medium ${d.precioConPromo != null ? 'text-emerald-300' : 'text-surface-200'}`}>{fmt(d.subtotal)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -390,32 +319,74 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
 
       {/* Totales */}
       <Card className="p-6">
-        <div className="ml-auto w-fit min-w-[280px] space-y-2 text-sm font-body">
-          <div className="flex justify-between gap-8">
-            <span className="text-surface-400 shrink-0">Subtotal (lista):</span>
-            <span className="text-surface-200 font-mono text-right">{fmt(pres.montoOriginal)}</span>
-          </div>
-          <div className="flex justify-between gap-8">
-            <span className="text-surface-400 shrink-0">
-              Ajuste
-              {ajuste !== 0 && (
-                <span className={`ml-1.5 text-xs font-mono ${factorReal < 1 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  ({ajusteLabel})
+        {(() => {
+          // subtotalConPromo: suma de los subtotales de cada ítem (precio con promo * cant)
+          const subtotalConPromo = detalles.reduce((acc, d) => acc + (parseFloat(d.subtotal) || 0), 0)
+          // ahorroPromo: diferencia entre precio de lista y precio ya con promos
+          const ahorroPromo  = (pres.montoOriginal || 0) - subtotalConPromo
+          // ajusteMetodo: diferencia entre monto final guardado y subtotal con promos.
+          // Esto representa ÚNICAMENTE el ajuste del método de pago (descuento o recargo),
+          // sin mezclar los descuentos de las promociones de productos.
+          const ajusteMetodo = (parseFloat(pres.monto) || 0) - subtotalConPromo
+          return (
+            <div className="ml-auto w-fit min-w-[280px] space-y-2 text-sm font-body">
+
+              {/* Subtotal precio lista */}
+              <div className="flex justify-between gap-8">
+                <span className="text-surface-400 shrink-0">Subtotal (lista):</span>
+                <span className="text-surface-200 font-mono text-right">{fmt(pres.montoOriginal)}</span>
+              </div>
+
+              {/* Ahorro por promociones — solo si existe */}
+              {ahorroPromo > 0.01 && (
+                <>
+                  <div className="flex justify-between gap-8 items-center">
+                    <span className="flex items-center gap-1.5 text-emerald-400 shrink-0">
+                      <Tag size={11} />
+                      Ahorro por promociones:
+                    </span>
+                    <span className="text-emerald-400 font-mono font-medium text-right">
+                      − {fmt(ahorroPromo)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-8">
+                    <span className="text-surface-400 shrink-0">Subtotal con promos:</span>
+                    <span className="text-surface-200 font-mono text-right">{fmt(subtotalConPromo)}</span>
+                  </div>
+                </>
+              )}
+
+              {/* Ajuste por método de pago */}
+              <div className="flex justify-between gap-8">
+                <span className="text-surface-400 shrink-0">
+                  Ajuste por método de pago
+                  {esExcepcion && ajusteMetodo !== 0 && (
+                    <span className="ml-1 text-xs text-violet-400 font-body">[Excepción]</span>
+                  )}:
                 </span>
-              )}
-              {esExcepcion && ajuste !== 0 && (
-                <span className="ml-1 text-xs text-violet-400 font-body">[Excepción]</span>
-              )}
-            </span>
-            <span className={`font-mono font-medium text-right ${ajuste<0?'text-emerald-400':ajuste>0?'text-red-400':'text-surface-400'}`}>
-              {ajuste===0?'—':ajuste<0?`- ${fmt(Math.abs(ajuste))}`:`+ ${fmt(ajuste)}`}
-            </span>
-          </div>
-          <div className="border-t border-surface-700 pt-2 flex justify-between gap-8">
-            <span className="text-white font-semibold shrink-0">Total:</span>
-            <span className="text-brand-400 font-mono font-bold text-lg text-right">{fmt(pres.monto)}</span>
-          </div>
-        </div>
+                <span className={`font-mono font-medium text-right ${
+                  Math.abs(ajusteMetodo) < 0.01
+                    ? 'text-surface-400'
+                    : ajusteMetodo < 0
+                      ? 'text-emerald-400'
+                      : 'text-red-400'
+                }`}>
+                  {Math.abs(ajusteMetodo) < 0.01
+                    ? '—'
+                    : ajusteMetodo < 0
+                      ? `- ${fmt(Math.abs(ajusteMetodo))}`
+                      : `+ ${fmt(ajusteMetodo)}`}
+                </span>
+              </div>
+
+              {/* Total */}
+              <div className="border-t border-surface-700 pt-2 flex justify-between gap-8">
+                <span className="text-white font-semibold shrink-0">Total:</span>
+                <span className="text-brand-400 font-mono font-bold text-lg text-right">{fmt(pres.monto)}</span>
+              </div>
+            </div>
+          )
+        })()}
       </Card>
 
       {saldo && (
