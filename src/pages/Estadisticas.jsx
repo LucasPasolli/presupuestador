@@ -5,7 +5,7 @@ import { Card, PageHeader, Button } from '../components/ui'
 import {
   TrendingUp, TrendingDown, Wallet, Clock, Users, Package,
   BarChart2, CreditCard, Tag, AlertTriangle, RefreshCw,
-  ShoppingCart, Layers, Repeat, Truck, PieChart, CheckCircle
+  ShoppingCart, Layers, Repeat, Truck, PieChart, CheckCircle, PiggyBank
 } from 'lucide-react'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -400,14 +400,22 @@ function calcularMetricas(desde, hasta) {
     .filter(p => (p.metodoPago === 'efectivo' || p.metodoPago === 'transferencia') && p.estado === 'pagado')
     .reduce((a, p) => a + p.monto, 0)
 
-  // Ingresos extra del período (tabla Ingreso)
-  const ingresosExtra = query(`
+  // cobradoReal = solo ventas cobradas (contado pagado + CC pagado)
+  // Los ingresos de la tabla Ingreso NO se suman aquí — son ingresos extra separados
+  m.cobradoReal = montoContado + montoCCPagado
+  m.pendienteCC = montoCCPendiente
+
+  // Ingresos extra del período (tabla Ingreso) — se muestran por separado
+  m.ingresosExtra = query(`
     SELECT COALESCE(SUM(monto),0) as v FROM Ingreso
     WHERE fecha >= ? AND fecha <= ?
   `, [desde, hasta])[0]?.v ?? 0
 
-  m.cobradoReal = montoContado + montoCCPagado + ingresosExtra
-  m.pendienteCC = montoCCPendiente
+  // Dinero invertido activo (tabla Inversion, global — no filtrado por período)
+  const invAll = query(`SELECT monto, estado FROM Inversion`)
+  const totalInvertido = invAll.filter(r => r.estado === 'invertido').reduce((a, r) => a + r.monto, 0)
+  const totalRetirado  = invAll.filter(r => r.estado === 'retirado').reduce((a, r) => a + r.monto, 0)
+  m.dineroInvertido = totalInvertido - totalRetirado
 
   // ── 3. Saldos por vencer — rangos EXCLUSIVOS (global, no filtrado por período) ──
   const hoy  = today()
@@ -536,7 +544,8 @@ function calcularMetricas(desde, hasta) {
   `, [desde, hasta])[0]?.v ?? 0
 
   // ── 10. Resultado operativo ───────────────────────────────────────────────
-  m.resultadoEstimado = m.cobradoReal - m.egresosTotal
+  // Ingreso por ventas + ingresos extra (tabla Ingreso) - egresos totales
+  m.resultadoEstimado = m.cobradoReal + m.ingresosExtra - m.egresosTotal
 
   // ── 11. Tasa de conversión de presupuestos ────────────────────────────────
   const todosLosPres = query(`
@@ -733,53 +742,36 @@ export default function Estadisticas() {
           sub={`${m.totalPresupuestos} presupuesto${m.totalPresupuestos!==1?'s':''}`} />
         <KpiCard icon={Wallet}      label="Cobrado real"    value={formatoMonto(m.cobradoReal)}       color="green"
           sub={`${pct(m.cobradoReal, m.facturadoTotal)} del total`} />
-        <KpiCard icon={Clock}       label="Pendiente CC"    value={formatoMonto(m.pendienteCC)}       color="yellow"
-          sub="Saldos sin cobrar" />
-        <KpiCard icon={BarChart2}   label="Ticket promedio" value={formatoMonto(m.ticketPromedio)}    color="blue"
-          sub="por presupuesto" />
-      </div>
-
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KpiCard icon={Users}       label="Clientes únicos"  value={m.clientesUnicos}               color="blue"
-          sub="en el período" />
-        <KpiCard icon={Tag}         label="Descuentos dados" value={formatoMonto(m.descuentosOtorgados)} color="yellow"
-          sub={`${pct(m.descuentosOtorgados, m.facturadoTotal)} del facturado`} />
         <KpiCard icon={TrendingDown} label="Egresos pagados" value={formatoMonto(m.egresosTotal)} color="red"
           sub={`pedidos ${formatoMonto(m.egresosPedidos)} · extra ${formatoMonto(m.egresosExtra)}`} />
         <KpiCard icon={m.resultadoEstimado >= 0 ? TrendingUp : TrendingDown}
           label="Resultado operativo" value={formatoMonto(m.resultadoEstimado)}
           color={m.resultadoEstimado >= 0 ? 'green' : 'red'}
-          sub="cobrado − egresos totales" />
+          sub="ventas + ingresos − egresos" />
       </div>
 
-      {/* ── Deuda con proveedores ── */}
-      {m.pedidosPendientes > 0 && (
-        <div className="bg-yellow-500/8 border border-yellow-500/25 rounded-2xl px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <AlertTriangle size={18} className="text-yellow-400 flex-shrink-0" />
-            <div>
-              <p className="text-yellow-300 text-sm font-body font-medium">Pedidos pendientes de pago</p>
-              <p className="text-surface-400 text-xs font-body">Deuda con proveedores en el período seleccionado</p>
-            </div>
-          </div>
-          <p className="text-yellow-400 font-mono font-bold text-xl">{fmtCompacto(m.pedidosPendientes)}</p>
-        </div>
-      )}
-
-      {/* ── Nuevas métricas: Conversión + Margen + Stock crítico ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KpiCard icon={CheckCircle} label="Tasa de conversión" color="green"
-          value={`${m.tasaConversion.toFixed(1)}%`}
-          sub={`${m.totalTodosEstados} pres. totales en el período`} />
-        <KpiCard icon={TrendingDown} label="Rechazados" color="red"
-          value={m.totalRechazados}
-          sub={`${m.totalBorradores} en borrador`} />
-        <KpiCard icon={Layers} label="Margen bruto estimado" color="violet"
-          value={`${m.margenBrutoPct.toFixed(1)}%`}
-          sub={formatoMonto(m.margenBrutoMonto)} />
+        <KpiCard icon={Clock} label="Pedidos pendientes" color="yellow"
+          value={formatoMonto(m.pedidosPendientes)}
+          sub="deuda con proveedores" />
+        <KpiCard icon={Clock}       label="Saldos Pendientes CC"    value={formatoMonto(m.pendienteCC)}       color="yellow"
+          sub="Saldos sin cobrar" />
+        <KpiCard icon={Tag}         label="Descuentos dados" value={formatoMonto(m.descuentosOtorgados)} color="yellow"
+          sub={`${pct(m.descuentosOtorgados, m.facturadoTotal)} del facturado`} />
         <KpiCard icon={AlertTriangle} label="Stock crítico" color="yellow"
           value={m.cantidadStockCritico}
           sub="productos bajo punto de repo." />
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <KpiCard icon={PiggyBank}   label="Dinero invertido"  value={formatoMonto(m.dineroInvertido)} color="violet"
+          sub="neto activo (global)" />
+        <KpiCard icon={TrendingUp}  label="Ingresos extra"    value={formatoMonto(m.ingresosExtra)}  color="green"
+          sub="FCI, plazo fijo, etc." />
+        <KpiCard icon={BarChart2}   label="Ticket promedio" value={formatoMonto(m.ticketPromedio)}    color="blue"
+          sub="por presupuesto" />
+        <KpiCard icon={Users}       label="Clientes únicos"  value={m.clientesUnicos}               color="blue"
+          sub="en el período" />
       </div>
 
       {/* ── Clientes recurrentes vs nuevos + Egresos por categoría ── */}
@@ -885,42 +877,6 @@ export default function Estadisticas() {
           )}
         </Card>
       </div>
-
-      {/* ── Stock crítico detalle ── */}
-      {m.stockCritico.length > 0 && (
-        <Card className="p-6">
-          <h3 className="font-body font-semibold text-white text-sm mb-4 flex items-center gap-2">
-            <AlertTriangle size={15} className="text-yellow-500" />
-            Productos bajo punto de reposición
-          </h3>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs font-body">
-              <thead>
-                <tr className="text-surface-500 uppercase tracking-widest border-b border-surface-700">
-                  <th className="text-left pb-2 pr-4">Producto</th>
-                  <th className="text-left pb-2 pr-4">Categoría</th>
-                  <th className="text-right pb-2 pr-4">Stock actual</th>
-                  <th className="text-right pb-2">Punto repo.</th>
-                </tr>
-              </thead>
-              <tbody>
-                {m.stockCritico.map((prod, i) => {
-                  const pct = prod.puntoReposicion > 0 ? (prod.cantidad / prod.puntoReposicion) * 100 : 100
-                  const alerta = pct === 0 ? 'text-red-400' : pct <= 50 ? 'text-yellow-400' : 'text-orange-400'
-                  return (
-                    <tr key={i} className="border-b border-surface-700/40 last:border-0">
-                      <td className="py-2.5 pr-4 text-surface-200 truncate max-w-[180px]">{prod.nombre}</td>
-                      <td className="py-2.5 pr-4 text-surface-400">{prod.categoria ?? '—'}</td>
-                      <td className={`py-2.5 pr-4 text-right font-mono font-bold ${alerta}`}>{prod.cantidad}</td>
-                      <td className="py-2.5 text-right font-mono text-surface-400">{prod.puntoReposicion}</td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      )}
 
       {/* ── Dos columnas: mix de pago + saldos por vencer ── */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
