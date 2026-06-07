@@ -54,15 +54,7 @@ export async function obtenerClientesActivos() {
 export async function buscarClientes(texto) {
   const textoLimpio = texto?.trim() ?? ''
 
-  // Búsqueda por ID exacto
-  const porIdPromise = supabase
-    .from('cliente')
-    .select('*')
-    .eq('activo', true)
-    .eq('id_cliente', textoLimpio)
-    .limit(1)
-
-  // Búsqueda por nombre, apellido o apodo (ilike = case-insensitive)
+  // Búsqueda por nombre, apellido, apodo o nombre de comercio (siempre se ejecuta)
   const porNombrePromise = supabase
     .from('cliente')
     .select('*')
@@ -75,6 +67,17 @@ export async function buscarClientes(texto) {
     )
     .order('apellido')
     .limit(100)
+
+  // Búsqueda por ID exacto: solo si el texto es un entero positivo válido
+  const esId = /^\d+$/.test(textoLimpio)
+  const porIdPromise = esId
+    ? supabase
+        .from('cliente')
+        .select('*')
+        .eq('activo', true)
+        .eq('id_cliente', parseInt(textoLimpio, 10))
+        .limit(1)
+    : Promise.resolve({ data: [], error: null })
 
   const [resId, resNombre] = await Promise.all([porIdPromise, porNombrePromise])
 

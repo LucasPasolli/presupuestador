@@ -806,83 +806,94 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
     setStockErrors(prev => ({ ...prev, [uid]: hasError }))
   }
 
+  const guardandoRef = useRef(false)
+
   async function guardar() {
+    // Bloqueo sincrónico: evita que múltiples clicks disparen guardados simultáneos
+    // aunque las validaciones asíncronas demoren varios segundos.
+    if (guardandoRef.current) return
+    guardandoRef.current = true
+
     setError('')
-    if (!cliente) { setError('Seleccioná un cliente antes de guardar.'); return }
-
-    const validItems = items.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
-    if (!validItems.length) { setError('Agregá al menos un producto con ID válido.'); return }
-
-    // Validar que los productos existen y tienen medida si corresponde
-    for (const it of validItems) {
-      let prod
-      try { prod = await obtenerProductoPorId(parseInt(it.idProducto)) } catch { prod = null }
-      if (!prod) { setError(`El producto ID ${it.idProducto} no existe en el inventario.`); return }
-      if (prod.tieneMedidas && !it.medida) { setError(`Seleccioná una medida para el producto ID ${it.idProducto}.`); return }
-    }
-
-    // Validar precios
-    for (const it of validItems) {
-      if (!parseFloat(it.precioUnitario)) {
-        setError(`El producto "${it.nombreProducto || 'ID ' + it.idProducto}" no tiene precio definido. Asignalo desde Inventario.`)
-        return
-      }
-    }
-
-    // Validar stock
-    for (const it of validItems) {
-      let prod
-      try { prod = await obtenerProductoPorId(parseInt(it.idProducto)) } catch { continue }
-      if (!prod) continue
-      let stockDisp = 0
-      if (prod.tieneMedidas && it.medida) {
-        const medidasProd = await obtenerMedidasDeProducto(parseInt(it.idProducto))
-        const pm = medidasProd.find(m => m.medida === it.medida)
-        stockDisp = pm?.cantidad ?? 0
-      } else if (!prod.tieneMedidas) {
-        stockDisp = prod.cantidad ?? 0
-      } else continue
-      if (parseInt(it.cantidad) > stockDisp) {
-        setError(`Stock insuficiente de algún producto.`)
-        return
-      }
-    }
-
-    const fecha   = today()
-    const metodoDb = esExcepcion ? excepcionSubMetodo : metodoPago
-
-    const itemsConPromoValidos = itemsConPromo.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
-
-    const detalles = itemsConPromoValidos.map(it => {
-      const precio      = parseFloat(it.precioUnitario) || 0
-      const precioFinal = it.precioConPromo != null ? it.precioConPromo : precio
-      const cantidad    = parseInt(it.cantidad)
-      return {
-        idProducto:      parseInt(it.idProducto),
-        nombreProducto:  it.nombreProducto || null,
-        medida:          it.medida || null,
-        cantidad,
-        precioUnitario:  precio,
-        subtotal:        cantidad * precioFinal,
-        precioConPromo:  it.precioConPromo ?? null,
-        idPromocion:     it.idPromocion ?? null,
-      }
-    })
-
-    const cabecera = {
-      idCliente:       cliente.idCliente,
-      nombreCliente:   cliente.nombre,
-      apellidoCliente: cliente.apellido,
-      fecha,
-      metodoPago:      metodoDb,
-      montoOriginal:   subtotalSinPromo,
-      monto:           totalFinal,
-      estado:          'borrador',
-      esExcepcion:     esExcepcion ? 1 : 0,
-    }
-
     setSaving(true)
+
     try {
+      if (!cliente) {
+        setError('Seleccioná un cliente antes de guardar.')
+        return
+      }
+
+      const validItems = items.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
+      if (!validItems.length) { setError('Agregá al menos un producto con ID válido.'); return }
+
+      // Validar que los productos existen y tienen medida si corresponde
+      for (const it of validItems) {
+        let prod
+        try { prod = await obtenerProductoPorId(parseInt(it.idProducto)) } catch { prod = null }
+        if (!prod) { setError(`El producto ID ${it.idProducto} no existe en el inventario.`); return }
+        if (prod.tieneMedidas && !it.medida) { setError(`Seleccioná una medida para el producto ID ${it.idProducto}.`); return }
+      }
+
+      // Validar precios
+      for (const it of validItems) {
+        if (!parseFloat(it.precioUnitario)) {
+          setError(`El producto "${it.nombreProducto || 'ID ' + it.idProducto}" no tiene precio definido. Asignalo desde Inventario.`)
+          return
+        }
+      }
+
+      // Validar stock
+      for (const it of validItems) {
+        let prod
+        try { prod = await obtenerProductoPorId(parseInt(it.idProducto)) } catch { continue }
+        if (!prod) continue
+        let stockDisp = 0
+        if (prod.tieneMedidas && it.medida) {
+          const medidasProd = await obtenerMedidasDeProducto(parseInt(it.idProducto))
+          const pm = medidasProd.find(m => m.medida === it.medida)
+          stockDisp = pm?.cantidad ?? 0
+        } else if (!prod.tieneMedidas) {
+          stockDisp = prod.cantidad ?? 0
+        } else continue
+        if (parseInt(it.cantidad) > stockDisp) {
+          setError(`Stock insuficiente de algún producto.`)
+          return
+        }
+      }
+
+      const fecha    = today()
+      const metodoDb = esExcepcion ? excepcionSubMetodo : metodoPago
+
+      const itemsConPromoValidos = itemsConPromo.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
+
+      const detalles = itemsConPromoValidos.map(it => {
+        const precio      = parseFloat(it.precioUnitario) || 0
+        const precioFinal = it.precioConPromo != null ? it.precioConPromo : precio
+        const cantidad    = parseInt(it.cantidad)
+        return {
+          idProducto:      parseInt(it.idProducto),
+          nombreProducto:  it.nombreProducto || null,
+          medida:          it.medida || null,
+          cantidad,
+          precioUnitario:  precio,
+          subtotal:        cantidad * precioFinal,
+          precioConPromo:  it.precioConPromo ?? null,
+          idPromocion:     it.idPromocion ?? null,
+        }
+      })
+
+      const cabecera = {
+        idCliente:       cliente.idCliente,
+        nombreCliente:   cliente.nombre,
+        apellidoCliente: cliente.apellido,
+        fecha,
+        metodoPago:      metodoDb,
+        montoOriginal:   subtotalSinPromo,
+        monto:           totalFinal,
+        estado:          'borrador',
+        esExcepcion:     esExcepcion ? 1 : 0,
+      }
+
       let presupuestoReal
 
       if (modoEdicion) {
@@ -906,6 +917,7 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
       setError(err.message || 'Error al guardar el presupuesto.')
     } finally {
       setSaving(false)
+      guardandoRef.current = false
     }
   }
 
