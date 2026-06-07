@@ -1,13 +1,22 @@
 // src/pages/PedidosCompra.jsx
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { query, run } from '../lib/database'
+import { supabase } from '../lib/supabase'
 import { Card, PageHeader, Button, Badge, Modal, Input } from '../components/ui'
 import {
   Plus, Trash2, Search, CheckCircle2, AlertCircle,
   ArrowLeft, ShoppingCart, Package, Clock, BadgeCheck,
   Pencil, Truck, RotateCcw, UserPlus, Building2, CalendarCheck
 } from 'lucide-react'
+import {
+  obtenerPedidos,
+  obtenerPedidoPorId,
+  obtenerDetallesDePedido,
+  crearPedido,
+  actualizarPedido,
+  marcarPedidoPagado,
+  recibirPedido,
+} from '../services/pedidosService'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -27,7 +36,6 @@ function today() { return new Date().toISOString().slice(0, 10) }
 const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
 
 // Calcula la fecha de vencimiento del echeck: 30 días corridos desde la fecha de emisión
-// fechaIso puede ser 'YYYY-MM-DD' (pedido guardado) o undefined/null (pedido nuevo → usa hoy)
 function fechaVencimientoEcheck(fechaIso) {
   const base = fechaIso ? new Date(fechaIso + 'T00:00:00') : new Date()
   base.setDate(base.getDate() + 30)
@@ -66,11 +74,11 @@ function NuevoProveedorModal({ open, onClose, onCreated }) {
   const empty = { nombreFiscal: '', nombreComercial: '', identificacionTributaria: '', telefono: '', email: '' }
   const [form,   setForm]   = useState(empty)
   const [errors, setErrors] = useState({})
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => { if (!open) { setForm(empty); setErrors({}) } }, [open])
 
   function set(k, v) { setForm(p => ({ ...p, [k]: v })) }
-  // CUIT: dígitos y guiones. Teléfono: solo dígitos. Igual que ABMC.
   function setField(k, v) {
     let val = v
     if (k === 'identificacionTributaria') val = v.replace(/[^0-9-]/g, '')
@@ -78,25 +86,45 @@ function NuevoProveedorModal({ open, onClose, onCreated }) {
     setForm(p => ({ ...p, [k]: val }))
   }
 
-  function guardar() {
+  async function guardar() {
     const e = {}
     if (!form.nombreFiscal.trim())    e.nombreFiscal    = 'Requerido'
     if (!form.nombreComercial.trim()) e.nombreComercial = 'Requerido'
     setErrors(e)
     if (Object.keys(e).length) return
 
-    const nombreFiscal    = cap(form.nombreFiscal)
-    const nombreComercial = cap(form.nombreComercial)
+    setSaving(true)
+    try {
+      const { data, error } = await supabase
+        .from('proveedor')
+        .insert({
+          nombre_fiscal:              cap(form.nombreFiscal),
+          nombre_comercial:           cap(form.nombreComercial),
+          identificacion_tributaria:  form.identificacionTributaria.trim(),
+          telefono:                   form.telefono.trim(),
+          email:                      form.email.trim(),
+        })
+        .select()
+        .single()
 
-    const id = run(
-      `INSERT INTO Proveedor (nombreFiscal, nombreComercial, identificacionTributaria, telefono, email)
-       VALUES (?,?,?,?,?)`,
-      [nombreFiscal, nombreComercial, form.identificacionTributaria.trim(),
-       form.telefono.trim(), form.email.trim()]
-    )
-    const prov = query('SELECT * FROM Proveedor WHERE idProveedor = ?', [id])[0]
-    onClose()
-    setTimeout(() => onCreated(prov), 0)
+      if (error) throw error
+
+      // Normalizar al shape que usa el selector (camelCase)
+      const prov = {
+        idProveedor:               data.id_proveedor,
+        nombreFiscal:              data.nombre_fiscal,
+        nombreComercial:           data.nombre_comercial,
+        identificacionTributaria:  data.identificacion_tributaria,
+        telefono:                  data.telefono,
+        email:                     data.email,
+      }
+      onClose()
+      setTimeout(() => onCreated(prov), 0)
+    } catch (err) {
+      setErrors({ general: err.message })
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -117,9 +145,14 @@ function NuevoProveedorModal({ open, onClose, onCreated }) {
           <Input label="Email" value={form.email}
             onChange={e => set('email', e.target.value)} placeholder="email@ejemplo.com" />
         </div>
+        {errors.general && (
+          <p className="text-red-400 text-xs font-body">{errors.general}</p>
+        )}
         <div className="flex gap-2 pt-2">
           <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button className="flex-1" onClick={guardar}>Crear Proveedor</Button>
+          <Button className="flex-1" onClick={guardar} disabled={saving}>
+            {saving ? 'Creando...' : 'Crear Proveedor'}
+          </Button>
         </div>
       </div>
     </Modal>
@@ -148,14 +181,41 @@ function ProveedorSelector({ value, onChange, onToast }) {
     }
   }, [value])
 
-  function buscar(text) {
+  async function buscar(text) {
     setSearch(text)
     if (!text.trim()) { setResults([]); setShowDrop(false); return }
-    const rows = query(
-      `SELECT * FROM Proveedor WHERE nombreFiscal LIKE ? OR nombreComercial LIKE ? OR CAST(idProveedor AS TEXT) = ? LIMIT 8`,
-      [`%${text}%`, `%${text}%`, text.trim()]
-    )
-    setResults(rows)
+
+    const { data } = await supabase
+      .from('proveedor')
+      .select('*')
+      .or(`nombre_fiscal.ilike.%${text}%,nombre_comercial.ilike.%${text}%`)
+      .limit(8)
+
+    // Also try exact ID match
+    const isNumeric = /^\d+$/.test(text.trim())
+    let rows = data ?? []
+    if (isNumeric) {
+      const { data: byId } = await supabase
+        .from('proveedor')
+        .select('*')
+        .eq('id_proveedor', parseInt(text.trim()))
+        .limit(1)
+      if (byId?.length) {
+        const existing = rows.find(r => r.id_proveedor === byId[0].id_proveedor)
+        if (!existing) rows = [...byId, ...rows]
+      }
+    }
+
+    // Normalize to camelCase
+    const normalized = rows.map(r => ({
+      idProveedor:              r.id_proveedor,
+      nombreFiscal:             r.nombre_fiscal,
+      nombreComercial:          r.nombre_comercial,
+      identificacionTributaria: r.identificacion_tributaria,
+      telefono:                 r.telefono,
+      email:                    r.email,
+    }))
+    setResults(normalized)
     setShowDrop(true)
   }
 
@@ -269,7 +329,7 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  // Recalcula posición del dropdown (scroll-aware, igual que Presupuestador)
+  // Recalcula posición del dropdown (scroll-aware)
   useEffect(() => {
     if (!showDrop || !inputRef.current) return
     const update = () => {
@@ -292,27 +352,50 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
   // Cargar medidas si el producto las tiene
   useEffect(() => {
     if (!item.idProducto) { setMedidas([]); return }
-    const prod = query('SELECT tieneMedidas FROM Producto WHERE idProducto = ?', [parseInt(item.idProducto)])[0]
-    if (prod?.tieneMedidas) {
-      const ms = query('SELECT medida FROM ProductoMedida WHERE idProducto = ? ORDER BY medida', [parseInt(item.idProducto)])
-      setMedidas(ms.map(r => r.medida))
-    } else {
-      setMedidas([])
-      onUpdate(index, 'medida', null)
+    async function fetchMedidas() {
+      const { data: prod } = await supabase
+        .from('producto')
+        .select('tiene_medidas')
+        .eq('id_producto', parseInt(item.idProducto))
+        .single()
+      if (prod?.tiene_medidas) {
+        const { data: ms } = await supabase
+          .from('producto_medida')
+          .select('medida')
+          .eq('id_producto', parseInt(item.idProducto))
+          .order('medida')
+        setMedidas((ms ?? []).map(r => r.medida))
+      } else {
+        setMedidas([])
+        onUpdate(index, 'medida', null)
+      }
     }
+    fetchMedidas()
   }, [item.idProducto])
 
-  function buscarPorNombre(text) {
+  async function buscarPorNombre(text) {
     setNombreSearch(text)
     onUpdate(index, 'nombreProducto', text)
-    // Al escribir manualmente el nombre, desvinculamos el producto seleccionado
     onUpdate(index, 'idProducto', '')
     onUpdate(index, 'precioUnitario', '')
     if (!text.trim()) { setNombreResults([]); setShowDrop(false); return }
+
     const normText = norm(text.trim())
-    const rows = query('SELECT * FROM Producto LIMIT 2000', [])
+    const { data } = await supabase
+      .from('producto')
+      .select('*')
+      .limit(2000)
+
+    const rows = (data ?? [])
       .filter(p => norm(p.nombre).includes(normText))
       .slice(0, 12)
+      .map(p => ({
+        idProducto:      p.id_producto,
+        nombre:          p.nombre,
+        precioProveedor: Number(p.precio_proveedor ?? 0),
+        tieneMedidas:    p.tiene_medidas,
+      }))
+
     setNombreResults(rows)
     setShowDrop(true)
   }
@@ -322,7 +405,6 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
     setShowDrop(false)
     onUpdate(index, 'idProducto',     p.idProducto)
     onUpdate(index, 'nombreProducto', p.nombre)
-    // Autocompletar con el último precio del proveedor si existe
     if (p.precioProveedor > 0) {
       onUpdate(index, 'precioUnitario', p.precioProveedor)
     } else {
@@ -331,26 +413,27 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
     onUpdate(index, 'medida', null)
   }
 
-  function handleIdChange(val) {
+  async function handleIdChange(val) {
     const clean = val.replace(/\D/g, '')
     onUpdate(index, 'idProducto', clean)
     if (!clean) {
-      // ID vacío: limpiar todos los campos
       setNombreSearch('')
       onUpdate(index, 'nombreProducto', '')
       onUpdate(index, 'precioUnitario', '')
       onUpdate(index, 'medida', null)
       return
     }
-    const p = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(clean)])[0]
+    const { data: p } = await supabase
+      .from('producto')
+      .select('*')
+      .eq('id_producto', parseInt(clean))
+      .single()
     if (p) {
       setNombreSearch(p.nombre)
       onUpdate(index, 'nombreProducto', p.nombre)
-      // Siempre actualizar el precio (incluyendo limpiar si no tiene precio asignado)
-      onUpdate(index, 'precioUnitario', p.precioProveedor > 0 ? p.precioProveedor : '')
+      onUpdate(index, 'precioUnitario', (p.precio_proveedor ?? 0) > 0 ? p.precio_proveedor : '')
       onUpdate(index, 'medida', null)
     } else {
-      // ID sin coincidencia: limpiar nombre y precio
       setNombreSearch('')
       onUpdate(index, 'nombreProducto', '')
       onUpdate(index, 'precioUnitario', '')
@@ -475,44 +558,38 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
   const [confirmPagar,  setConfirmPagar]  = useState(false)
   const [confirmEstado, setConfirmEstado] = useState(null) // 'recibido'
   const [proveedor,     setProveedor]     = useState(null)
+  const [loading,       setLoading]       = useState(false)
 
-  const reload = useCallback(() => {
-    const p = query(`
-      SELECT pc.*,
-             COALESCE(pc.nombreProveedor, pv.nombreComercial, pv.nombreFiscal) AS nombreProveedorDisplay,
-             pv.nombreComercial AS nombreComercialJoin,
-             pv.nombreFiscal    AS nombreFiscalJoin
-      FROM PedidoCompra pc
-      LEFT JOIN Proveedor pv ON pv.idProveedor = pc.idProveedor
-      WHERE pc.idPedido = ?
-    `, [pedidoInit.idPedido])[0]
+  const reload = useCallback(async () => {
+    // Pedido actualizado
+    const p = await obtenerPedidoPorId(pedidoInit.idPedido)
     if (p) setPedido(p)
 
-    const rows = query(`
-      SELECT dc.*,
-             COALESCE(dc.nombreProducto, p.nombre) AS nombreProducto
-      FROM DetallePedidoCompra dc
-      LEFT JOIN Producto p ON p.idProducto = dc.idProducto
-      WHERE dc.idPedido = ?
-      ORDER BY dc.idDetallePedido
-    `, [pedidoInit.idPedido])
+    // Detalles
+    const rows = await obtenerDetallesDePedido(pedidoInit.idPedido)
     setDetalles(rows)
 
-    // Para el panel de proveedor: usar objeto con snapshot si el proveedor fue borrado
-    const idProv = p?.idProveedor ?? pedidoInit.idProveedor
+    // Proveedor: intentar desde BD; si fue borrado, usar snapshot
+    const idProv       = p?.idProveedor ?? pedidoInit.idProveedor
     const snapshotNombre = p?.nombreProveedor ?? pedidoInit.nombreProveedor
     if (idProv) {
-      const prov = query('SELECT * FROM Proveedor WHERE idProveedor = ?', [idProv])[0]
+      const { data: prov } = await supabase
+        .from('proveedor')
+        .select('*')
+        .eq('id_proveedor', idProv)
+        .single()
       if (prov) {
-        setProveedor(prov)
+        setProveedor({
+          idProveedor:    prov.id_proveedor,
+          nombreFiscal:   prov.nombre_fiscal,
+          nombreComercial: prov.nombre_comercial,
+        })
       } else if (snapshotNombre) {
-        // Proveedor borrado: mostrar snapshot guardado en el pedido
         setProveedor({ nombreComercial: snapshotNombre, nombreFiscal: snapshotNombre, idProveedor: null, _deleted: true })
       } else {
         setProveedor(null)
       }
     } else if (snapshotNombre) {
-      // Sin idProveedor pero hay snapshot
       setProveedor({ nombreComercial: snapshotNombre, nombreFiscal: snapshotNombre, idProveedor: null, _deleted: true })
     } else {
       setProveedor(null)
@@ -521,68 +598,36 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
 
   useEffect(() => { reload() }, [reload])
 
-  function marcarPagado() {
-    const fechaHoy = today()
-    run(`UPDATE PedidoCompra SET estadoPago = 'pagado', fechaPago = ? WHERE idPedido = ?`, [fechaHoy, pedido.idPedido])
-    setConfirmPagar(false)
-    setPedido(prev => ({ ...prev, estadoPago: 'pagado', fechaPago: fechaHoy }))
-    onUpdated()
+  async function marcarPagado() {
+    setLoading(true)
+    try {
+      const fechaHoy = today()
+      await marcarPedidoPagado(pedido.idPedido, fechaHoy)
+      setConfirmPagar(false)
+      setPedido(prev => ({ ...prev, estadoPago: 'pagado', fechaPago: fechaHoy }))
+      onUpdated()
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setLoading(false)
+    }
   }
 
-  function cambiarEstadoLogistico(nuevoEstado) {
-    const fechaRecepcion = nuevoEstado === 'recibido' ? today() : null
-
-    if (nuevoEstado === 'recibido') {
-      // Sumar stock al inventario
-      for (const d of detalles) {
-        const prod = query('SELECT tieneMedidas FROM Producto WHERE idProducto = ?', [d.idProducto])[0]
-        if (!prod) continue
-
-        if (prod.tieneMedidas && d.medida) {
-          // Stock por medida
-          const existeMedida = query(
-            'SELECT idMedida FROM ProductoMedida WHERE idProducto = ? AND medida = ?',
-            [d.idProducto, d.medida]
-          )[0]
-          if (existeMedida) {
-            run(`UPDATE ProductoMedida SET cantidad = cantidad + ? WHERE idProducto = ? AND medida = ?`,
-              [d.cantidad, d.idProducto, d.medida])
-          } else {
-            run(`INSERT INTO ProductoMedida (idProducto, medida, cantidad) VALUES (?,?,?)`,
-              [d.idProducto, d.medida, d.cantidad])
-          }
-          // Recalcular cantidad total del producto como suma de medidas
-          const total = query(
-            'SELECT COALESCE(SUM(cantidad),0) as t FROM ProductoMedida WHERE idProducto = ?',
-            [d.idProducto]
-          )[0]?.t ?? 0
-          run(`UPDATE Producto SET cantidad = ? WHERE idProducto = ?`, [total, d.idProducto])
-        } else {
-          run(`UPDATE Producto SET cantidad = cantidad + ? WHERE idProducto = ?`,
-            [d.cantidad, d.idProducto])
-        }
-
-        // Actualizar precioProveedor: para productos con medidas, usar el precio más alto
-        if (prod.tieneMedidas) {
-          const maxPrecio = query(
-            `SELECT MAX(precioUnitario) as maxP FROM DetallePedidoCompra
-             WHERE idPedido = ? AND idProducto = ?`,
-            [pedido.idPedido, d.idProducto]
-          )[0]?.maxP ?? d.precioUnitario
-          run(`UPDATE Producto SET precioProveedor = ? WHERE idProducto = ?`, [maxPrecio, d.idProducto])
-        } else {
-          run(`UPDATE Producto SET precioProveedor = ? WHERE idProducto = ?`, [d.precioUnitario, d.idProducto])
-        }
+  async function cambiarEstadoLogistico(nuevoEstado) {
+    setLoading(true)
+    try {
+      const fechaRecepcion = nuevoEstado === 'recibido' ? today() : null
+      if (nuevoEstado === 'recibido') {
+        await recibirPedido(pedido.idPedido, fechaRecepcion)
       }
+      setConfirmEstado(null)
+      await reload()
+      onUpdated()
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setLoading(false)
     }
-
-    run(
-      `UPDATE PedidoCompra SET estadoLogistico = ?, fechaRecepcion = ? WHERE idPedido = ?`,
-      [nuevoEstado, fechaRecepcion, pedido.idPedido]
-    )
-    setConfirmEstado(null)
-    reload()
-    onUpdated()
   }
 
   const esPendientePago   = pedido.estadoPago === 'pendiente'
@@ -620,7 +665,6 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
             <h2 className="font-display text-4xl text-white tracking-widest">#{pedido.idPedido}</h2>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {/* Badges de estado */}
             <Badge color={cfg.color}>
               <cfg.icon size={11} className="inline mr-1" />{cfg.label}
             </Badge>
@@ -757,7 +801,9 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
         </p>
         <div className="flex gap-2">
           <Button variant="secondary" className="flex-1" onClick={() => setConfirmPagar(false)}>Cancelar</Button>
-          <Button className="flex-1" icon={BadgeCheck} onClick={marcarPagado}>Confirmar pago</Button>
+          <Button className="flex-1" icon={BadgeCheck} onClick={marcarPagado} disabled={loading}>
+            {loading ? 'Guardando...' : 'Confirmar pago'}
+          </Button>
         </div>
       </Modal>
 
@@ -788,8 +834,9 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
           <Button variant="secondary" className="flex-1" onClick={() => setConfirmEstado(null)}>Cancelar</Button>
           <Button className="flex-1"
             icon={confirmEstado === 'recibido' ? CheckCircle2 : AlertCircle}
-            onClick={() => cambiarEstadoLogistico(confirmEstado)}>
-            Confirmar
+            onClick={() => cambiarEstadoLogistico(confirmEstado)}
+            disabled={loading}>
+            {loading ? 'Procesando...' : 'Confirmar'}
           </Button>
         </div>
       </Modal>
@@ -810,40 +857,51 @@ const METODOS_PAGO = [
 function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
   const esEdicion = !!pedidoEditando
 
-  // Inicializar items desde el pedido existente si es edición
-  const [items,      setItems]      = useState(() => {
-    if (esEdicion) {
-      const detalles = query(`
-        SELECT dc.*, p.nombre AS nombreProducto
-        FROM DetallePedidoCompra dc
-        LEFT JOIN Producto p ON p.idProducto = dc.idProducto
-        WHERE dc.idPedido = ?
-        ORDER BY dc.idDetallePedido
-      `, [pedidoEditando.idPedido])
-      return detalles.length > 0
-        ? detalles.map(d => ({
+  const [items,      setItems]      = useState([ITEM_EMPTY()])
+  const [metodoPago, setMetodoPago] = useState(esEdicion ? (pedidoEditando.metodoPago || 'efectivo') : 'efectivo')
+  const [proveedor,  setProveedor]  = useState(null)
+  const [toast,      setToast]      = useState('')
+  const [error,      setError]      = useState('')
+  const [saving,     setSaving]     = useState(false)
+  const [loadingInit, setLoadingInit] = useState(esEdicion)
+
+  // En edición: cargar detalles y proveedor desde el service
+  useEffect(() => {
+    if (!esEdicion) return
+    async function init() {
+      try {
+        // Detalles del pedido
+        const detalles = await obtenerDetallesDePedido(pedidoEditando.idPedido)
+        if (detalles.length > 0) {
+          setItems(detalles.map(d => ({
             idProducto:     d.idProducto,
             nombreProducto: d.nombreProducto || '',
             cantidad:       d.cantidad,
             precioUnitario: d.precioUnitario,
             medida:         d.medida || null,
-          }))
-        : [ITEM_EMPTY()]
+          })))
+        }
+        // Proveedor
+        if (pedidoEditando.idProveedor) {
+          const { data: prov } = await supabase
+            .from('proveedor')
+            .select('*')
+            .eq('id_proveedor', pedidoEditando.idProveedor)
+            .single()
+          if (prov) {
+            setProveedor({
+              idProveedor:    prov.id_proveedor,
+              nombreFiscal:   prov.nombre_fiscal,
+              nombreComercial: prov.nombre_comercial,
+            })
+          }
+        }
+      } finally {
+        setLoadingInit(false)
+      }
     }
-    return [ITEM_EMPTY()]
-  })
-
-  const [metodoPago,  setMetodoPago]  = useState(() =>
-    esEdicion ? (pedidoEditando.metodoPago || 'efectivo') : 'efectivo'
-  )
-  const [proveedor,   setProveedor]   = useState(() => {
-    if (esEdicion && pedidoEditando.idProveedor) {
-      return query('SELECT * FROM Proveedor WHERE idProveedor = ?', [pedidoEditando.idProveedor])[0] || null
-    }
-    return null
-  })
-  const [toast,  setToast]  = useState('')
-  const [error,  setError]  = useState('')
+    init()
+  }, [esEdicion])
 
   const total = items.reduce((acc, it) =>
     acc + (parseInt(it.cantidad) || 0) * (parseFloat(String(it.precioUnitario).replace(',', '.')) || 0), 0)
@@ -856,93 +914,78 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
   function addItem()       { setItems(prev => [...prev, ITEM_EMPTY()]) }
   function removeItem(idx) { setItems(prev => prev.filter((_, i) => i !== idx)) }
 
-  function guardar() {
+  async function guardar() {
     setError('')
     if (!proveedor) { setError('Seleccioná un proveedor antes de guardar el pedido.'); return }
     const validItems = items.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
     if (!validItems.length) { setError('Agregá al menos un producto con ID válido.'); return }
 
+    // Validaciones previas: precio, existencia, medida
     for (const it of validItems) {
       const precio = parseFloat(String(it.precioUnitario).replace(',', '.')) || 0
       if (precio <= 0) { setError(`Ingresá el precio del proveedor para "${it.nombreProducto || `ID ${it.idProducto}`}".`); return }
 
-      const existe = query('SELECT idProducto, tieneMedidas FROM Producto WHERE idProducto = ?', [parseInt(it.idProducto)])[0]
+      const { data: existe } = await supabase
+        .from('producto')
+        .select('id_producto, tiene_medidas')
+        .eq('id_producto', parseInt(it.idProducto))
+        .single()
       if (!existe) { setError(`El producto ID ${it.idProducto} no existe en el inventario.`); return }
-      if (existe.tieneMedidas && !it.medida) { setError(`Seleccioná una medida para el producto ID ${it.idProducto}.`); return }
+      if (existe.tiene_medidas && !it.medida) { setError(`Seleccioná una medida para el producto ID ${it.idProducto}.`); return }
     }
 
-    if (esEdicion) {
-      // Actualizar pedido existente
-      run(
-        `UPDATE PedidoCompra SET monto = ?, metodoPago = ?, idProveedor = ?, nombreProveedor = ? WHERE idPedido = ?`,
-        [total, metodoPago, proveedor?.idProveedor ?? null, proveedor?.nombreComercial || proveedor?.nombreFiscal || null, pedidoEditando.idPedido]
-      )
-      // Reemplazar ítems
-      run(`DELETE FROM DetallePedidoCompra WHERE idPedido = ?`, [pedidoEditando.idPedido])
-      for (const it of validItems) {
-        const precio   = parseFloat(String(it.precioUnitario).replace(',', '.')) || 0
-        const cantidad = parseInt(it.cantidad)
-        run(
-          `INSERT INTO DetallePedidoCompra (idPedido, idProducto, nombreProducto, medida, cantidad, precioUnitario, subtotal)
-           VALUES (?,?,?,?,?,?,?)`,
-          [pedidoEditando.idPedido, parseInt(it.idProducto), it.nombreProducto || null, it.medida || null, cantidad, precio, cantidad * precio]
-        )
-      }
-      // Actualizar precioProveedor: para productos con medidas, usar el precio más alto del pedido
-      const productosEditados = [...new Set(validItems.map(it => parseInt(it.idProducto)))]
-      for (const idProd of productosEditados) {
-        const prod = query('SELECT tieneMedidas FROM Producto WHERE idProducto = ?', [idProd])[0]
-        if (!prod) continue
-        if (prod.tieneMedidas) {
-          const maxP = query(
-            `SELECT MAX(precioUnitario) as m FROM DetallePedidoCompra WHERE idPedido = ? AND idProducto = ?`,
-            [pedidoEditando.idPedido, idProd]
-          )[0]?.m ?? 0
-          if (maxP > 0) run(`UPDATE Producto SET precioProveedor = ? WHERE idProducto = ?`, [maxP, idProd])
-        } else {
-          const precio = parseFloat(String(validItems.find(it => parseInt(it.idProducto) === idProd)?.precioUnitario).replace(',', '.')) || 0
-          if (precio > 0) run(`UPDATE Producto SET precioProveedor = ? WHERE idProducto = ?`, [precio, idProd])
-        }
-      }
-      onGuardado(pedidoEditando.idPedido)
-    } else {
-      // Nuevo pedido
-      const fecha    = today()
-      const idPedido = run(
-        `INSERT INTO PedidoCompra (fecha, monto, estadoPago, estadoLogistico, metodoPago, idProveedor, nombreProveedor)
-         VALUES (?, ?, 'pendiente', 'encargado', ?, ?, ?)`,
-        [fecha, total, metodoPago, proveedor?.idProveedor ?? null, proveedor?.nombreComercial || proveedor?.nombreFiscal || null]
-      )
-      const pedidoReal = query('SELECT MAX(idPedido) as id FROM PedidoCompra WHERE fecha = ?', [fecha])[0]?.id ?? idPedido
+    setSaving(true)
+    try {
+      const detallesPayload = validItems.map(it => ({
+        idProducto:     parseInt(it.idProducto),
+        nombreProducto: it.nombreProducto || null,
+        medida:         it.medida || null,
+        cantidad:       parseInt(it.cantidad),
+        precioUnitario: parseFloat(String(it.precioUnitario).replace(',', '.')) || 0,
+        subtotal:       (parseInt(it.cantidad)) * (parseFloat(String(it.precioUnitario).replace(',', '.')) || 0),
+      }))
 
-      for (const it of validItems) {
-        const precio   = parseFloat(String(it.precioUnitario).replace(',', '.')) || 0
-        const cantidad = parseInt(it.cantidad)
-        run(
-          `INSERT INTO DetallePedidoCompra (idPedido, idProducto, nombreProducto, medida, cantidad, precioUnitario, subtotal)
-           VALUES (?,?,?,?,?,?,?)`,
-          [pedidoReal, parseInt(it.idProducto), it.nombreProducto || null, it.medida || null, cantidad, precio, cantidad * precio]
-        )
-      }
-      // Actualizar precioProveedor: precio más alto para productos con medidas
-      const productosNuevos = [...new Set(validItems.map(it => parseInt(it.idProducto)))]
-      for (const idProd of productosNuevos) {
-        const prod = query('SELECT tieneMedidas FROM Producto WHERE idProducto = ?', [idProd])[0]
-        if (!prod) continue
-        if (prod.tieneMedidas) {
-          const maxP = query(
-            `SELECT MAX(precioUnitario) as m FROM DetallePedidoCompra WHERE idPedido = ? AND idProducto = ?`,
-            [pedidoReal, idProd]
-          )[0]?.m ?? 0
-          if (maxP > 0) run(`UPDATE Producto SET precioProveedor = ? WHERE idProducto = ?`, [maxP, idProd])
-        } else {
-          const precio = parseFloat(String(validItems.find(it => parseInt(it.idProducto) === idProd)?.precioUnitario).replace(',', '.')) || 0
-          if (precio > 0) run(`UPDATE Producto SET precioProveedor = ? WHERE idProducto = ?`, [precio, idProd])
+      if (esEdicion) {
+        // Actualizar — preserva estado logístico y de pago actuales
+        const pedidoPayload = {
+          fecha:           pedidoEditando.fecha,
+          monto:           total,
+          estadoPago:      pedidoEditando.estadoPago,
+          estadoLogistico: pedidoEditando.estadoLogistico,
+          fechaRecepcion:  pedidoEditando.fechaRecepcion ?? null,
+          fechaPago:       pedidoEditando.fechaPago      ?? null,
+          metodoPago:      metodoPago,
+          idProveedor:     proveedor?.idProveedor ?? null,
+          nombreProveedor: proveedor?.nombreComercial || proveedor?.nombreFiscal || null,
         }
+        await actualizarPedido(pedidoEditando.idPedido, pedidoPayload, detallesPayload)
+        onGuardado(pedidoEditando.idPedido)
+      } else {
+        const pedidoPayload = {
+          fecha:           today(),
+          monto:           total,
+          estadoPago:      'pendiente',
+          estadoLogistico: 'encargado',
+          metodoPago:      metodoPago,
+          idProveedor:     proveedor?.idProveedor ?? null,
+          nombreProveedor: proveedor?.nombreComercial || proveedor?.nombreFiscal || null,
+        }
+        const creado = await crearPedido(pedidoPayload, detallesPayload)
+        onGuardado(creado.idPedido)
       }
-
-      onGuardado(pedidoReal)
+    } catch (err) {
+      setError(err.message || 'Ocurrió un error al guardar el pedido.')
+    } finally {
+      setSaving(false)
     }
+  }
+
+  if (loadingInit) {
+    return (
+      <div className="max-w-5xl mx-auto flex items-center justify-center py-24">
+        <p className="text-surface-400 text-sm font-body">Cargando pedido...</p>
+      </div>
+    )
   }
 
   return (
@@ -1056,8 +1099,8 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
                 <AlertCircle size={14} className="flex-shrink-0" />{error}
               </div>
             )}
-            <Button size="lg" icon={esEdicion ? Pencil : ShoppingCart} onClick={guardar}>
-              {esEdicion ? 'Guardar cambios' : 'Guardar Pedido'}
+            <Button size="lg" icon={esEdicion ? Pencil : ShoppingCart} onClick={guardar} disabled={saving}>
+              {saving ? 'Guardando...' : (esEdicion ? 'Guardar cambios' : 'Guardar Pedido')}
             </Button>
           </div>
         </div>
@@ -1072,8 +1115,7 @@ const PAGE_SIZE = 20
 
 export default function PedidosCompra() {
   const [pedidos,      setPedidos]      = useState([])
-  // vista: 'lista' | 'nuevo' | 'detalle' | 'editar'
-  const [vista,        setVista]        = useState('lista')
+  const [vista,        setVista]        = useState('lista') // 'lista' | 'nuevo' | 'detalle' | 'editar'
   const [selected,     setSelected]     = useState(null)
   const [filterEst,    setFilterEst]    = useState('all')
   const [filterLog,    setFilterLog]    = useState('all')
@@ -1083,21 +1125,15 @@ export default function PedidosCompra() {
   const [page,         setPage]         = useState(1)
   const [toast,        setToast]        = useState('')
 
-  const load = useCallback(() => {
-    let sql = `
-      SELECT pc.*,
-             COALESCE(pc.nombreProveedor, pr.nombreComercial, pr.nombreFiscal) AS nombreProveedor,
-             pr.nombreFiscal AS nombreFiscalProv
-      FROM PedidoCompra pc
-      LEFT JOIN Proveedor pr ON pr.idProveedor = pc.idProveedor
-      WHERE 1=1`
-    const params = []
-    if (filterEst !== 'all') { sql += ` AND pc.estadoPago = ?`;      params.push(filterEst) }
-    if (filterLog !== 'all') { sql += ` AND pc.estadoLogistico = ?`; params.push(filterLog) }
-    if (filterDesde)         { sql += ` AND pc.fecha >= ?`;           params.push(filterDesde) }
-    if (filterHasta)         { sql += ` AND pc.fecha <= ?`;           params.push(filterHasta) }
-    sql += ` ORDER BY pc.idPedido DESC`
-    setPedidos(query(sql, params))
+  const load = useCallback(async () => {
+    const data = await obtenerPedidos({
+      estadoPago:      filterEst  !== 'all' ? filterEst  : null,
+      estadoLogistico: filterLog  !== 'all' ? filterLog  : null,
+      fechaDesde:      filterDesde || null,
+      fechaHasta:      filterHasta || null,
+      orden:           'desc',
+    })
+    setPedidos(data)
     setPage(1)
   }, [filterEst, filterLog, filterDesde, filterHasta])
 
@@ -1106,14 +1142,14 @@ export default function PedidosCompra() {
   const totalPendiente = pedidos.filter(p => p.estadoPago === 'pendiente').reduce((a, p) => a + p.monto, 0)
   const totalPagado    = pedidos.filter(p => p.estadoPago === 'pagado').reduce((a, p) => a + p.monto, 0)
 
+  // Filtro de proveedor/ID se hace en cliente (no pasa al service) igual que antes
   const filteredPedidos = filterProv.trim()
     ? pedidos.filter(p => {
-        const term = norm(filterProv.trim())
+        const term      = norm(filterProv.trim())
         const isNumeric = /^\d+$/.test(filterProv.trim())
         return (
           (isNumeric ? String(p.idPedido) === filterProv.trim() : false) ||
-          (p.nombreProveedor   && norm(p.nombreProveedor).includes(term)) ||
-          (p.nombreFiscalProv  && norm(p.nombreFiscalProv).includes(term))
+          (p.nombreProveedor && norm(p.nombreProveedor).includes(term))
         )
       })
     : pedidos

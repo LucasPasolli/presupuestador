@@ -2,17 +2,29 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import Presupuestador from './Presupuestador'
-import { query, run } from '../lib/database'
 import { generarPDFPresupuesto } from '../lib/pdfPresupuesto'
 import { Card, PageHeader, Button, Badge, Modal } from '../components/ui'
 import {
   Search, ChevronDown, ChevronUp, ArrowLeft, FileText,
   Clock, CheckCircle2, XCircle, ThumbsUp, AlertCircle, Trash2, Download, Pencil, X, Wallet, Tag
 } from 'lucide-react'
+import {
+  obtenerPresupuestos,
+  obtenerPresupuestoPorId,
+  obtenerDetallesDePresupuesto,
+  actualizarEstadoPresupuesto,
+  eliminarPresupuesto,
+} from '../services/presupuestosService'
+import { obtenerClientePorId } from '../services/clientesService'
+import {
+  crearSaldo,
+  obtenerSaldos,
+  obtenerSaldoPorPresupuesto,
+  eliminarSaldoPorPresupuesto,
+} from '../services/saldosService'
+import { descontarStock } from '../services/productosService'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
-
-
 
 const METODOS_PAGO = {
   efectivo:      { label: 'Efectivo',         badge: 'green'  },
@@ -45,24 +57,11 @@ function pctLabel(factor) {
 
 const PAGE_SIZE = 30
 
-// ─── Descuento de stock ─────────────────────────────────────────────────────
-
-function descontarStock(idPresupuesto) {
-  const detalles = query(
-    `SELECT idProducto, medida, cantidad FROM DetallePresupuesto WHERE idPresupuesto = ?`,
-    [idPresupuesto]
-  )
-  for (const d of detalles) {
-    const prod = query('SELECT tieneMedidas FROM Producto WHERE idProducto = ?', [d.idProducto])[0]
-    if (!prod) continue  // producto ya eliminado → ignorar descuento de stock
-    if (prod.tieneMedidas && d.medida) {
-      run(`UPDATE ProductoMedida SET cantidad = MAX(0, cantidad - ?) WHERE idProducto = ? AND medida = ?`,
-        [d.cantidad, d.idProducto, d.medida])
-    } else {
-      run(`UPDATE Producto SET cantidad = MAX(0, cantidad - ?) WHERE idProducto = ?`,
-        [d.cantidad, d.idProducto])
-    }
-  }
+const METODOS_FACTOR = {
+  efectivo:      0.95,
+  transferencia: 0.95,
+  cc15:          1.00,
+  cc30:          1.105,
 }
 
 // ─── Vista detalle ─────────────────────────────────────────────────────────
@@ -77,90 +76,108 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
   const [errorModal, setErrorModal] = useState('')
   const [delConfirm, setDelConfirm] = useState(false)
 
-  const reload = useCallback(() => {
+  const reload = useCallback(async () => {
     setLoading(true)
-    const p = query('SELECT * FROM Presupuesto WHERE idPresupuesto = ?', [pres.idPresupuesto])[0]
-    if (p) setPres(p)
-    const rows = query(`
-      SELECT dp.*,
-             COALESCE(dp.nombreProducto, pr.nombre, '(producto eliminado #' || dp.idProducto || ')') AS nombreProducto
-      FROM DetallePresupuesto dp
-      LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
-      WHERE dp.idPresupuesto = ? ORDER BY dp.idDetalle
-    `, [pres.idPresupuesto])
-    setDetalles(rows)
-    const cl  = query('SELECT * FROM Cliente WHERE idCliente = ?', [pres.idCliente])[0]
-    setCliente(cl ?? null)
-    const sal = query('SELECT * FROM Saldo WHERE idPresupuesto = ?', [pres.idPresupuesto])[0]
-    setSaldo(sal ?? null)
-    setLoading(false)
+    try {
+      const [p, rows, sal] = await Promise.all([
+        obtenerPresupuestoPorId(pres.idPresupuesto),
+        obtenerDetallesDePresupuesto(pres.idPresupuesto),
+        obtenerSaldoPorPresupuesto(pres.idPresupuesto),
+      ])
+      if (p) setPres(p)
+      setDetalles(rows)
+      setSaldo(sal)
+
+      try {
+        const cl = await obtenerClientePorId(pres.idCliente)
+        setCliente(cl)
+      } catch {
+        setCliente(null) // cliente eliminado
+      }
+    } catch (err) {
+      console.error('[PresupuestoDetalle] Error recargando:', err)
+    } finally {
+      setLoading(false)
+    }
   }, [pres.idPresupuesto, pres.idCliente])
 
   useEffect(() => { reload() }, [reload])
 
   const esCC        = pres.metodoPago === 'cc15' || pres.metodoPago === 'cc30'
   const esExcepcion = pres.esExcepcion === 1
-  const estado      = ESTADOS[pres.estado] ?? ESTADOS.borrador
+  const estado      = ESTADOS[pres.estado]  ?? ESTADOS.borrador
   const metodo      = METODOS_PAGO[pres.metodoPago] ?? { label: pres.metodoPago, badge: 'gray' }
   const puedeActuar = pres.estado === 'borrador' || pres.estado === 'aprobado'
 
-  // ── Factor real del MÉTODO DE PAGO ─────────────────────────────────────
-  // Fuente de verdad: factores fijos definidos en METODOS_BASE.
-  // Para excepciones, el factor se deriva de (monto / subtotalConPromo), donde
-  // subtotalConPromo = suma de detalles (ya con descuentos de promo aplicados).
-  // NO se usa pres.monto / pres.montoOriginal porque eso mezclaría promos + método.
-  const METODOS_FACTOR = {
-    efectivo:      0.95,
-    transferencia: 0.95,
-    cc15:          1.00,
-    cc30:          1.105,
-  }
-
-  // subtotalConPromo calculado en tiempo de render (igual que en el bloque de Totales)
-  // Lo calculamos aquí para poder derivar factorReal antes del JSX.
   const _subtotalConPromo = detalles.reduce((acc, d) => acc + (parseFloat(d.subtotal) || 0), 0)
-
   let factorReal
   if (esExcepcion) {
-    // Para excepción: factor = monto / subtotalConPromo (ajuste manual sobre subtotal ya con promos)
     factorReal = _subtotalConPromo > 0 ? (parseFloat(pres.monto) || 0) / _subtotalConPromo : 1
   } else {
-    // Para métodos estándar: siempre usamos el factor fijo del método
     factorReal = METODOS_FACTOR[pres.metodoPago] ?? 1
   }
-
   const ajusteLabel = pctLabel(factorReal)
 
-  function cambiarEstado(nuevoEstado) {
+  async function cambiarEstado(nuevoEstado) {
     setErrorModal('')
-    const estadoAnterior = pres.estado
-    run(`UPDATE Presupuesto SET estado = ? WHERE idPresupuesto = ?`, [nuevoEstado, pres.idPresupuesto])
-    const debeDescontar = (nuevoEstado === 'aprobado' || nuevoEstado === 'pagado') &&
-                          estadoAnterior !== 'aprobado' && estadoAnterior !== 'pagado'
-    if (debeDescontar) descontarStock(pres.idPresupuesto)
-    if (nuevoEstado === 'aprobado' && esCC) {
-      const yaExiste = query('SELECT idSaldo FROM Saldo WHERE idPresupuesto = ?', [pres.idPresupuesto])[0]
-      if (!yaExiste) {
-        const diasCC   = pres.metodoPago === 'cc15' ? 15 : 30
-        const fechaFin = new Date(pres.fecha)
-        fechaFin.setDate(fechaFin.getDate() + diasCC)
-        run(`INSERT INTO Saldo (idPresupuesto, idCliente, fechaInicio, fechaFin, monto, estado) VALUES (?,?,?,?,?,'pendiente')`,
-          [pres.idPresupuesto, pres.idCliente, pres.fecha, fechaFin.toISOString().slice(0,10), pres.monto])
+    try {
+      const estadoAnterior = pres.estado
+
+      await actualizarEstadoPresupuesto(pres.idPresupuesto, nuevoEstado)
+
+      // Descontar stock si pasa a aprobado/pagado por primera vez
+      const debeDescontar = (nuevoEstado === 'aprobado' || nuevoEstado === 'pagado') &&
+                            estadoAnterior !== 'aprobado' && estadoAnterior !== 'pagado'
+      if (debeDescontar) {
+        for (const d of detalles) {
+          try {
+            await descontarStock(d.idProducto, d.cantidad, d.medida ?? null)
+          } catch {
+            // producto eliminado → ignorar
+          }
+        }
       }
+
+      // Crear saldo si pasa a aprobado y es CC
+      if (nuevoEstado === 'aprobado' && esCC) {
+        const yaExiste = await obtenerSaldoPorPresupuesto(pres.idPresupuesto)
+        if (!yaExiste) {
+          const diasCC   = pres.metodoPago === 'cc15' ? 15 : 30
+          const fechaFin = new Date(pres.fecha)
+          fechaFin.setDate(fechaFin.getDate() + diasCC)
+          await crearSaldo({
+            idPresupuesto: pres.idPresupuesto,
+            idCliente:     pres.idCliente,
+            fechaInicio:   pres.fecha,
+            fechaVto:      fechaFin.toISOString().slice(0, 10),
+            monto:         pres.monto,
+            estado:        'pendiente',
+          })
+        }
+      }
+
+      // Eliminar saldo si se rechaza
+      if (nuevoEstado === 'rechazado') {
+        await eliminarSaldoPorPresupuesto(pres.idPresupuesto)
+      }
+
+      setModal(null)
+      await reload()
+      onUpdated()
+    } catch (err) {
+      setErrorModal(err.message)
     }
-    if (nuevoEstado === 'rechazado') {
-      run(`DELETE FROM Saldo WHERE idPresupuesto = ?`, [pres.idPresupuesto])
-    }
-    setModal(null)
-    reload()
-    onUpdated()
   }
 
-  function eliminar() {
-    run(`DELETE FROM Presupuesto WHERE idPresupuesto = ?`, [pres.idPresupuesto])
-    setDelConfirm(false)
-    onUpdated()
-    onBack()
+  async function eliminar() {
+    try {
+      await eliminarPresupuesto(pres.idPresupuesto)
+      setDelConfirm(false)
+      onUpdated()
+      onBack()
+    } catch (err) {
+      console.error('[PresupuestoDetalle] Error eliminando:', err)
+    }
   }
 
   return (
@@ -179,8 +196,7 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
         </div>
         <div className="flex items-center gap-2">
           {pres.estado === 'borrador' && (
-            <Button size="sm" variant="secondary" icon={Pencil}
-              onClick={() => onEditar(pres.idPresupuesto)}>
+            <Button size="sm" variant="secondary" icon={Pencil} onClick={() => onEditar(pres.idPresupuesto)}>
               Editar
             </Button>
           )}
@@ -202,7 +218,7 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
             <Badge color={BADGE[estado.color]}>{estado.label}</Badge>
             <Badge color={BADGE[metodo.badge]}>{metodo.label}</Badge>
             {esExcepcion && <Badge color="violet">Excepción</Badge>}
-            {saldo && <Badge color={saldo.estado==='pagado'?'green':'yellow'}>Saldo {saldo.estado}</Badge>}
+            {saldo && <Badge color={saldo.estado === 'pagado' ? 'green' : 'yellow'}>Saldo {saldo.estado}</Badge>}
           </div>
         </div>
 
@@ -214,19 +230,25 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
           <div className="bg-surface-700 rounded-xl p-4 col-span-2">
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Cliente</p>
             {cliente
-              ? <><p className="text-white text-sm font-body font-medium">{cliente.nombre} {cliente.apellido}</p>
-                  <p className="text-surface-400 text-xs font-mono mt-0.5">ID #{cliente.idCliente}{cliente.telefono?` · ${cliente.telefono}`:''}</p></>
-              : <><p className="text-white text-sm font-body font-medium">
+              ? <>
+                  <p className="text-white text-sm font-body font-medium">{cliente.nombre} {cliente.apellido}</p>
+                  <p className="text-surface-400 text-xs font-mono mt-0.5">
+                    ID #{cliente.idCliente}{cliente.telefono ? ` · ${cliente.telefono}` : ''}
+                  </p>
+                </>
+              : <>
+                  <p className="text-white text-sm font-body font-medium">
                     {pres.nombreCliente ? `${pres.nombreCliente} ${pres.apellidoCliente ?? ''}`.trim() : `ID #${pres.idCliente}`}
                   </p>
-                  <p className="text-surface-500 text-xs font-mono mt-0.5">Cliente eliminado · ID #{pres.idCliente}</p></>}
+                  <p className="text-surface-500 text-xs font-mono mt-0.5">Cliente eliminado · ID #{pres.idCliente}</p>
+                </>
+            }
           </div>
           <div className="bg-surface-700 rounded-xl p-4">
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Método</p>
             <p className="text-white text-sm font-body">
               {esExcepcion ? `Excepción (${metodo.label})` : metodo.label}
             </p>
-            {/* Siempre muestra el % real aplicado, calculado de los montos guardados */}
             <p className={`text-xs font-mono mt-0.5 ${factorReal < 1 ? 'text-emerald-400' : factorReal > 1 ? 'text-red-400' : 'text-surface-500'}`}>
               {ajusteLabel}
             </p>
@@ -320,36 +342,23 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
       {/* Totales */}
       <Card className="p-6">
         {(() => {
-          // precioLista: suma de precioUnitario * cantidad (precio de catálogo, antes de promos)
-          const precioLista     = detalles.reduce((acc, d) => acc + (parseFloat(d.precioUnitario) || 0) * (parseFloat(d.cantidad) || 0), 0)
-          // subtotalConPromo: suma de subtotales (precio con promo ya aplicada * cantidad)
-          // Equivale a pres.montoOriginal, pero lo recalculamos desde los detalles para precisión.
+          const precioLista      = detalles.reduce((acc, d) => acc + (parseFloat(d.precioUnitario) || 0) * (parseFloat(d.cantidad) || 0), 0)
           const subtotalConPromo = detalles.reduce((acc, d) => acc + (parseFloat(d.subtotal) || 0), 0)
-          // ahorroPromo: diferencia entre precio de lista y subtotal con promos aplicadas
-          const ahorroPromo  = precioLista - subtotalConPromo
-          // ajusteMetodo: diferencia entre monto final y subtotal con promos.
-          // Representa ÚNICAMENTE el ajuste del método de pago (descuento efectivo/transf o recargo CC).
-          const ajusteMetodo = (parseFloat(pres.monto) || 0) - subtotalConPromo
+          const ahorroPromo      = precioLista - subtotalConPromo
+          const ajusteMetodo     = (parseFloat(pres.monto) || 0) - subtotalConPromo
           return (
             <div className="ml-auto w-fit min-w-[280px] space-y-2 text-sm font-body">
-
-              {/* Subtotal precio lista */}
               <div className="flex justify-between gap-8">
                 <span className="text-surface-400 shrink-0">Subtotal (lista):</span>
                 <span className="text-surface-200 font-mono text-right">{fmt(precioLista)}</span>
               </div>
-
-              {/* Ahorro por promociones — solo si existe */}
               {ahorroPromo > 0.01 && (
                 <>
                   <div className="flex justify-between gap-8 items-center">
                     <span className="flex items-center gap-1.5 text-emerald-400 shrink-0">
-                      <Tag size={11} />
-                      Ahorro por promociones:
+                      <Tag size={11} />Ahorro por promociones:
                     </span>
-                    <span className="text-emerald-400 font-mono font-medium text-right">
-                      − {fmt(ahorroPromo)}
-                    </span>
+                    <span className="text-emerald-400 font-mono font-medium text-right">− {fmt(ahorroPromo)}</span>
                   </div>
                   <div className="flex justify-between gap-8">
                     <span className="text-surface-400 shrink-0">Subtotal con promos:</span>
@@ -357,8 +366,6 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
                   </div>
                 </>
               )}
-
-              {/* Ajuste por método de pago */}
               <div className="flex justify-between gap-8">
                 <span className="text-surface-400 shrink-0">
                   Ajuste por método de pago
@@ -367,21 +374,12 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
                   )}:
                 </span>
                 <span className={`font-mono font-medium text-right ${
-                  Math.abs(ajusteMetodo) < 0.01
-                    ? 'text-surface-400'
-                    : ajusteMetodo < 0
-                      ? 'text-emerald-400'
-                      : 'text-red-400'
-                }`}>
-                  {Math.abs(ajusteMetodo) < 0.01
-                    ? '—'
-                    : ajusteMetodo < 0
-                      ? `- ${fmt(Math.abs(ajusteMetodo))}`
-                      : `+ ${fmt(ajusteMetodo)}`}
+                  Math.abs(ajusteMetodo) < 0.01 ? 'text-surface-400'
+                  : ajusteMetodo < 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {Math.abs(ajusteMetodo) < 0.01 ? '—'
+                    : ajusteMetodo < 0 ? `- ${fmt(Math.abs(ajusteMetodo))}` : `+ ${fmt(ajusteMetodo)}`}
                 </span>
               </div>
-
-              {/* Total */}
               <div className="border-t border-surface-700 pt-2 flex justify-between gap-8">
                 <span className="text-white font-semibold shrink-0">Total:</span>
                 <span className="text-brand-400 font-mono font-bold text-lg text-right">{fmt(pres.monto)}</span>
@@ -392,10 +390,7 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
       </Card>
 
       {saldo && (
-        <div
-          className="cursor-pointer group"
-          onClick={() => onNavigarSaldo && onNavigarSaldo(saldo)}
-        >
+        <div className="cursor-pointer group" onClick={() => onNavigarSaldo && onNavigarSaldo(saldo)}>
           <Card className="p-5 group-hover:border-brand-500/40 group-hover:bg-surface-700/20 transition-all">
             <div className="flex items-center justify-between mb-4">
               <p className="text-surface-400 text-xs uppercase tracking-widest font-body flex items-center gap-1.5">
@@ -412,7 +407,7 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
               </div>
               <div className="bg-surface-700 rounded-xl p-3">
                 <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Vence</p>
-                <p className="text-white text-sm font-mono">{fmtFecha(saldo.fechaFin)}</p>
+                <p className="text-white text-sm font-mono">{fmtFecha(saldo.fechaVto)}</p>
               </div>
               <div className="bg-surface-700 rounded-xl p-3">
                 <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Estado</p>
@@ -431,13 +426,17 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
 
       {/* Modales estado */}
       {[
-        { key:'aprobar',  title:'Aprobar presupuesto', body:`Presupuesto #${pres.idPresupuesto} → Aprobado. Se descuenta stock y se genera saldo pendiente de cobro.`, action:()=>cambiarEstado('aprobado'), label:'Aprobar', icon:ThumbsUp },
-        { key:'pagar',    title:'Registrar pago',      body:`Presupuesto #${pres.idPresupuesto} → Pagado. El ingreso de ${fmt(pres.monto)} se reflejará en estadísticas.`, action:()=>cambiarEstado('pagado'),   label:'Confirmar pago', icon:CheckCircle2 },
-        { key:'rechazar', title:'Rechazar presupuesto',body:`Presupuesto #${pres.idPresupuesto} → Rechazado. No afecta stock.`, action:()=>cambiarEstado('rechazado'), label:'Rechazar', icon:XCircle, danger:true },
+        { key:'aprobar',  title:'Aprobar presupuesto',  body:`Presupuesto #${pres.idPresupuesto} → Aprobado. Se descuenta stock y se genera saldo pendiente de cobro.`, action:()=>cambiarEstado('aprobado'),   label:'Aprobar',        icon:ThumbsUp },
+        { key:'pagar',    title:'Registrar pago',        body:`Presupuesto #${pres.idPresupuesto} → Pagado. El ingreso de ${fmt(pres.monto)} se reflejará en estadísticas.`, action:()=>cambiarEstado('pagado'),     label:'Confirmar pago', icon:CheckCircle2 },
+        { key:'rechazar', title:'Rechazar presupuesto',  body:`Presupuesto #${pres.idPresupuesto} → Rechazado. No afecta stock.`, action:()=>cambiarEstado('rechazado'), label:'Rechazar',       icon:XCircle, danger:true },
       ].map(m => (
         <Modal key={m.key} open={modal===m.key} onClose={()=>{setModal(null);setErrorModal('')}} title={m.title} width="max-w-sm">
           <p className="text-surface-300 text-sm font-body mb-4">{m.body}</p>
-          {errorModal && <div className="flex items-center gap-2 text-red-400 text-xs bg-red-500/10 border border-red-500/30 rounded-xl px-3 py-2 mb-4"><AlertCircle size={13}/>{errorModal}</div>}
+          {errorModal && (
+            <div className="flex items-center gap-2 text-red-400 text-xs bg-red-500/10 border border-red-500/30 rounded-xl px-3 py-2 mb-4">
+              <AlertCircle size={13}/>{errorModal}
+            </div>
+          )}
           <div className="flex gap-2">
             <Button variant="secondary" className="flex-1" onClick={()=>{setModal(null);setErrorModal('')}}>Cancelar</Button>
             <Button variant={m.danger?'danger':'primary'} className="flex-1" icon={m.icon} onClick={m.action}>{m.label}</Button>
@@ -455,7 +454,6 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
           <Button variant="danger" className="flex-1" icon={Trash2} onClick={eliminar}>Eliminar</Button>
         </div>
       </Modal>
-
     </div>
   )
 }
@@ -476,46 +474,67 @@ export default function Historial() {
   const [sortKey,      setSortKey]      = useState('id')
   const [page,         setPage]         = useState(1)
   const [selected,     setSelected]     = useState(null)
-  const [editando,     setEditando]     = useState(null)  // idPresupuesto being edited
+  const [editando,     setEditando]     = useState(null)
 
-  const load = useCallback(() => {
-    let sql = `
-      SELECT p.*,
-             COALESCE(c.nombre,  p.nombreCliente)   AS clienteNombre,
-             COALESCE(c.apellido,p.apellidoCliente) AS clienteApellido,
-             s.estado AS saldoEstado
-      FROM Presupuesto p
-      LEFT JOIN Cliente c ON c.idCliente = p.idCliente
-      LEFT JOIN Saldo   s ON s.idPresupuesto = p.idPresupuesto
-      WHERE 1=1`
-    const params = []
-    if (search.trim()) {
-      const q = search.trim()
-      const isNumeric = /^\d+$/.test(q)
-      if (isNumeric) {
-        // Búsqueda exacta por ID
-        sql += ` AND p.idPresupuesto=?`
-        params.push(parseInt(q))
-      } else {
-        const parts = q.split(/\s+/)
-        if (parts.length >= 2) {
-          const p1 = parts[0], p2 = parts.slice(1).join(' ')
-          sql += ` AND ((c.nombre LIKE ? AND c.apellido LIKE ?) OR (c.nombre LIKE ? AND c.apellido LIKE ?) OR c.nombre LIKE ? OR c.apellido LIKE ?)`
-          params.push(`%${p1}%`, `%${p2}%`, `%${p2}%`, `%${p1}%`, `%${q}%`, `%${q}%`)
+  const load = useCallback(async () => {
+    try {
+      // Cargar presupuestos y todos los saldos en paralelo
+      const [datos, saldos] = await Promise.all([
+        obtenerPresupuestos({
+          estado:      filterEstado !== 'all' ? filterEstado : null,
+          metodoPago:  filterMetodo !== 'all' ? filterMetodo : null,
+          esExcepcion: soloExcepcion ? true : null,
+          fechaDesde:  filterFechaD || null,
+          fechaHasta:  filterFechaH || null,
+          orden:       sortDir,
+          limite:      2000,
+        }),
+        // Traer todos los saldos para cruzar con presupuestos (igual que el LEFT JOIN original)
+        obtenerSaldos({ limite: 5000 }),
+      ])
+
+      // Construir mapa de saldos por idPresupuesto para O(1) lookup
+      const saldoMap = {}
+      for (const s of saldos) {
+        saldoMap[s.idPresupuesto] = s.estado
+      }
+
+      // Enriquecer presupuestos con saldoEstado (igual que el LEFT JOIN original)
+      let resultado = datos.map(p => ({
+        ...p,
+        saldoEstado: saldoMap[p.idPresupuesto] ?? null,
+      }))
+
+      // Filtrado de texto en cliente (requiere lógica multi-campo con split)
+      if (search.trim()) {
+        const q = search.trim()
+        const isNumeric = /^\d+$/.test(q)
+        if (isNumeric) {
+          resultado = resultado.filter(p => String(p.idPresupuesto) === q)
         } else {
-          sql += ` AND (c.nombre LIKE ? OR c.apellido LIKE ?)`
-          params.push(`%${q}%`, `%${q}%`)
+          const parts = q.toLowerCase().split(/\s+/)
+          resultado = resultado.filter(p => {
+            const nombre   = (p.nombreCliente   ?? '').toLowerCase()
+            const apellido = (p.apellidoCliente ?? '').toLowerCase()
+            const full     = `${nombre} ${apellido}`
+            return parts.every(part => full.includes(part))
+          })
         }
       }
+
+      // Ordenar en cliente según sortKey
+      resultado = [...resultado].sort((a, b) => {
+        const valA = sortKey === 'fecha' ? a.fecha : a.idPresupuesto
+        const valB = sortKey === 'fecha' ? b.fecha : b.idPresupuesto
+        if (typeof valA === 'string') return sortDir === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA)
+        return sortDir === 'asc' ? valA - valB : valB - valA
+      })
+
+      setPresupuestos(resultado)
+      setPage(1)
+    } catch (err) {
+      console.error('[Historial] Error cargando:', err)
     }
-    if (filterMetodo !== 'all') { sql += ` AND p.metodoPago=?`; params.push(filterMetodo) }
-    if (filterEstado !== 'all') { sql += ` AND p.estado=?`;     params.push(filterEstado) }
-    if (soloExcepcion)          { sql += ` AND p.esExcepcion=1` }
-    if (filterFechaD)           { sql += ` AND p.fecha>=?`; params.push(filterFechaD) }
-    if (filterFechaH)           { sql += ` AND p.fecha<=?`; params.push(filterFechaH) }
-    sql += ` ORDER BY ${sortKey === 'fecha' ? 'p.fecha' : 'p.idPresupuesto'} ${sortDir.toUpperCase()}`
-    setPresupuestos(query(sql, params))
-    setPage(1)
   }, [search, filterMetodo, filterEstado, soloExcepcion, filterFechaD, filterFechaH, sortDir, sortKey])
 
   useEffect(() => { load() }, [load])
@@ -524,28 +543,16 @@ export default function Historial() {
   useEffect(() => {
     const id = location.state?.verPresupuesto
     if (!id) return
-    const p = query(
-      `SELECT p.*,
-              COALESCE(c.nombre,  p.nombreCliente)   AS clienteNombre,
-              COALESCE(c.apellido,p.apellidoCliente) AS clienteApellido,
-              s.estado AS saldoEstado
-       FROM Presupuesto p
-       LEFT JOIN Cliente c ON c.idCliente = p.idCliente
-       LEFT JOIN Saldo   s ON s.idPresupuesto = p.idPresupuesto
-       WHERE p.idPresupuesto = ?`,
-      [id]
-    )[0]
-    if (p) setSelected(p)
-    // Limpiar el state para que no se reactive en re-renders
+    obtenerPresupuestoPorId(id).then(p => { if (p) setSelected(p) }).catch(() => {})
     navigate(location.pathname, { replace: true, state: {} })
   }, [location.state?.verPresupuesto])
 
   const paginated  = presupuestos.slice((page-1)*PAGE_SIZE, page*PAGE_SIZE)
   const totalPages = Math.max(1, Math.ceil(presupuestos.length/PAGE_SIZE))
-  const totalMonto = presupuestos.filter(p => p.estado === 'pagado' || (p.saldoEstado === 'pagado')).reduce((a,p) => a+p.monto, 0)
+  // Idéntico al original
+  const totalMonto = presupuestos.filter(p => p.estado === 'pagado' || p.saldoEstado === 'pagado').reduce((a, p) => a + p.monto, 0)
   const pendCobro  = presupuestos.filter(p => p.saldoEstado === 'pendiente').length
-  const hasFilters = search || filterMetodo!=='all' || filterEstado!=='all' || filterFechaD || filterFechaH
-  const hasAnyFilter = hasFilters || soloExcepcion
+  const hasAnyFilter = search || filterMetodo !== 'all' || filterEstado !== 'all' || filterFechaD || filterFechaH || soloExcepcion
 
   function toggleSort(key) {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
@@ -557,24 +564,15 @@ export default function Historial() {
     return sortDir === 'asc' ? <ChevronUp size={13} className="inline ml-1" /> : <ChevronDown size={13} className="inline ml-1" />
   }
 
-  function irADetalle(id) {
+  async function irADetalle(id) {
     setEditando(null)
-    const pActualizado = query(
-      `SELECT p.*,
-              COALESCE(c.nombre,  p.nombreCliente)   AS clienteNombre,
-              COALESCE(c.apellido,p.apellidoCliente) AS clienteApellido,
-              s.estado AS saldoEstado
-       FROM Presupuesto p
-       LEFT JOIN Cliente c ON c.idCliente = p.idCliente
-       LEFT JOIN Saldo   s ON s.idPresupuesto = p.idPresupuesto
-       WHERE p.idPresupuesto = ?`,
-      [id]
-    )[0]
-    if (pActualizado) setSelected(pActualizado)
-    load()
+    try {
+      const p = await obtenerPresupuestoPorId(id)
+      if (p) setSelected(p)
+      load()
+    } catch (err) { console.error('[Historial] irADetalle:', err) }
   }
 
-  // ── Modo edición: muestra el Presupuestador con datos cargados ──
   if (editando) return (
     <Presupuestador
       presupuestoEditar={editando}
@@ -586,7 +584,7 @@ export default function Historial() {
   if (selected) return (
     <PresupuestoDetalle
       presupuesto={selected}
-      onBack={()=>{ setSelected(null); load() }}
+      onBack={() => { setSelected(null); load() }}
       onUpdated={load}
       onEditar={(id) => { setEditando(id); setSelected(null) }}
       onNavigarSaldo={(saldo) => {
@@ -605,7 +603,7 @@ export default function Historial() {
         <div className="flex flex-wrap gap-3 items-end">
           <div className="relative flex-1 min-w-[180px]">
             <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
-            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar por ID o cliente..."
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Buscar por ID o cliente..."
               className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2 text-white
                          text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all" />
           </div>
@@ -621,21 +619,20 @@ export default function Historial() {
               <select value={filterMetodo} onChange={e => {
                 const nuevoMetodo = e.target.value
                 setFilterMetodo(nuevoMetodo)
-                // Solo resetear estado si la combinación es inválida
-                const nuevoEsCC = nuevoMetodo === 'cc15' || nuevoMetodo === 'cc30'
+                const nuevoEsCC          = nuevoMetodo === 'cc15' || nuevoMetodo === 'cc30'
                 const nuevoEsEfectTransf = nuevoMetodo === 'efectivo' || nuevoMetodo === 'transferencia'
-                if (nuevoEsCC && filterEstado === 'pagado')   setFilterEstado('all')
+                if (nuevoEsCC          && filterEstado === 'pagado')   setFilterEstado('all')
                 if (nuevoEsEfectTransf && filterEstado === 'aprobado') setFilterEstado('all')
               }}
                 className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer">
                 <option value="all">Todos los métodos</option>
-                {metodosFiltrados.map(([v,m]) => <option key={v} value={v}>{m.label}</option>)}
+                {metodosFiltrados.map(([v, m]) => <option key={v} value={v}>{m.label}</option>)}
               </select>
             )
           })()}
 
           {(() => {
-            const esCC = filterMetodo === 'cc15' || filterMetodo === 'cc30'
+            const esCC          = filterMetodo === 'cc15' || filterMetodo === 'cc30'
             const esEfectTransf = filterMetodo === 'efectivo' || filterMetodo === 'transferencia'
             const estadosFiltrados = Object.entries(ESTADOS).filter(([v]) => {
               if (v === 'pagado'   && esCC)          return false
@@ -646,53 +643,45 @@ export default function Historial() {
               <select value={filterEstado} onChange={e => {
                 const nuevoEstado = e.target.value
                 setFilterEstado(nuevoEstado)
-                // Solo resetear método si la combinación es inválida
-                const metodoEsCC = filterMetodo === 'cc15' || filterMetodo === 'cc30'
+                const metodoEsCC          = filterMetodo === 'cc15' || filterMetodo === 'cc30'
                 const metodoEsEfectTransf = filterMetodo === 'efectivo' || filterMetodo === 'transferencia'
                 if (nuevoEstado === 'pagado'   && metodoEsCC)          setFilterMetodo('all')
                 if (nuevoEstado === 'aprobado' && metodoEsEfectTransf) setFilterMetodo('all')
               }}
                 className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer">
                 <option value="all">Todos los estados</option>
-                {estadosFiltrados.map(([v,s]) => <option key={v} value={v}>{s.label}</option>)}
+                {estadosFiltrados.map(([v, s]) => <option key={v} value={v}>{s.label}</option>)}
               </select>
             )
           })()}
 
-          {/* Checkbox excepción */}
           <label className="flex items-center gap-2 cursor-pointer select-none bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 transition-all hover:border-surface-500">
-            <input type="checkbox" checked={soloExcepcion} onChange={e=>setSoloExcepcion(e.target.checked)}
+            <input type="checkbox" checked={soloExcepcion} onChange={e => setSoloExcepcion(e.target.checked)}
               className="w-3.5 h-3.5 rounded accent-brand-500 cursor-pointer" />
             <span className="text-surface-300 text-sm font-body">Solo excepciones</span>
           </label>
 
           <div className="flex flex-col gap-1">
             <label className="text-surface-400 text-xs uppercase tracking-widest font-body">Desde</label>
-            <input type="date" value={filterFechaD} onChange={e=>setFilterFechaD(e.target.value)}
+            <input type="date" value={filterFechaD} onChange={e => setFilterFechaD(e.target.value)}
               className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-surface-400 text-xs uppercase tracking-widest font-body">Hasta</label>
-            <input type="date" value={filterFechaH} onChange={e=>setFilterFechaH(e.target.value)}
+            <input type="date" value={filterFechaH} onChange={e => setFilterFechaH(e.target.value)}
               className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
           </div>
 
           {hasAnyFilter && (
             <button
               onClick={() => {
-                setSearch('')
-                setFilterMetodo('all')
-                setFilterEstado('all')
-                setSoloExcepcion(false)
-                setFilterFechaD('')
-                setFilterFechaH('')
+                setSearch(''); setFilterMetodo('all'); setFilterEstado('all')
+                setSoloExcepcion(false); setFilterFechaD(''); setFilterFechaH('')
               }}
               className="flex items-center gap-2 bg-surface-700 border border-surface-600 rounded-xl px-3 py-2
                          text-surface-300 text-sm font-body hover:border-red-500/50 hover:text-red-400
-                         hover:bg-red-500/10 transition-all cursor-pointer whitespace-nowrap"
-            >
-              <X size={13} />
-              Limpiar filtros
+                         hover:bg-red-500/10 transition-all cursor-pointer whitespace-nowrap">
+              <X size={13} />Limpiar filtros
             </button>
           )}
         </div>
@@ -704,16 +693,12 @@ export default function Historial() {
           <table className="w-full text-sm font-body">
             <thead>
               <tr className="border-b border-surface-700">
-                <th
-                  className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
-                  onClick={() => toggleSort('id')}
-                >
+                <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
+                  onClick={() => toggleSort('id')}>
                   <div className="flex items-center gap-1">ID <SortIcon col="id" /></div>
                 </th>
-                <th
-                  className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
-                  onClick={() => toggleSort('fecha')}
-                >
+                <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
+                  onClick={() => toggleSort('fecha')}>
                   <div className="flex items-center gap-1">Fecha <SortIcon col="fecha" /></div>
                 </th>
                 {['Cliente','Método','Estado','Total','Saldo',''].map(h => (
@@ -723,28 +708,30 @@ export default function Historial() {
             </thead>
             <tbody>
               {paginated.map(p => {
-                const m  = METODOS_PAGO[p.metodoPago] ?? { label:p.metodoPago, badge:'gray' }
-                const e  = ESTADOS[p.estado] ?? ESTADOS.borrador
+                const m = METODOS_PAGO[p.metodoPago] ?? { label: p.metodoPago, badge: 'gray' }
+                const e = ESTADOS[p.estado] ?? ESTADOS.borrador
                 return (
-                  <tr key={p.idPresupuesto} onClick={()=>setSelected(p)}
+                  <tr key={p.idPresupuesto} onClick={() => setSelected(p)}
                     className="border-b border-surface-700/50 hover:bg-surface-700/40 cursor-pointer transition-colors">
                     <td className="py-3 px-4 text-brand-400 font-mono text-sm font-bold">#{p.idPresupuesto}</td>
                     <td className="py-3 px-4 text-surface-300 font-mono text-xs">{fmtFecha(p.fecha)}</td>
                     <td className="py-3 px-4 text-white font-body">
-                      {p.clienteNombre ? `${p.clienteNombre} ${p.clienteApellido}` : <span className="text-surface-500 font-mono text-xs">#{p.idCliente}</span>}
+                      {p.nombreCliente
+                        ? `${p.nombreCliente} ${p.apellidoCliente ?? ''}`
+                        : <span className="text-surface-500 font-mono text-xs">#{p.idCliente}</span>}
                     </td>
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-1">
                         <Badge color={BADGE[m.badge]}>{m.label}</Badge>
-                        {p.esExcepcion===1 && <Badge color="violet">Exc.</Badge>}
+                        {p.esExcepcion === 1 && <Badge color="violet">Exc.</Badge>}
                       </div>
                     </td>
                     <td className="py-3 px-4"><Badge color={BADGE[e.color]}>{e.label}</Badge></td>
                     <td className="py-3 px-4 text-white font-mono font-medium">{fmt(p.monto)}</td>
                     <td className="py-3 px-4">
-                      {p.saldoEstado==='pendiente' && <Badge color="yellow">Pendiente</Badge>}
-                      {p.saldoEstado==='pagado'    && <Badge color="green">Cobrado</Badge>}
-                      {!p.saldoEstado              && <span className="text-surface-600 text-xs">—</span>}
+                      {p.saldoEstado === 'pendiente' && <Badge color="yellow">Pendiente</Badge>}
+                      {p.saldoEstado === 'pagado'    && <Badge color="green">Cobrado</Badge>}
+                      {!p.saldoEstado                && <span className="text-surface-600 text-xs">—</span>}
                     </td>
                     <td className="py-3 px-4 text-surface-500"><FileText size={15}/></td>
                   </tr>
@@ -764,11 +751,11 @@ export default function Historial() {
         {totalPages > 1 && (
           <div className="flex items-center justify-between px-6 py-3 border-t border-surface-700">
             <p className="text-surface-400 text-xs font-body">
-              {(page-1)*PAGE_SIZE+1}–{Math.min(page*PAGE_SIZE,presupuestos.length)} de {presupuestos.length}
+              {(page-1)*PAGE_SIZE+1}–{Math.min(page*PAGE_SIZE, presupuestos.length)} de {presupuestos.length}
             </p>
             <div className="flex gap-2">
-              <Button size="sm" variant="secondary" onClick={()=>setPage(p=>Math.max(1,p-1))} disabled={page===1}>← Anterior</Button>
-              <Button size="sm" variant="secondary" onClick={()=>setPage(p=>Math.min(totalPages,p+1))} disabled={page===totalPages}>Siguiente →</Button>
+              <Button size="sm" variant="secondary" onClick={() => setPage(p => Math.max(1, p-1))} disabled={page===1}>← Anterior</Button>
+              <Button size="sm" variant="secondary" onClick={() => setPage(p => Math.min(totalPages, p+1))} disabled={page===totalPages}>Siguiente →</Button>
             </div>
           </div>
         )}

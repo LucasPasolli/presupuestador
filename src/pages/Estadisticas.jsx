@@ -1,6 +1,6 @@
 // src/pages/Estadisticas.jsx
 import { useState, useEffect, useCallback } from 'react'
-import { query } from '../lib/database'
+import { obtenerMetricas } from '../services/estadisticasService'
 import { Card, PageHeader, Button } from '../components/ui'
 import {
   TrendingUp, TrendingDown, Wallet, Clock, Users, Package,
@@ -359,347 +359,6 @@ function GraficoDona({ datos }) {
   )
 }
 
-// ─── Carga de todas las métricas ───────────────────────────────────────────
-
-function calcularMetricas(desde, hasta) {
-  const m = {}
-
-  // ── 1. Presupuestos del período (aprobados + pagados) ─────────────────────
-  const presupuestosPeriodo = query(`
-    SELECT p.idPresupuesto, p.monto, p.montoOriginal, p.metodoPago, p.fecha, p.idCliente, p.estado
-    FROM Presupuesto p
-    WHERE p.fecha >= ? AND p.fecha <= ?
-      AND p.estado IN ('aprobado','pagado')
-  `, [desde, hasta])
-
-  m.facturadoTotal    = presupuestosPeriodo.reduce((a, p) => a + p.monto, 0)
-  m.totalPresupuestos = presupuestosPeriodo.length
-  m.ticketPromedio    = m.totalPresupuestos ? m.facturadoTotal / m.totalPresupuestos : 0
-
-  // ── Cálculo de descuentos ────────────────────────────────────────────────
-  // DetallePresupuesto.precioUnitario = precio de lista del producto al momento del presupuesto
-  // DetallePresupuesto.precioConPromo = precio efectivo con promo (null si no hubo promo)
-  // DetallePresupuesto.subtotal       = (precioConPromo ?? precioUnitario) * cantidad
-  // Presupuesto.montoOriginal         = suma de subtotales (ya incluye descuentos de promo)
-  // Presupuesto.monto                 = montoOriginal * factor método de pago
-  //
-  // Por lo tanto:
-  //   precio lista por pres  = SUM(dp.precioUnitario * dp.cantidad)
-  //   subtotal con promos    = SUM(dp.subtotal)  ≡  pres.montoOriginal
-  //   descuentosPromos       = precio lista - subtotal con promos
-  //   descuentosMetodoPago   = subtotal con promos - monto final  (solo si monto < subtotalConPromo)
-  //   recargosCC             = monto final - subtotal con promos  (solo si monto > subtotalConPromo)
-  //   descuentosOtorgados    = precio lista - monto final
-
-  // Subtotal con promos aplicadas por presupuesto (antes del factor de método de pago)
-  const subtotalConPromosPorPres = presupuestosPeriodo.length > 0 ? query(`
-    SELECT dp.idPresupuesto,
-           SUM(dp.subtotal) AS subtotalConPromos
-    FROM DetallePresupuesto dp
-    WHERE dp.idPresupuesto IN (${presupuestosPeriodo.map(() => '?').join(',')})
-    GROUP BY dp.idPresupuesto
-  `, presupuestosPeriodo.map(p => p.idPresupuesto)) : []
-
-  const mapaSubtotal = Object.fromEntries(
-    subtotalConPromosPorPres.map(r => [r.idPresupuesto, r.subtotalConPromos ?? 0])
-  )
-
-  // montoOriginal = precio de lista puro (sin promos, sin método de pago)
-  // mapaSubtotal  = subtotal con promos (sin método de pago)
-  // monto         = total final (con promos + método de pago)
-
-  m.descuentosPromos = presupuestosPeriodo.reduce((a, p) => {
-    const lista       = p.montoOriginal ?? p.monto
-    const conPromos   = mapaSubtotal[p.idPresupuesto] ?? lista
-    const diff = lista - conPromos
-    return a + (diff > 0 ? diff : 0)
-  }, 0)
-
-  m.descuentosMetodoPago = presupuestosPeriodo.reduce((a, p) => {
-    const conPromos = mapaSubtotal[p.idPresupuesto] ?? (p.montoOriginal ?? p.monto)
-    const diff = conPromos - p.monto
-    return a + (diff > 0 ? diff : 0)
-  }, 0)
-
-  m.recargosCC = presupuestosPeriodo.reduce((a, p) => {
-    const conPromos = mapaSubtotal[p.idPresupuesto] ?? (p.montoOriginal ?? p.monto)
-    const diff = p.monto - conPromos
-    return a + (diff > 0 ? diff : 0)
-  }, 0)
-
-  // Total combinado (precio lista → monto final)
-  m.descuentosOtorgados = presupuestosPeriodo.reduce((a, p) => {
-    const diff = (p.montoOriginal ?? p.monto) - p.monto
-    return a + (diff > 0 ? diff : 0)
-  }, 0)
-
-  // ── 2. Cobrado real vs. pendiente CC ──────────────────────────────────────
-  // Saldos CC generados por presupuestos del período
-  const saldosDelPeriodo = query(`
-    SELECT s.monto, s.estado, s.idPresupuesto
-    FROM Saldo s
-    JOIN Presupuesto p ON p.idPresupuesto = s.idPresupuesto
-    WHERE p.fecha >= ? AND p.fecha <= ?
-  `, [desde, hasta])
-
-  const montoCCPagado    = saldosDelPeriodo.filter(s => s.estado === 'pagado').reduce((a, s) => a + s.monto, 0)
-  const montoCCPendiente = saldosDelPeriodo.filter(s => s.estado === 'pendiente').reduce((a, s) => a + s.monto, 0)
-
-  // Contado: efectivo + transferencia con estado 'pagado'
-  const montoContado = presupuestosPeriodo
-    .filter(p => (p.metodoPago === 'efectivo' || p.metodoPago === 'transferencia') && p.estado === 'pagado')
-    .reduce((a, p) => a + p.monto, 0)
-
-  // cobradoReal = solo ventas cobradas (contado pagado + CC pagado)
-  // Los ingresos de la tabla Ingreso NO se suman aquí — son ingresos extra separados
-  m.cobradoReal = montoContado + montoCCPagado
-  m.pendienteCC = montoCCPendiente
-
-  // Ingresos extra del período (tabla Ingreso) — se muestran por separado
-  m.ingresosExtra = query(`
-    SELECT COALESCE(SUM(monto),0) as v FROM Ingreso
-    WHERE fecha >= ? AND fecha <= ?
-  `, [desde, hasta])[0]?.v ?? 0
-
-  // Dinero invertido activo (tabla Inversion, global — no filtrado por período)
-  const invAll = query(`SELECT monto, estado FROM Inversion`)
-  const totalInvertido = invAll.filter(r => r.estado === 'invertido').reduce((a, r) => a + r.monto, 0)
-  const totalRetirado  = invAll.filter(r => r.estado === 'retirado').reduce((a, r) => a + r.monto, 0)
-  m.dineroInvertido = totalInvertido - totalRetirado
-
-  // ── 3. Saldos por vencer — rangos EXCLUSIVOS (global, no filtrado por período) ──
-  const hoy  = today()
-  const en15 = new Date(); en15.setDate(en15.getDate() + 15)
-  const en30 = new Date(); en30.setDate(en30.getDate() + 30)
-  const hoyStr  = hoy
-  const en15Str = en15.toISOString().slice(0, 10)
-  const en30Str = en30.toISOString().slice(0, 10)
-
-  // JOIN con Cliente usando LEFT JOIN para sobrevivir a clientes eliminados
-  const saldosPendientesGlobal = query(`
-    SELECT s.monto, s.fechaFin,
-           COALESCE(p.nombreCliente,  c.nombre,  '') AS nombre,
-           COALESCE(p.apellidoCliente, c.apellido, '') AS apellido
-    FROM Saldo s
-    JOIN Presupuesto p ON p.idPresupuesto = s.idPresupuesto
-    LEFT JOIN Cliente c ON c.idCliente = s.idCliente
-    WHERE s.estado = 'pendiente'
-    ORDER BY s.fechaFin ASC
-  `)
-
-  // Vencidos: fechaFin < hoy
-  m.saldosVencidos    = saldosPendientesGlobal
-    .filter(s => s.fechaFin < hoyStr)
-    .reduce((a, s) => a + s.monto, 0)
-  // Por vencer en los próximos 15 días (sin incluir vencidos)
-  m.saldosPorVencer15 = saldosPendientesGlobal
-    .filter(s => s.fechaFin >= hoyStr && s.fechaFin <= en15Str)
-    .reduce((a, s) => a + s.monto, 0)
-  // Entre 16 y 30 días
-  m.saldosPorVencer30 = saldosPendientesGlobal
-    .filter(s => s.fechaFin > en15Str && s.fechaFin <= en30Str)
-    .reduce((a, s) => a + s.monto, 0)
-  // Próximos vencimientos (los 5 más cercanos que aún no vencieron)
-  m.proxSaldos = saldosPendientesGlobal
-    .filter(s => s.fechaFin >= hoyStr)
-    .slice(0, 5)
-
-  // ── 5. Mix de métodos de pago ─────────────────────────────────────────────
-  const metodoLabels = { efectivo: 'Efectivo', transferencia: 'Transferencia', cc15: 'CC 15d', cc30: 'CC 30d' }
-  const porMetodo = {}
-  for (const p of presupuestosPeriodo) {
-    if (!porMetodo[p.metodoPago]) porMetodo[p.metodoPago] = 0
-    porMetodo[p.metodoPago] += p.monto
-  }
-  m.mixMetodos = Object.entries(porMetodo)
-    .map(([k, v]) => ({ value: k, label: metodoLabels[k] ?? k, monto: v }))
-    .sort((a, b) => b.monto - a.monto)
-
-  // ── 9. Top productos (top 10 para card + todos para modal) ──────────────
-  // Usa COALESCE(dp.nombreProducto, pr.nombre) para sobrevivir a productos eliminados
-  m.topProductos = query(`
-    SELECT COALESCE(dp.nombreProducto, pr.nombre, '(producto eliminado)') AS nombre,
-           SUM(dp.cantidad)  AS unidades,
-           SUM(dp.subtotal)  AS monto
-    FROM DetallePresupuesto dp
-    JOIN Presupuesto p ON p.idPresupuesto = dp.idPresupuesto
-    LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
-    WHERE p.fecha >= ? AND p.fecha <= ?
-      AND p.estado IN ('aprobado', 'pagado')
-    GROUP BY dp.idProducto, COALESCE(dp.nombreProducto, pr.nombre)
-    ORDER BY unidades DESC
-    LIMIT 10
-  `, [desde, hasta])
-
-  // Lista completa de productos vendidos (sin límite) para el modal
-  m.todosProductosVendidos = query(`
-    SELECT dp.idProducto,
-           COALESCE(dp.nombreProducto, pr.nombre, '(producto eliminado)') AS nombre,
-           SUM(dp.cantidad)  AS unidades,
-           SUM(dp.subtotal)  AS monto
-    FROM DetallePresupuesto dp
-    JOIN Presupuesto p ON p.idPresupuesto = dp.idPresupuesto
-    LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
-    WHERE p.fecha >= ? AND p.fecha <= ?
-      AND p.estado IN ('aprobado', 'pagado')
-    GROUP BY dp.idProducto, COALESCE(dp.nombreProducto, pr.nombre)
-    ORDER BY unidades DESC
-  `, [desde, hasta])
-
-  // ── 7. Top 10 clientes ───────────────────────────────────────────────────
-  // Usa snapshot nombreCliente/apellidoCliente del Presupuesto + LEFT JOIN por si acaso
-  m.topClientes = query(`
-    SELECT COALESCE(p.nombreCliente,  c.nombre,  'Cliente eliminado') ||
-           ' ' ||
-           COALESCE(p.apellidoCliente, c.apellido, '')               AS nombre,
-           COUNT(DISTINCT p.idPresupuesto) AS presupuestos,
-           SUM(p.monto)                    AS monto
-    FROM Presupuesto p
-    LEFT JOIN Cliente c ON c.idCliente = p.idCliente
-    WHERE p.fecha >= ? AND p.fecha <= ?
-      AND p.estado IN ('aprobado', 'pagado')
-    GROUP BY p.idCliente
-    ORDER BY monto DESC
-    LIMIT 10
-  `, [desde, hasta])
-
-  // ── 8. Clientes únicos del período ───────────────────────────────────────
-  m.clientesUnicos = query(`
-    SELECT COUNT(DISTINCT idCliente) AS c FROM Presupuesto
-    WHERE fecha >= ? AND fecha <= ?
-      AND estado IN ('pagado', 'aprobado')
-  `, [desde, hasta])[0]?.c ?? 0
-
-  // ── 9. Egresos del período ────────────────────────────────────────────────
-  m.egresosPedidos = query(`
-    SELECT COALESCE(SUM(monto), 0) AS v FROM PedidoCompra
-    WHERE fecha >= ? AND fecha <= ?
-      AND estadoPago = 'pagado'
-  `, [desde, hasta])[0]?.v ?? 0
-
-  // Egresos extra (sueldos, transporte, servicios, etc.)
-  m.egresosExtra = query(`
-    SELECT COALESCE(SUM(monto), 0) AS v FROM Egreso
-    WHERE fecha >= ? AND fecha <= ?
-  `, [desde, hasta])[0]?.v ?? 0
-
-  m.egresosTotal = m.egresosPedidos + m.egresosExtra
-
-  // Pedidos pendientes de pago — deuda con proveedores
-  // CORRECCIÓN: estadoPago (no estado)
-  m.pedidosPendientes = query(`
-    SELECT COALESCE(SUM(monto), 0) AS v FROM PedidoCompra
-    WHERE fecha >= ? AND fecha <= ?
-      AND estadoPago = 'pendiente'
-  `, [desde, hasta])[0]?.v ?? 0
-
-  // ── 10. Resultado operativo ───────────────────────────────────────────────
-  // Ingreso por ventas + ingresos extra (tabla Ingreso) - egresos totales
-  m.resultadoEstimado = m.cobradoReal + m.ingresosExtra - m.egresosTotal
-
-  // ── 11. Tasa de conversión de presupuestos ────────────────────────────────
-  const todosLosPres = query(`
-    SELECT estado FROM Presupuesto
-    WHERE fecha >= ? AND fecha <= ?
-  `, [desde, hasta])
-  const totalTodos   = todosLosPres.length
-  const totalConvertidos = todosLosPres.filter(p => ['aprobado','pagado'].includes(p.estado)).length
-  const totalRechazados  = todosLosPres.filter(p => p.estado === 'rechazado').length
-  const totalBorradores  = todosLosPres.filter(p => p.estado === 'borrador').length
-  m.tasaConversion = totalTodos ? (totalConvertidos / totalTodos) * 100 : 0
-  m.totalTodosEstados = totalTodos
-  m.totalRechazados = totalRechazados
-  m.totalBorradores = totalBorradores
-
-  // ── 12. Stock crítico (global, independiente del período) ─────────────────
-  m.stockCritico = query(`
-    SELECT p.nombre, p.cantidad, p.puntoReposicion,
-           c.nombre AS categoria
-    FROM Producto p
-    LEFT JOIN Categoria c ON c.idCategoria = p.idCategoria
-    WHERE p.puntoReposicion > 0
-      AND p.cantidad <= p.puntoReposicion
-    ORDER BY (p.cantidad * 1.0 / NULLIF(p.puntoReposicion, 0)) ASC
-    LIMIT 10
-  `)
-  m.cantidadStockCritico = query(`
-    SELECT COUNT(*) AS c FROM Producto
-    WHERE puntoReposicion > 0 AND cantidad <= puntoReposicion
-  `)[0]?.c ?? 0
-
-  // ── 13. Top categorías por ventas ─────────────────────────────────────────
-  m.topCategorias = query(`
-    SELECT COALESCE(cat.nombre, 'Sin categoría') AS nombre,
-           SUM(dp.cantidad)  AS unidades,
-           SUM(dp.subtotal)  AS monto
-    FROM DetallePresupuesto dp
-    JOIN Presupuesto p ON p.idPresupuesto = dp.idPresupuesto
-    LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
-    LEFT JOIN Categoria cat ON cat.idCategoria = pr.idCategoria
-    WHERE p.fecha >= ? AND p.fecha <= ?
-      AND p.estado IN ('aprobado','pagado')
-    GROUP BY cat.idCategoria, cat.nombre
-    ORDER BY monto DESC
-    LIMIT 8
-  `, [desde, hasta])
-
-  // ── 14. Egresos por categoría ─────────────────────────────────────────────
-  m.egresosPorCategoria = query(`
-    SELECT categoria AS label, SUM(monto) AS monto
-    FROM Egreso
-    WHERE fecha >= ? AND fecha <= ?
-    GROUP BY categoria
-    ORDER BY monto DESC
-  `, [desde, hasta])
-
-  // ── 15. Top proveedores por volumen de compra ─────────────────────────────
-  m.topProveedores = query(`
-    SELECT COALESCE(nombreProveedor, 'Sin proveedor') AS nombre,
-           COUNT(*) AS pedidos,
-           SUM(monto) AS monto
-    FROM PedidoCompra
-    WHERE fecha >= ? AND fecha <= ?
-    GROUP BY COALESCE(nombreProveedor, 'Sin proveedor')
-    ORDER BY monto DESC
-    LIMIT 8
-  `, [desde, hasta])
-
-  // ── 16. Clientes recurrentes vs nuevos ────────────────────────────────────
-  // "Recurrente" = tuvo presupuesto aprobado/pagado ANTES del período actual
-  const clientesDelPeriodo = query(`
-    SELECT DISTINCT idCliente FROM Presupuesto
-    WHERE fecha >= ? AND fecha <= ?
-      AND estado IN ('aprobado','pagado')
-  `, [desde, hasta])
-
-  let recurrentes = 0
-  for (const { idCliente } of clientesDelPeriodo) {
-    const anterior = query(`
-      SELECT COUNT(*) AS c FROM Presupuesto
-      WHERE idCliente = ? AND fecha < ?
-        AND estado IN ('aprobado','pagado')
-    `, [idCliente, desde])[0]?.c ?? 0
-    if (anterior > 0) recurrentes++
-  }
-  m.clientesRecurrentes = recurrentes
-  m.clientesNuevos = clientesDelPeriodo.length - recurrentes
-
-  // ── 17. Margen bruto estimado (precio venta vs. precio proveedor) ─────────
-  const margenData = query(`
-    SELECT SUM(dp.subtotal) AS ventaTotal,
-           SUM(dp.cantidad * COALESCE(pr.precioProveedor, 0)) AS costoTotal
-    FROM DetallePresupuesto dp
-    JOIN Presupuesto p ON p.idPresupuesto = dp.idPresupuesto
-    LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
-    WHERE p.fecha >= ? AND p.fecha <= ?
-      AND p.estado IN ('aprobado','pagado')
-  `, [desde, hasta])[0] ?? {}
-  m.margenBrutoMonto = (margenData.ventaTotal ?? 0) - (margenData.costoTotal ?? 0)
-  m.margenBrutoPct = margenData.ventaTotal
-    ? (m.margenBrutoMonto / margenData.ventaTotal) * 100 : 0
-
-  return m
-}
 
 // ─── Componente principal ──────────────────────────────────────────────────
 
@@ -716,24 +375,29 @@ export default function Estadisticas() {
   const [rangoIdx,  setRangoIdx]  = useState(0)
   const [desdeCustom, setDesdeCustom] = useState('')
   const [hastaCustom, setHastaCustom] = useState(today())
-  const [metricas,  setMetricas]  = useState(null)
+  const [metricas,       setMetricas]       = useState(null)
+  const [cargando,       setCargando]       = useState(false)
   const [modalProductos, setModalProductos] = useState(false)
 
   const desde = rangoIdx < 4 ? RANGOS[rangoIdx].desde() : desdeCustom
   const hasta = rangoIdx < 4 ? RANGOS[rangoIdx].hasta() : hastaCustom
 
-  const cargar = useCallback(() => {
+  const cargar = useCallback(async () => {
     if (!desde || !hasta) return
+    setCargando(true)
     try {
-      setMetricas(calcularMetricas(desde, hasta))
+      const resultado = await obtenerMetricas(desde, hasta)
+      setMetricas(resultado)
     } catch(e) {
       console.error('Error calculando métricas:', e)
+    } finally {
+      setCargando(false)
     }
   }, [desde, hasta])
 
   useEffect(() => { cargar() }, [cargar])
 
-  if (!metricas) return (
+  if (!metricas || cargando) return (
     <div className="flex items-center justify-center h-64">
       <div className="w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
     </div>

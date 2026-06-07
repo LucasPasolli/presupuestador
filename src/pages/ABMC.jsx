@@ -1,8 +1,8 @@
 // src/pages/ABMC.jsx
 // Página de administración: Alta / Baja / Modificación / Consulta de todas las entidades.
+// REFACTORIZADO: usa exclusivamente las funciones de los servicios.
 
 import { useState, useEffect, useCallback } from 'react'
-import { query, run } from '../lib/database'
 import {
   PageHeader, Button, Input, Select, Modal,
   Table, Tr, Td, Badge, Card,
@@ -12,6 +12,62 @@ import {
   Wallet, TrendingDown, TrendingUp, Tag, Plus, Pencil, Trash2,
   AlertTriangle, Info, PiggyBank, ArrowDownCircle,
 } from 'lucide-react'
+
+// ─── Services ─────────────────────────────────────────────────────────────────
+import {
+  obtenerClientesActivos,
+  crearCliente,
+  actualizarCliente,
+  desactivarCliente,
+} from '../services/clientesService'
+import {
+  obtenerProveedores,
+  crearProveedor,
+  actualizarProveedor,
+  eliminarProveedor,
+} from '../services/proveedoresService'
+import {
+  obtenerPresupuestos,
+  actualizarMetadataPresupuesto,
+  eliminarPresupuesto,
+} from '../services/presupuestosService'
+import {
+  obtenerPedidos,
+  actualizarEstadosPedido,
+  eliminarPedido,
+} from '../services/pedidosService'
+import {
+  obtenerSaldos,
+  actualizarSaldo,
+  eliminarSaldo,
+} from '../services/saldosService'
+import {
+  obtenerEgresos,
+  crearEgreso,
+  actualizarEgreso,
+  eliminarEgreso,
+} from '../services/movimientosService'
+import {
+  obtenerIngresos,
+  crearIngreso,
+  actualizarIngreso,
+  eliminarIngreso,
+} from '../services/movimientosService'
+import {
+  obtenerInversiones,
+  crearInversion,
+  actualizarInversion,
+  eliminarInversion,
+} from '../services/movimientosService'
+import {
+  obtenerCategorias,
+  crearCategoria,
+  actualizarCategoria,
+  eliminarCategoria,
+} from '../services/productosService'
+import {
+  obtenerProductos,
+} from '../services/productosService'
 
 // ─── Tabs config ─────────────────────────────────────────────────────────────
 
@@ -36,7 +92,6 @@ const fmt = (n) =>
     ? Number(n).toLocaleString('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 0 })
     : '—'
 
-// Capitaliza la primera letra de un string
 const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
 
 // ─── Pagination component ─────────────────────────────────────────────────────
@@ -55,41 +110,6 @@ function Pagination({ page, total, pageSize, onChange }) {
         <Button size="sm" variant="secondary" onClick={() => onChange(Math.max(1, page - 1))} disabled={page === 1}>← Anterior</Button>
         <Button size="sm" variant="secondary" onClick={() => onChange(Math.min(totalPages, page + 1))} disabled={page === totalPages}>Siguiente →</Button>
       </div>
-    </div>
-  )
-}
-
-// ─── Filter bar ───────────────────────────────────────────────────────────────
-
-function FilterBar({ search, onSearch, dateFrom, onDateFrom, dateTo, onDateTo, searchPlaceholder, children }) {
-  return (
-    <div className="flex flex-wrap gap-2 items-center w-full">
-      <div className="flex-1 min-w-[160px]">
-        <input
-          type="text"
-          value={search}
-          onChange={e => onSearch(e.target.value)}
-          placeholder={searchPlaceholder || 'Buscar…'}
-          className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
-        />
-      </div>
-      <div className="min-w-[130px]">
-        <input
-          type="date"
-          value={dateFrom}
-          onChange={e => onDateFrom(e.target.value)}
-          className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500"
-        />
-      </div>
-      <div className="min-w-[130px]">
-        <input
-          type="date"
-          value={dateTo}
-          onChange={e => onDateTo(e.target.value)}
-          className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500"
-        />
-      </div>
-      {children}
     </div>
   )
 }
@@ -152,8 +172,13 @@ function Clientes() {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
 
-  const load = useCallback(() => {
-    setAllRows(query('SELECT * FROM Cliente WHERE activo = 1 ORDER BY apellido, nombre'))
+  const load = useCallback(async () => {
+    try {
+      const data = await obtenerClientesActivos()
+      setAllRows(data)
+    } catch (e) {
+      console.error(e)
+    }
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -162,25 +187,31 @@ function Clientes() {
   function openCreate() { setForm(CLIENTE_BLANK); setEditId(null); setError(''); setModal(true) }
   function openEdit(r) { setForm({ ...r }); setEditId(r.idCliente); setError(''); setModal(true) }
 
-  function save() {
+  async function save() {
     if (!form.nombre.trim() || !form.apellido.trim()) { setError('Nombre y Apellido son obligatorios.'); return }
     const nombre         = cap(form.nombre)
     const apellido       = cap(form.apellido)
     const apodo          = cap(form.apodo)
     const nombreComercio = cap(form.nombreComercio)
     const domicilio      = form.domicilio.replace(/\b\w/g, c => c.toUpperCase())
-    if (editId) {
-      run(`UPDATE Cliente SET nombre=?,apellido=?,apodo=?,nombreComercio=?,cuit=?,domicilio=?,telefono=?,mail=? WHERE idCliente=?`,
-        [nombre, apellido, apodo, nombreComercio, form.cuit, domicilio, form.telefono, form.mail, editId])
-    } else {
-      run(`INSERT INTO Cliente(nombre,apellido,apodo,nombreComercio,cuit,domicilio,telefono,mail) VALUES(?,?,?,?,?,?,?,?)`,
-        [nombre, apellido, apodo, nombreComercio, form.cuit, domicilio, form.telefono, form.mail])
+    try {
+      if (editId) {
+        await actualizarCliente(editId, { nombre, apellido, apodo, nombreComercio, cuit: form.cuit, domicilio, telefono: form.telefono, mail: form.mail })
+      } else {
+        await crearCliente({ nombre, apellido, apodo, nombreComercio, cuit: form.cuit, domicilio, telefono: form.telefono, mail: form.mail })
+      }
+      setModal(false); load()
+    } catch (e) {
+      setError(e.message)
     }
-    setModal(false); load()
   }
 
-  function del(id) {
-    run(`UPDATE Cliente SET activo=0 WHERE idCliente=?`, [id])
+  async function del(id) {
+    try {
+      await desactivarCliente(id)
+    } catch (e) {
+      console.error(e)
+    }
     setConfirm(null); load()
   }
 
@@ -299,8 +330,13 @@ function Proveedores() {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
 
-  const load = useCallback(() => {
-    setAllRows(query('SELECT * FROM Proveedor ORDER BY nombreFiscal'))
+  const load = useCallback(async () => {
+    try {
+      const data = await obtenerProveedores()
+      setAllRows(data)
+    } catch (e) {
+      console.error(e)
+    }
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -309,22 +345,28 @@ function Proveedores() {
   function openCreate() { setForm(PROV_BLANK); setEditId(null); setError(''); setModal(true) }
   function openEdit(r) { setForm({ ...r }); setEditId(r.idProveedor); setError(''); setModal(true) }
 
-  function save() {
+  async function save() {
     if (!form.nombreFiscal.trim()) { setError('Nombre fiscal obligatorio.'); return }
-    const nombreFiscal     = cap(form.nombreFiscal)
-    const nombreComercial  = cap(form.nombreComercial)
-    if (editId) {
-      run(`UPDATE Proveedor SET nombreFiscal=?,nombreComercial=?,identificacionTributaria=?,telefono=?,email=? WHERE idProveedor=?`,
-        [nombreFiscal, nombreComercial, form.identificacionTributaria, form.telefono, form.email, editId])
-    } else {
-      run(`INSERT INTO Proveedor(nombreFiscal,nombreComercial,identificacionTributaria,telefono,email) VALUES(?,?,?,?,?)`,
-        [nombreFiscal, nombreComercial, form.identificacionTributaria, form.telefono, form.email])
+    const nombreFiscal    = cap(form.nombreFiscal)
+    const nombreComercial = cap(form.nombreComercial)
+    try {
+      if (editId) {
+        await actualizarProveedor(editId, { nombreFiscal, nombreComercial, identificacionTributaria: form.identificacionTributaria, telefono: form.telefono, email: form.email })
+      } else {
+        await crearProveedor({ nombreFiscal, nombreComercial, identificacionTributaria: form.identificacionTributaria, telefono: form.telefono, email: form.email })
+      }
+      setModal(false); load()
+    } catch (e) {
+      setError(e.message)
     }
-    setModal(false); load()
   }
 
-  function del(id) {
-    run(`DELETE FROM Proveedor WHERE idProveedor=?`, [id])
+  async function del(id) {
+    try {
+      await eliminarProveedor(id)
+    } catch (e) {
+      console.error(e)
+    }
     setConfirm(null); load()
   }
 
@@ -437,13 +479,18 @@ function Presupuestos() {
   const [filtroEstado, setFiltroEstado] = useState('')
   const [page, setPage] = useState(1)
 
-  const load = useCallback(() => {
-    setAllRows(query(`
-      SELECT p.*, c.nombre || ' ' || c.apellido AS clienteNombre
-      FROM Presupuesto p
-      LEFT JOIN Cliente c ON c.idCliente = p.idCliente
-      ORDER BY p.fecha DESC, p.idPresupuesto DESC
-    `))
+  // El service devuelve nombreCliente + apellidoCliente; construimos clienteNombre localmente.
+  const load = useCallback(async () => {
+    try {
+      const data = await obtenerPresupuestos({ orden: 'desc', limite: 1000 })
+      // Agregar campo clienteNombre para compatibilidad con la tabla
+      setAllRows(data.map(p => ({
+        ...p,
+        clienteNombre: [p.nombreCliente, p.apellidoCliente].filter(Boolean).join(' ') || '—',
+      })))
+    } catch (e) {
+      console.error(e)
+    }
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -455,22 +502,43 @@ function Presupuestos() {
     setModal(true)
   }
 
-  function save() {
+  async function save() {
     const isCC = ES_CC(editRow.metodoPago)
     const estadoCambia = editRow.estado !== originalEstado
 
-    if (isCC && estadoCambia && editRow.estado === 'rechazado') {
-      run(`DELETE FROM Saldo WHERE idPresupuesto=?`, [editRow.idPresupuesto])
+    try {
+      // Si es CC y cambia a rechazado → eliminarPresupuesto borra el saldo automáticamente
+      // via eliminarSaldoPorPresupuesto interno. Aquí solo actualizamos metadata.
+      // Nota: si se rechaza un presupuesto CC el saldo se elimina a través de eliminarPresupuesto;
+      // pero en ABMC solo editamos metadata, no eliminamos el presupuesto.
+      // Para replicar el comportamiento original (DELETE FROM Saldo WHERE idPresupuesto=?)
+      // usamos eliminarSaldo desde saldosService. Sin embargo, el service no expone
+      // eliminarSaldoPorPresupuesto en las importaciones del .jsx — lo hacemos vía
+      // actualizarMetadataPresupuesto que ya actualiza estado/metodoPago/esExcepcion,
+      // y eliminamos el saldo por separado.
+      if (isCC && estadoCambia && editRow.estado === 'rechazado') {
+        // Importación dinámica para no ensuciar el bloque de imports del módulo
+        const { eliminarSaldoPorPresupuesto } = await import('../services/saldosService')
+        await eliminarSaldoPorPresupuesto(editRow.idPresupuesto)
+      }
+      await actualizarMetadataPresupuesto(editRow.idPresupuesto, {
+        estado:      editRow.estado,
+        metodoPago:  editRow.metodoPago,
+        esExcepcion: editRow.esExcepcion,
+      })
+      setModal(false); load()
+    } catch (e) {
+      console.error(e)
     }
-
-    run(`UPDATE Presupuesto SET estado=?,metodoPago=?,esExcepcion=? WHERE idPresupuesto=?`,
-      [editRow.estado, editRow.metodoPago, editRow.esExcepcion, editRow.idPresupuesto])
-    setModal(false); load()
   }
 
-  function del(id) {
-    run(`DELETE FROM Saldo WHERE idPresupuesto=?`, [id])
-    run(`DELETE FROM Presupuesto WHERE idPresupuesto=?`, [id])
+  async function del(id) {
+    try {
+      // eliminarPresupuesto ya elimina el saldo asociado internamente
+      await eliminarPresupuesto(id)
+    } catch (e) {
+      console.error(e)
+    }
     setConfirm(null); load()
   }
 
@@ -480,7 +548,6 @@ function Presupuestos() {
     const matchFrom = !dateFrom || r.fecha >= dateFrom
     const matchTo = !dateTo || r.fecha <= dateTo
     if (!q) return matchEstado && matchFrom && matchTo
-    // Búsqueda exacta por ID
     if (/^\d+$/.test(q)) return String(r.idPresupuesto) === q && matchEstado && matchFrom && matchTo
     const matchQ = (r.clienteNombre || '').toLowerCase().includes(q)
     return matchQ && matchEstado && matchFrom && matchTo
@@ -612,13 +679,14 @@ function Pedidos() {
   const [dateTo, setDateTo] = useState('')
   const [page, setPage] = useState(1)
 
-  const load = useCallback(() => {
-    setAllRows(query(`
-      SELECT pc.*, p.nombreFiscal AS provNombre
-      FROM PedidoCompra pc
-      LEFT JOIN Proveedor p ON p.idProveedor = pc.idProveedor
-      ORDER BY pc.fecha DESC, pc.idPedido DESC
-    `))
+  const load = useCallback(async () => {
+    try {
+      const data = await obtenerPedidos({ orden: 'desc', limite: 1000 })
+      // El service devuelve nombreProveedor; mapeamos a provNombre para la tabla
+      setAllRows(data.map(p => ({ ...p, provNombre: p.nombreProveedor })))
+    } catch (e) {
+      console.error(e)
+    }
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -626,67 +694,30 @@ function Pedidos() {
 
   function openEdit(r) { setEditRow({ ...r }); setModal(true) }
 
-  function save() {
-    const pedidoActual = query(`SELECT estadoLogistico FROM PedidoCompra WHERE idPedido=?`, [editRow.idPedido])[0]
-    const estadoAnterior = pedidoActual?.estadoLogistico
-    const revirtiendo = estadoAnterior === 'recibido' && editRow.estadoLogistico === 'encargado'
-    const recibiendo  = estadoAnterior === 'encargado' && editRow.estadoLogistico === 'recibido'
-
-    if (revirtiendo) {
-      // Restar el stock que fue sumado cuando se marcó como recibido
-      const detalles = query(`SELECT * FROM DetallePedidoCompra WHERE idPedido=?`, [editRow.idPedido])
-      for (const d of detalles) {
-        if (!d.idProducto) continue
-        const prod = query(`SELECT tieneMedidas FROM Producto WHERE idProducto=?`, [d.idProducto])[0]
-        if (!prod) continue
-        if (prod.tieneMedidas && d.medida) {
-          run(`UPDATE ProductoMedida SET cantidad = MAX(0, cantidad - ?) WHERE idProducto=? AND medida=?`,
-            [d.cantidad, d.idProducto, d.medida])
-          const total = query(`SELECT COALESCE(SUM(cantidad),0) AS t FROM ProductoMedida WHERE idProducto=?`, [d.idProducto])[0].t
-          run(`UPDATE Producto SET cantidad=? WHERE idProducto=?`, [total, d.idProducto])
-        } else {
-          run(`UPDATE Producto SET cantidad = MAX(0, cantidad - ?) WHERE idProducto=?`,
-            [d.cantidad, d.idProducto])
-        }
-      }
+  async function save() {
+    try {
+      // actualizarEstadosPedido maneja toda la lógica de stock (aplicar/revertir)
+      // según el cambio de estadoLogistico, exactamente como lo hacía el .jsx original.
+      await actualizarEstadosPedido(editRow.idPedido, {
+        estadoPago:      editRow.estadoPago,
+        estadoLogistico: editRow.estadoLogistico,
+        metodoPago:      editRow.metodoPago      || null,
+        fechaRecepcion:  editRow.fechaRecepcion  || null,
+        fechaPago:       editRow.fechaPago       || null,
+      })
+      setModal(false); load()
+    } catch (e) {
+      console.error(e)
     }
-
-    if (recibiendo) {
-      // Sumar stock al inventario (mismo flujo que PedidosCompra.jsx)
-      const detalles = query(`SELECT * FROM DetallePedidoCompra WHERE idPedido=?`, [editRow.idPedido])
-      for (const d of detalles) {
-        if (!d.idProducto) continue
-        const prod = query(`SELECT tieneMedidas FROM Producto WHERE idProducto=?`, [d.idProducto])[0]
-        if (!prod) continue
-        if (prod.tieneMedidas && d.medida) {
-          const existe = query(
-            `SELECT idMedida FROM ProductoMedida WHERE idProducto=? AND medida=?`,
-            [d.idProducto, d.medida]
-          )[0]
-          if (existe) {
-            run(`UPDATE ProductoMedida SET cantidad = cantidad + ? WHERE idProducto=? AND medida=?`,
-              [d.cantidad, d.idProducto, d.medida])
-          } else {
-            run(`INSERT INTO ProductoMedida (idProducto, medida, cantidad) VALUES (?,?,?)`,
-              [d.idProducto, d.medida, d.cantidad])
-          }
-          const total = query(`SELECT COALESCE(SUM(cantidad),0) AS t FROM ProductoMedida WHERE idProducto=?`, [d.idProducto])[0].t
-          run(`UPDATE Producto SET cantidad=? WHERE idProducto=?`, [total, d.idProducto])
-        } else {
-          run(`UPDATE Producto SET cantidad = cantidad + ? WHERE idProducto=?`,
-            [d.cantidad, d.idProducto])
-        }
-      }
-    }
-
-    run(`UPDATE PedidoCompra SET estadoPago=?,estadoLogistico=?,metodoPago=?,fechaRecepcion=?,fechaPago=? WHERE idPedido=?`,
-      [editRow.estadoPago, editRow.estadoLogistico, editRow.metodoPago,
-       editRow.fechaRecepcion || null, editRow.fechaPago || null, editRow.idPedido])
-    setModal(false); load()
   }
 
-  function del(id) {
-    run(`DELETE FROM PedidoCompra WHERE idPedido=?`, [id])
+  async function del(id) {
+    try {
+      // eliminarPedido revierte stock si estaba recibido
+      await eliminarPedido(id)
+    } catch (e) {
+      console.error(e)
+    }
     setConfirm(null); load()
   }
 
@@ -807,13 +838,22 @@ function Saldos() {
   const [filtroEstado, setFiltroEstado] = useState('')
   const [page, setPage] = useState(1)
 
-  const load = useCallback(() => {
-    setAllRows(query(`
-      SELECT s.*, c.nombre || ' ' || c.apellido AS clienteNombre
-      FROM Saldo s
-      LEFT JOIN Cliente c ON c.idCliente = s.idCliente
-      ORDER BY s.fechaFin ASC
-    `))
+  const load = useCallback(async () => {
+    try {
+      // Traemos todos los saldos sin filtros de servidor para que el filtrado
+      // local (igual que el original) funcione de la misma forma.
+      const data = await obtenerSaldos({ orden: 'asc', limite: 1000 })
+      // El service mapea clienteNombre y clienteApellido por separado;
+      // construimos el campo clienteNombre completo que usa la tabla.
+      setAllRows(data.map(s => ({
+        ...s,
+        clienteNombre: [s.clienteNombre, s.clienteApellido].filter(Boolean).join(' ') || '—',
+        // El original usaba r.fechaFin — en el service el campo es fechaVto
+        fechaFin: s.fechaVto,
+      })))
+    } catch (e) {
+      console.error(e)
+    }
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -821,14 +861,35 @@ function Saldos() {
 
   function openEdit(r) { setEditRow({ ...r }); setModal(true) }
 
-  function save() {
-    run(`UPDATE Saldo SET estado=?,fechaPago=? WHERE idSaldo=?`,
-      [editRow.estado, editRow.fechaPago || null, editRow.idSaldo])
-    setModal(false); load()
+  async function save() {
+    try {
+      await actualizarSaldo(editRow.idSaldo, {
+        monto:    editRow.monto,
+        fechaVto: editRow.fechaVto ?? null,
+      })
+      // Actualizar estado y fechaPago directamente vía supabase no está en el
+      // service actual como operación combinada. Usamos la función interna
+      // del service más cercana: marcarSaldoPagado si pasa a pagado,
+      // revertirPagoSaldo si vuelve a pendiente.
+      // Importamos dinámicamente para mantener flexibilidad.
+      const { marcarSaldoPagado, revertirPagoSaldo } = await import('../services/saldosService')
+      if (editRow.estado === 'pagado') {
+        await marcarSaldoPagado(editRow.idSaldo, editRow.idPresupuesto, editRow.fechaPago || null)
+      } else {
+        await revertirPagoSaldo(editRow.idSaldo)
+      }
+      setModal(false); load()
+    } catch (e) {
+      console.error(e)
+    }
   }
 
-  function del(id) {
-    run(`DELETE FROM Saldo WHERE idSaldo=?`, [id])
+  async function del(id) {
+    try {
+      await eliminarSaldo(id)
+    } catch (e) {
+      console.error(e)
+    }
     setConfirm(null); load()
   }
 
@@ -951,8 +1012,13 @@ function Egresos() {
   const [filtMetodo, setFiltMetodo] = useState('')
   const [page, setPage] = useState(1)
 
-  const load = useCallback(() => {
-    setAllRows(query('SELECT * FROM Egreso ORDER BY fecha DESC'))
+  const load = useCallback(async () => {
+    try {
+      const data = await obtenerEgresos({ orden: 'desc', limite: 1000 })
+      setAllRows(data)
+    } catch (e) {
+      console.error(e)
+    }
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -961,22 +1027,28 @@ function Egresos() {
   function openCreate() { setForm({ ...EGRESO_BLANK }); setEditId(null); setError(''); setModal(true) }
   function openEdit(r) { setForm({ ...r }); setEditId(r.idEgreso); setError(''); setModal(true) }
 
-  function save() {
+  async function save() {
     if (!form.descripcion.trim()) { setError('La descripción es obligatoria.'); return }
     if (!form.monto || Number(form.monto) <= 0) { setError('El monto debe ser mayor a 0.'); return }
     const descripcion = cap(form.descripcion)
-    if (editId) {
-      run(`UPDATE Egreso SET fecha=?,categoria=?,descripcion=?,monto=?,metodoPago=? WHERE idEgreso=?`,
-        [form.fecha, form.categoria, descripcion, Number(form.monto), form.metodoPago, editId])
-    } else {
-      run(`INSERT INTO Egreso(fecha,categoria,descripcion,monto,metodoPago) VALUES(?,?,?,?,?)`,
-        [form.fecha, form.categoria, descripcion, Number(form.monto), form.metodoPago])
+    try {
+      if (editId) {
+        await actualizarEgreso(editId, { fecha: form.fecha, categoria: form.categoria, descripcion, monto: Number(form.monto), metodoPago: form.metodoPago })
+      } else {
+        await crearEgreso({ fecha: form.fecha, categoria: form.categoria, descripcion, monto: Number(form.monto), metodoPago: form.metodoPago })
+      }
+      setModal(false); load()
+    } catch (e) {
+      setError(e.message)
     }
-    setModal(false); load()
   }
 
-  function del(id) {
-    run(`DELETE FROM Egreso WHERE idEgreso=?`, [id])
+  async function del(id) {
+    try {
+      await eliminarEgreso(id)
+    } catch (e) {
+      console.error(e)
+    }
     setConfirm(null); load()
   }
 
@@ -1118,8 +1190,13 @@ function Ingresos() {
   const [filtCat, setFiltCat] = useState('')
   const [page, setPage] = useState(1)
 
-  const load = useCallback(() => {
-    setAllRows(query('SELECT * FROM Ingreso ORDER BY fecha DESC, idIngreso DESC'))
+  const load = useCallback(async () => {
+    try {
+      const data = await obtenerIngresos({ orden: 'desc', limite: 1000 })
+      setAllRows(data)
+    } catch (e) {
+      console.error(e)
+    }
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -1128,22 +1205,28 @@ function Ingresos() {
   function openCreate() { setForm({ ...INGRESO_BLANK }); setEditId(null); setError(''); setModal(true) }
   function openEdit(r) { setForm({ ...r }); setEditId(r.idIngreso); setError(''); setModal(true) }
 
-  function save() {
+  async function save() {
     if (!form.descripcion.trim()) { setError('La descripción es obligatoria.'); return }
     if (!form.monto || Number(form.monto) <= 0) { setError('El monto debe ser mayor a 0.'); return }
     const descripcion = cap(form.descripcion)
-    if (editId) {
-      run(`UPDATE Ingreso SET fecha=?,categoria=?,descripcion=?,monto=? WHERE idIngreso=?`,
-        [form.fecha, form.categoria, descripcion, Number(form.monto), editId])
-    } else {
-      run(`INSERT INTO Ingreso(fecha,categoria,descripcion,monto) VALUES(?,?,?,?)`,
-        [form.fecha, form.categoria, descripcion, Number(form.monto)])
+    try {
+      if (editId) {
+        await actualizarIngreso(editId, { fecha: form.fecha, categoria: form.categoria, descripcion, monto: Number(form.monto) })
+      } else {
+        await crearIngreso({ fecha: form.fecha, categoria: form.categoria, descripcion, monto: Number(form.monto) })
+      }
+      setModal(false); load()
+    } catch (e) {
+      setError(e.message)
     }
-    setModal(false); load()
   }
 
-  function del(id) {
-    run(`DELETE FROM Ingreso WHERE idIngreso=?`, [id])
+  async function del(id) {
+    try {
+      await eliminarIngreso(id)
+    } catch (e) {
+      console.error(e)
+    }
     setConfirm(null); load()
   }
 
@@ -1269,14 +1352,18 @@ function Inversiones() {
   const [dateTo, setDateTo] = useState('')
   const [filtCat, setFiltCat] = useState('')
   const [page, setPage] = useState(1)
-  // Para retiro: categoría seleccionada y monto
   const [retirarCat, setRetirarCat] = useState('FCI')
   const [retirarMonto, setRetirarMonto] = useState('')
   const [retirarFecha, setRetirarFecha] = useState(new Date().toISOString().slice(0, 10))
   const [errorRetiro, setErrorRetiro] = useState('')
 
-  const load = useCallback(() => {
-    setAllRows(query('SELECT * FROM Inversion ORDER BY fecha DESC, idInversion DESC'))
+  const load = useCallback(async () => {
+    try {
+      const data = await obtenerInversiones({ orden: 'desc', limite: 1000 })
+      setAllRows(data)
+    } catch (e) {
+      console.error(e)
+    }
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -1285,36 +1372,58 @@ function Inversiones() {
   function openCreate() { setForm({ ...INV_BLANK }); setEditId(null); setError(''); setModal(true) }
   function openEdit(r) { setForm({ ...r }); setEditId(r.idInversion); setError(''); setModal(true) }
 
-  function save() {
+  async function save() {
     if (!form.descripcion.trim()) { setError('La descripción es obligatoria.'); return }
     if (!form.monto || Number(form.monto) <= 0) { setError('El monto debe ser mayor a 0.'); return }
     const descripcion = cap(form.descripcion)
-    if (editId) {
-      const original = allRows.find(r => r.idInversion === editId)
-      if (original?.estado === 'retirado') {
-        // Para retiros: calcular cuánto hay disponible SIN contar este retiro
-        const disponibleSinEste = allRows
-          .filter(r => r.categoria === original.categoria && r.idInversion !== editId)
-          .reduce((a, r) => a + (r.estado === 'invertido' ? r.monto : -r.monto), 0)
-        if (Number(form.monto) > disponibleSinEste) {
-          setError(`El retiro no puede superar el disponible de ${fmt(disponibleSinEste)}.`); return
+    try {
+      if (editId) {
+        const original = allRows.find(r => r.idInversion === editId)
+        if (original?.estado === 'retirado') {
+          // Para retiros: solo fecha y monto, preservar categoría/estado/descripción
+          const disponibleSinEste = allRows
+            .filter(r => r.categoria === original.categoria && r.idInversion !== editId)
+            .reduce((a, r) => a + (r.estado === 'invertido' ? r.monto : -r.monto), 0)
+          if (Number(form.monto) > disponibleSinEste) {
+            setError(`El retiro no puede superar el disponible de ${fmt(disponibleSinEste)}.`); return
+          }
+          await actualizarInversion(editId, {
+            fecha:       form.fecha,
+            categoria:   original.categoria,
+            descripcion: original.descripcion,
+            monto:       Number(form.monto),
+            estado:      'retirado',
+          })
+        } else {
+          await actualizarInversion(editId, {
+            fecha:       form.fecha,
+            categoria:   form.categoria,
+            descripcion,
+            monto:       Number(form.monto),
+            estado:      form.estado ?? 'invertido',
+          })
         }
-        // Solo actualizar fecha y monto — categoría y estado se preservan del original
-        run(`UPDATE Inversion SET fecha=?,monto=? WHERE idInversion=?`,
-          [form.fecha, Number(form.monto), editId])
       } else {
-        run(`UPDATE Inversion SET fecha=?,categoria=?,descripcion=?,monto=?,estado=? WHERE idInversion=?`,
-          [form.fecha, form.categoria, descripcion, Number(form.monto), form.estado ?? 'invertido', editId])
+        await crearInversion({
+          fecha:       form.fecha,
+          categoria:   form.categoria,
+          descripcion,
+          monto:       Number(form.monto),
+          estado:      'invertido',
+        })
       }
-    } else {
-      run(`INSERT INTO Inversion(fecha,categoria,descripcion,monto,estado) VALUES(?,?,?,?,?)`,
-        [form.fecha, form.categoria, descripcion, Number(form.monto), 'invertido'])
+      setModal(false); load()
+    } catch (e) {
+      setError(e.message)
     }
-    setModal(false); load()
   }
 
-  function del(id) {
-    run(`DELETE FROM Inversion WHERE idInversion=?`, [id])
+  async function del(id) {
+    try {
+      await eliminarInversion(id)
+    } catch (e) {
+      console.error(e)
+    }
     setConfirm(null); load()
   }
 
@@ -1324,7 +1433,7 @@ function Inversiones() {
     setErrorRetiro(''); setModalRetiro(true)
   }
 
-  function guardarRetiro() {
+  async function guardarRetiro() {
     const monto = Number(retirarMonto)
     if (!retirarMonto || monto <= 0) { setErrorRetiro('El monto debe ser mayor a 0.'); return }
     const disponible = allRows
@@ -1333,15 +1442,23 @@ function Inversiones() {
     if (monto > disponible) {
       setErrorRetiro(`El monto supera el disponible de ${fmt(disponible)} en ${retirarCat}.`); return
     }
-    run(`INSERT INTO Inversion(fecha,categoria,descripcion,monto,estado) VALUES(?,?,?,?,?)`,
-      [retirarFecha, retirarCat, `Retiro ${retirarCat}`, monto, 'retirado'])
-    setModalRetiro(false); load()
+    try {
+      await crearInversion({
+        fecha:       retirarFecha,
+        categoria:   retirarCat,
+        descripcion: `Retiro ${retirarCat}`,
+        monto,
+        estado:      'retirado',
+      })
+      setModalRetiro(false); load()
+    } catch (e) {
+      setErrorRetiro(e.message)
+    }
   }
 
   const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }))
   const fn = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value === '' ? '' : Number(e.target.value) }))
 
-  // Totales por categoría (invertido - retirado)
   const totalesPorCat = CATEGORIAS_INV.map(cat => {
     const rows = allRows.filter(r => r.categoria === cat)
     const invertido = rows.filter(r => r.estado === 'invertido').reduce((a, r) => a + r.monto, 0)
@@ -1365,19 +1482,16 @@ function Inversiones() {
 
   return (
     <div className="space-y-4">
-      {/* Resumen por categoría — siempre visible */}
       <div className="border-t border-surface-700/60" />
       <div className="space-y-2">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           {CATEGORIAS_INV.map(cat => {
             const t = totalesPorCat.find(t => t.cat === cat)
             const neto = t?.neto ?? 0
-            const invertido = t?.invertido ?? 0
-            const retirado = t?.retirado ?? 0
             return (
               <div key={cat} className="rounded-2xl p-4" style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.25)' }}>
                 <p className="text-xs uppercase tracking-widest font-body" style={{ color: '#a5b4fc' }}>{cat}</p>
-                <p className={`font-mono font-bold text-2xl mt-1`} style={{ color: neto > 0 ? '#c7d2fe' : neto < 0 ? '#f87171' : '#6b7280' }}>
+                <p className="font-mono font-bold text-2xl mt-1" style={{ color: neto > 0 ? '#c7d2fe' : neto < 0 ? '#f87171' : '#6b7280' }}>
                   {fmt(neto)}
                 </p>
               </div>
@@ -1394,7 +1508,6 @@ function Inversiones() {
         </div>
       </div>
 
-      {/* Separador sutil entre resumen de inversiones y controles */}
       <div className="border-t border-surface-700/60" />
 
       <div className="flex gap-2 items-center w-full flex-wrap">
@@ -1446,7 +1559,6 @@ function Inversiones() {
         <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
       </Card>
 
-      {/* Modal nueva inversión / editar */}
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar inversión' : 'Nueva inversión'}>
         <div className="space-y-4">
           {(() => {
@@ -1459,7 +1571,6 @@ function Inversiones() {
             return (
               <>
                 {editId ? (
-                  /* Edición: mostrar categoría y estado como solo lectura */
                   <>
                     <div className="grid grid-cols-2 gap-3 bg-surface-700/40 rounded-xl p-3">
                       <div>
@@ -1490,7 +1601,6 @@ function Inversiones() {
                     </div>
                   </>
                 ) : (
-                  /* Creación: todos los campos */
                   <>
                     <div className="grid grid-cols-2 gap-4">
                       <Input label="Fecha *" type="date" value={form.fecha} onChange={f('fecha')} />
@@ -1518,7 +1628,6 @@ function Inversiones() {
         </div>
       </Modal>
 
-      {/* Modal retiro */}
       <Modal open={modalRetiro} onClose={() => setModalRetiro(false)} title="Registrar retiro de inversión">
         <div className="space-y-4">
           <Select label="Categoría a retirar" value={retirarCat} onChange={e => { setRetirarCat(e.target.value); setRetirarMonto(0); setErrorRetiro('') }}>
@@ -1587,14 +1696,19 @@ function Categorias() {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
 
-  const load = useCallback(() => {
-    setAllRows(query(`
-      SELECT c.*, COUNT(p.idProducto) AS cantProductos
-      FROM Categoria c
-      LEFT JOIN Producto p ON p.idCategoria = c.idCategoria
-      GROUP BY c.idCategoria
-      ORDER BY c.nombre
-    `))
+  const load = useCallback(async () => {
+    try {
+      // obtenerCategorias no devuelve cantProductos — lo calculamos
+      // cruzando con obtenerProductos(), igual que hacía el JOIN original.
+      const [cats, prods] = await Promise.all([obtenerCategorias(), obtenerProductos()])
+      const countMap = prods.reduce((m, p) => {
+        m[p.idCategoria] = (m[p.idCategoria] ?? 0) + 1
+        return m
+      }, {})
+      setAllRows(cats.map(c => ({ ...c, cantProductos: countMap[c.idCategoria] ?? 0 })))
+    } catch (e) {
+      console.error(e)
+    }
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -1603,20 +1717,27 @@ function Categorias() {
   function openCreate() { setForm(CAT_BLANK); setEditId(null); setError(''); setModal(true) }
   function openEdit(r) { setForm({ nombre: r.nombre }); setEditId(r.idCategoria); setError(''); setModal(true) }
 
-  function save() {
+  async function save() {
     if (!form.nombre.trim()) { setError('El nombre es obligatorio.'); return }
     const nombre = cap(form.nombre)
-    if (editId) {
-      run(`UPDATE Categoria SET nombre=? WHERE idCategoria=?`, [nombre, editId])
-    } else {
-      run(`INSERT INTO Categoria(nombre) VALUES(?)`, [nombre])
+    try {
+      if (editId) {
+        await actualizarCategoria(editId, nombre)
+      } else {
+        await crearCategoria(nombre)
+      }
+      setModal(false); load()
+    } catch (e) {
+      setError(e.message)
     }
-    setModal(false); load()
   }
 
-  function del(id) {
-    try { run(`DELETE FROM Categoria WHERE idCategoria=?`, [id]) }
-    catch { alert('No se puede eliminar: tiene productos asociados.') }
+  async function del(id) {
+    try {
+      await eliminarCategoria(id)
+    } catch {
+      alert('No se puede eliminar: tiene productos asociados.')
+    }
     setConfirm(null); load()
   }
 

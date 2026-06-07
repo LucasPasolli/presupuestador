@@ -109,9 +109,37 @@ export async function obtenerDetallesDePresupuesto(idPresupuesto) {
 }
 
 /**
+ * Devuelve los detalles de un presupuesto con fallback de nombre de producto.
+ * Si `nombre_producto` fue guardado como snapshot lo usa directamente.
+ * Si es null (dato antiguo), intenta traer el nombre actual del producto vía JOIN.
+ * Si el producto ya no existe, usa '(producto eliminado #ID)'.
+ * Usado exclusivamente por pdfPresupuesto.js.
+ */
+export async function obtenerDetallesConNombreDePresupuesto(idPresupuesto) {
+  const { data, error } = await supabase
+    .from('detalle_presupuesto')
+    .select(`
+      *,
+      producto ( nombre )
+    `)
+    .eq('id_presupuesto', idPresupuesto)
+    .order('id_detalle', { ascending: true })
+
+  if (error) manejarError('obtenerDetallesConNombreDePresupuesto', error)
+
+  return data.map(row => {
+    const base = mapDetalle(row)
+    base.nombreProducto =
+      row.nombre_producto
+      ?? row.producto?.nombre
+      ?? `(producto eliminado #${row.id_producto})`
+    return base
+  })
+}
+
+/**
  * Devuelve presupuestos junto con sus detalles en una sola llamada.
  * Usado en Facturas.jsx para mostrar el listado completo con ítems.
- * Equivale al JOIN de Facturas.jsx entre Presupuesto y DetallePresupuesto.
  */
 export async function obtenerPresupuestosConDetalles({
   estado     = null,
@@ -142,15 +170,86 @@ export async function obtenerPresupuestosConDetalles({
   }))
 }
 
+/**
+ * Devuelve los presupuestos facturables en un rango de fechas, con detalles incluidos.
+ *
+ * Lógica de negocio (replica exactamente la query de Facturas.jsx):
+ *   - Solo presupuestos con estado = 'pagado'
+ *   - Con saldo CC (cc15/cc30): se incluye si s.estado='pagado' y s.fechaPago
+ *     cae dentro del período. La fecha de facturación es s.fechaPago.
+ *   - Sin saldo (efectivo/transferencia directa): se incluye si p.fecha cae
+ *     dentro del período. La fecha de facturación es p.fecha.
+ *   - Se incluye el CUIT del cliente (JOIN real, no snapshot).
+ *   - Los detalles se enriquecen con el nombre del producto (snapshot → JOIN → placeholder).
+ *
+ * Requiere la función RPC `obtener_presupuestos_facturables` en Supabase.
+ *
+ * @param {string} desde  'YYYY-MM-DD'
+ * @param {string} hasta  'YYYY-MM-DD'
+ * @returns {Array} presupuestos con { ...campos, cuit, fechaFacturacion, detalles[] }
+ */
+export async function obtenerFacturasConDetalles(desde, hasta) {
+  // 1. Traer presupuestos facturables con la lógica de fecha via RPC
+  const { data: presupuestos, error: e1 } = await supabase
+    .rpc('obtener_presupuestos_facturables', {
+      fecha_desde: desde,
+      fecha_hasta: hasta,
+    })
+
+  if (e1) manejarError('obtenerFacturasConDetalles(rpc)', e1)
+  if (!presupuestos?.length) return []
+
+  // 2. Traer detalles de todos los presupuestos en una sola query
+  const ids = presupuestos.map(p => p.id_presupuesto)
+
+  const { data: detallesRaw, error: e2 } = await supabase
+    .from('detalle_presupuesto')
+    .select(`
+      *,
+      producto ( nombre )
+    `)
+    .in('id_presupuesto', ids)
+    .order('id_detalle', { ascending: true })
+
+  if (e2) manejarError('obtenerFacturasConDetalles(detalles)', e2)
+
+  // 3. Indexar detalles por presupuesto
+  const detallesPor = {}
+  for (const row of detallesRaw ?? []) {
+    const id = row.id_presupuesto
+    if (!detallesPor[id]) detallesPor[id] = []
+
+    const det = mapDetalle(row)
+    // Fallback de nombre: snapshot → nombre actual → placeholder
+    det.nombreProducto =
+      row.nombre_producto
+      ?? row.producto?.nombre
+      ?? `(producto eliminado #${row.id_producto})`
+
+    detallesPor[id].push(det)
+  }
+
+  // 4. Combinar y mapear al formato camelCase que usa Facturas.jsx
+  return presupuestos.map(p => ({
+    idPresupuesto:    p.id_presupuesto,
+    idCliente:        p.id_cliente,
+    fecha:            p.fecha,
+    metodoPago:       p.metodo_pago,
+    monto:            Number(p.monto),
+    montoOriginal:    Number(p.monto_original),
+    nombreCliente:    p.nombre_cliente,
+    apellidoCliente:  p.apellido_cliente,
+    cuit:             p.cuit,
+    fechaPagoSaldo:   p.fecha_pago_saldo,
+    fechaFacturacion: p.fecha_facturacion,
+    detalles:         detallesPor[p.id_presupuesto] ?? [],
+  }))
+}
+
 // ─── Mutaciones ───────────────────────────────────────────────────────────────
 
 /**
  * Crea un presupuesto completo con sus detalles en una sola transacción.
- * Equivale a las dos operaciones de Presupuestador.jsx:
- *   run(`INSERT INTO Presupuesto ...`)
- *   run(`INSERT INTO DetallePresupuesto ...`) × N ítems
- *
- * Devuelve el presupuesto creado con su ID asignado.
  */
 export async function crearPresupuesto(presupuesto, detalles) {
   // 1. Insertar cabecera
@@ -198,10 +297,6 @@ export async function crearPresupuesto(presupuesto, detalles) {
 
 /**
  * Actualiza un presupuesto existente y reemplaza sus detalles.
- * Equivale a:
- *   UPDATE Presupuesto SET ... WHERE idPresupuesto = ?
- *   DELETE FROM DetallePresupuesto WHERE idPresupuesto = ?
- *   INSERT INTO DetallePresupuesto ... × N ítems
  */
 export async function actualizarPresupuesto(idPresupuesto, presupuesto, detalles) {
   // 1. Actualizar cabecera
@@ -222,8 +317,7 @@ export async function actualizarPresupuesto(idPresupuesto, presupuesto, detalles
 
   if (e1) manejarError('actualizarPresupuesto(cabecera)', e1)
 
-  // 2. Borrar detalles anteriores (CASCADE los elimina, pero lo hacemos
-  //    explícito para mayor claridad y control)
+  // 2. Borrar detalles anteriores
   const { error: e2 } = await supabase
     .from('detalle_presupuesto')
     .delete()
@@ -255,8 +349,6 @@ export async function actualizarPresupuesto(idPresupuesto, presupuesto, detalles
 
 /**
  * Actualiza solo el estado de un presupuesto.
- * Equivale a: UPDATE Presupuesto SET estado = ? WHERE idPresupuesto = ?
- * Usado en: Historial.jsx, ABMC.jsx.
  */
 export async function actualizarEstadoPresupuesto(idPresupuesto, estado) {
   const { error } = await supabase
@@ -269,7 +361,6 @@ export async function actualizarEstadoPresupuesto(idPresupuesto, estado) {
 
 /**
  * Actualiza estado, método de pago y esExcepcion.
- * Equivale al UPDATE compuesto de ABMC.jsx sobre presupuestos.
  */
 export async function actualizarMetadataPresupuesto(idPresupuesto, { estado, metodoPago, esExcepcion }) {
   const { error } = await supabase
@@ -287,13 +378,8 @@ export async function actualizarMetadataPresupuesto(idPresupuesto, { estado, met
 /**
  * Elimina un presupuesto y sus detalles (CASCADE en BD).
  * También elimina el saldo asociado si existe.
- * Equivale a:
- *   DELETE FROM Saldo WHERE idPresupuesto = ?
- *   DELETE FROM Presupuesto WHERE idPresupuesto = ?
  */
 export async function eliminarPresupuesto(idPresupuesto) {
-  // El saldo se elimina primero porque tiene FK hacia presupuesto
-  // con ON DELETE CASCADE — pero lo hacemos explícito por claridad.
   const { error: e1 } = await supabase
     .from('saldo')
     .delete()
