@@ -1,6 +1,6 @@
 // src/pages/Facturas.jsx
-import { useState, useEffect } from 'react'
-import { query } from '../lib/database'
+import { useState, useEffect, useCallback } from 'react'
+import { obtenerFacturasConDetalles } from '../services/presupuestosService'
 import { Card, PageHeader, Button, Badge } from '../components/ui'
 import { FileText, Download, Eye, Calendar, AlertCircle } from 'lucide-react'
 
@@ -27,145 +27,85 @@ function firstOfMonth() {
 const METODOS_NO_EFECTIVO = ['transferencia', 'cc15', 'cc30']
 const METODOS_EFECTIVO    = ['efectivo']
 
-// ─── Lógica de datos ───────────────────────────────────────────────────────
+// ─── Lógica de agrupación (pure, sin BD) ──────────────────────────────────
 
-function cargarDatos(desde, hasta) {
-  // Solo presupuestos con estado 'pagado' cuyo Saldo tiene estado 'pagado' (cobrado)
-  // y cuya fechaPago (fecha efectiva de cobro) cae dentro del período seleccionado.
-  // Presupuestos a facturar:
-  // - Con Saldo (CC/transferencia con CC): p.estado='pagado', s.estado='pagado', fecha = s.fechaPago
-  // - Sin Saldo (efectivo/transferencia directa): p.estado='pagado', fecha = p.fecha
-  const presupuestos = query(`
-    SELECT p.idPresupuesto, p.idCliente, p.fecha, p.metodoPago, p.monto, p.montoOriginal,
-           c.nombre AS clienteNombre, c.apellido AS clienteApellido, c.cuit,
-           s.fechaPago,
-           COALESCE(s.fechaPago, p.fecha) AS fechaFacturacion
-    FROM Presupuesto p
-    JOIN Cliente c ON c.idCliente = p.idCliente
-    LEFT JOIN Saldo s ON s.idPresupuesto = p.idPresupuesto
-    WHERE p.estado = 'pagado'
-      AND (
-        (s.idSaldo IS NOT NULL AND s.estado = 'pagado' AND s.fechaPago >= ? AND s.fechaPago <= ?)
-        OR
-        (s.idSaldo IS NULL AND p.metodoPago NOT IN ('cc15','cc30') AND p.fecha >= ? AND p.fecha <= ?)
-      )
-    ORDER BY p.idCliente, p.idPresupuesto
-  `, [desde, hasta, desde, hasta])
+/**
+ * Recibe los presupuestos ya cargados desde el service y los agrupa
+ * por cliente y tipo de método de pago, calculando los ajustes de IVA.
+ *
+ * Reemplaza a la función cargarDatos() original que era síncrona y
+ * accedía a la BD directamente.
+ */
+function agruparPresupuestos(presupuestos, metodos) {
+  const porCliente = {}
 
-  const ids = presupuestos.map(p => p.idPresupuesto)
-  if (ids.length === 0) return { noEfectivo: [], efectivo: [] }
+  for (const p of presupuestos) {
+    if (!metodos.includes(p.metodoPago)) continue
 
-  const placeholders = ids.map(() => '?').join(',')
-  const detalles = query(`
-    SELECT dp.idPresupuesto, dp.idProducto, dp.cantidad, dp.precioUnitario, dp.subtotal, dp.medida,
-           pr.nombre AS nombreProducto
-    FROM DetallePresupuesto dp
-    JOIN Producto pr ON pr.idProducto = dp.idProducto
-    WHERE dp.idPresupuesto IN (${placeholders})
-  `, ids)
-
-  // Indexar detalles por presupuesto
-  const detallesPorPresupuesto = {}
-  for (const d of detalles) {
-    if (!detallesPorPresupuesto[d.idPresupuesto]) detallesPorPresupuesto[d.idPresupuesto] = []
-    detallesPorPresupuesto[d.idPresupuesto].push(d)
-  }
-
-  // Agrupar por cliente y separar en dos documentos
-  const agrupar = (metodos) => {
-    const porCliente = {}
-    for (const p of presupuestos) {
-      if (!metodos.includes(p.metodoPago)) continue
-      const key = p.idCliente
-      if (!porCliente[key]) {
-        porCliente[key] = {
-          idCliente:     p.idCliente,
-          nombre:        `${p.clienteNombre} ${p.clienteApellido}`,
-          cuit:          p.cuit,
-          presupuestos:  [],
-          totalCliente:  0,
-        }
+    const key = p.idCliente
+    if (!porCliente[key]) {
+      porCliente[key] = {
+        idCliente:    p.idCliente,
+        nombre:       `${p.nombreCliente} ${p.apellidoCliente}`,
+        cuit:         p.cuit,
+        presupuestos: [],
+        totalCliente: 0,
       }
-      const agrupados = {}
-
-      for (const d of (detallesPorPresupuesto[p.idPresupuesto] || [])) {
-        const key = d.idProducto
-
-        if (!agrupados[key]) {
-          agrupados[key] = {
-            ...d,
-            cantidad: 0,
-            subtotal: 0,
-          }
-        }
-
-        agrupados[key].cantidad += d.cantidad
-        agrupados[key].subtotal += d.subtotal
-      }
-
-      // Detectar porcentaje de ajuste aplicado al presupuesto
-      const subtotalBase = Object.values(agrupados)
-        .reduce((acc, d) => acc + d.subtotal, 0)
-
-      const factorAjuste =
-        subtotalBase > 0
-          ? p.monto / subtotalBase
-          : 1
-
-      const items = Object.values(agrupados).map(d => {
-        const subtotalAjustado = d.subtotal * factorAjuste
-
-        const precioUnitarioAjustado =
-          d.cantidad > 0
-            ? subtotalAjustado / d.cantidad
-            : 0
-
-        return {
-          ...d,
-
-          precioUnitario: precioUnitarioAjustado,
-
-          precioNeto: precioUnitarioAjustado / 1.21,
-
-          subtotalNeto: subtotalAjustado / 1.21,
-
-          subtotal: subtotalAjustado,
-
-          medida: '—',
-        }
-      })
-      porCliente[key].presupuestos.push({ ...p, items })
-      porCliente[key].totalCliente += p.monto
     }
-    return Object.values(porCliente).sort((a, b) => a.nombre.localeCompare(b.nombre))
+
+    // Agrupar detalles por producto (sumar cantidad y subtotal)
+    const agrupados = {}
+    for (const d of p.detalles ?? []) {
+      const pid = d.idProducto
+      if (!agrupados[pid]) {
+        agrupados[pid] = { ...d, cantidad: 0, subtotal: 0 }
+      }
+      agrupados[pid].cantidad += d.cantidad
+      agrupados[pid].subtotal += d.subtotal
+    }
+
+    // Detectar factor de ajuste aplicado al presupuesto (ej: redondeo, excepción)
+    const subtotalBase = Object.values(agrupados).reduce((acc, d) => acc + d.subtotal, 0)
+    const factorAjuste = subtotalBase > 0 ? p.monto / subtotalBase : 1
+
+    const items = Object.values(agrupados).map(d => {
+      const subtotalAjustado        = d.subtotal * factorAjuste
+      const precioUnitarioAjustado  = d.cantidad > 0 ? subtotalAjustado / d.cantidad : 0
+
+      return {
+        ...d,
+        precioUnitario: precioUnitarioAjustado,
+        precioNeto:     precioUnitarioAjustado / 1.21,
+        subtotalNeto:   subtotalAjustado / 1.21,
+        subtotal:       subtotalAjustado,
+        medida:         '—',
+      }
+    })
+
+    porCliente[key].presupuestos.push({ ...p, items })
+    porCliente[key].totalCliente += p.monto
   }
 
-  return {
-    noEfectivo: agrupar(METODOS_NO_EFECTIVO),
-    efectivo:   agrupar(METODOS_EFECTIVO),
-  }
+  return Object.values(porCliente).sort((a, b) => a.nombre.localeCompare(b.nombre))
 }
 
 // ─── Generador de PDF ──────────────────────────────────────────────────────
 
 async function generarPDF(grupos, titulo, desde, hasta) {
-  // jsPDF cargado desde npm
   const { default: jsPDF }     = await import('jspdf')
   const { default: autoTable } = await import('jspdf-autotable')
 
   const doc  = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
-  const PW   = 210   // ancho A4
-  const ML   = 14    // margen izquierdo
-  const MR   = 14    // margen derecho
+  const PW   = 210
+  const ML   = 14
+  const MR   = 14
   const CW   = PW - ML - MR
 
-  // Paleta
   const NARANJA = [234, 88, 12]
   const GRIS    = [50, 50, 50]
   const CLARO   = [245, 245, 245]
   const BORDE   = [220, 220, 220]
 
-  // ── Encabezado de página ──────────────────────────────────────────────
   function header() {
     doc.setFillColor(...NARANJA)
     doc.rect(0, 0, PW, 18, 'F')
@@ -179,7 +119,6 @@ async function generarPDF(grupos, titulo, desde, hasta) {
     doc.setFont('helvetica', 'normal')
     doc.text(`Pág. ${doc.getNumberOfPages()}`, PW - MR, 12, { align: 'right' })
 
-    // Título del documento
     doc.setFontSize(11)
     doc.setFont('helvetica', 'bold')
     doc.setTextColor(...GRIS)
@@ -190,7 +129,7 @@ async function generarPDF(grupos, titulo, desde, hasta) {
     doc.setTextColor(100, 100, 100)
     doc.text(`Período: ${fmtFecha(desde)} al ${fmtFecha(hasta)}`, ML, 32)
 
-    return 38   // Y inicial del contenido
+    return 38
   }
 
   let y = header()
@@ -215,7 +154,6 @@ async function generarPDF(grupos, titulo, desde, hasta) {
   for (const cliente of grupos) {
     checkPage(40)
 
-    // ── Cabecera de cliente ───────────────────────────────────────────
     doc.setFillColor(...CLARO)
     doc.roundedRect(ML, y, CW, 12, 2, 2, 'F')
     doc.setFontSize(10)
@@ -231,11 +169,9 @@ async function generarPDF(grupos, titulo, desde, hasta) {
     }
     y += 15
 
-    // ── Presupuestos del cliente ──────────────────────────────────────
     for (const pres of cliente.presupuestos) {
       checkPage(20)
 
-      // Sub-cabecera presupuesto
       doc.setFontSize(8)
       doc.setFont('helvetica', 'italic')
       doc.setTextColor(120, 120, 120)
@@ -254,7 +190,6 @@ async function generarPDF(grupos, titulo, desde, hasta) {
         continue
       }
 
-      // Tabla de ítems
       autoTable(doc, {
         startY: y,
         margin: { left: ML, right: MR },
@@ -284,7 +219,6 @@ async function generarPDF(grupos, titulo, desde, hasta) {
       y = doc.lastAutoTable.finalY + 5
     }
 
-    // ── Total del cliente ─────────────────────────────────────────────
     checkPage(12)
     doc.setDrawColor(...BORDE)
     doc.line(ML, y, PW - MR, y)
@@ -299,7 +233,6 @@ async function generarPDF(grupos, titulo, desde, hasta) {
     totalGeneral += cliente.totalCliente
   }
 
-  // ── Total general ─────────────────────────────────────────────────────
   checkPage(20)
   doc.setFillColor(...NARANJA)
   doc.roundedRect(ML, y, CW, 14, 3, 3, 'F')
@@ -350,10 +283,10 @@ function VistaPrevia({ grupos, titulo }) {
                 <span className="text-surface-400 text-xs font-mono">#{pres.idPresupuesto}</span>
                 <span className="text-surface-400 text-xs font-body">{fmtFecha(pres.fechaFacturacion)}</span>
                 <Badge color={
-                  pres.metodoPago === 'efectivo' ? 'green' :
-                  pres.metodoPago === 'transferencia' ? 'blue' : 'yellow'
+                  pres.metodoPago === 'efectivo'      ? 'green' :
+                  pres.metodoPago === 'transferencia' ? 'blue'  : 'yellow'
                 }>
-                  {{ efectivo:'Efectivo', transferencia:'Transferencia', cc15:'CC 15d', cc30:'CC 30d' }[pres.metodoPago]}
+                  {{ efectivo: 'Efectivo', transferencia: 'Transferencia', cc15: 'CC 15d', cc30: 'CC 30d' }[pres.metodoPago]}
                 </Badge>
               </div>
 
@@ -406,23 +339,33 @@ export default function Facturas() {
   const [hasta,      setHasta]      = useState(today())
   const [datos,      setDatos]      = useState(null)
   const [activeTab,  setActiveTab]  = useState('noEfectivo')   // 'noEfectivo' | 'efectivo'
+  const [cargando,   setCargando]   = useState(false)
   const [generando,  setGenerando]  = useState(false)
   const [error,      setError]      = useState('')
 
-  function buscar() {
+  const buscar = useCallback(async (d = desde, h = hasta) => {
     setError('')
-    if (!desde || !hasta) { setError('Seleccioná ambas fechas.'); return }
-    if (desde > hasta)    { setError('La fecha de inicio no puede ser posterior a la de fin.'); return }
+    if (!d || !h)  { setError('Seleccioná ambas fechas.'); return }
+    if (d > h)     { setError('La fecha de inicio no puede ser posterior a la de fin.'); return }
+
+    setCargando(true)
     try {
-      const result = cargarDatos(desde, hasta)
-      setDatos(result)
+      // Una sola llamada al service; la lógica de BD vive en presupuestosService
+      const presupuestos = await obtenerFacturasConDetalles(d, h)
+
+      setDatos({
+        noEfectivo: agruparPresupuestos(presupuestos, METODOS_NO_EFECTIVO),
+        efectivo:   agruparPresupuestos(presupuestos, METODOS_EFECTIVO),
+      })
     } catch (e) {
       setError(`Error al cargar datos: ${e.message}`)
+    } finally {
+      setCargando(false)
     }
-  }
+  }, [desde, hasta])
 
   // Cargar al montar con el período por defecto (mes actual)
-  useEffect(() => { buscar() }, [])
+  useEffect(() => { buscar(firstOfMonth(), today()) }, [])   // eslint-disable-line react-hooks/exhaustive-deps
 
   async function descargarPDF(tipo) {
     if (!datos) return
@@ -471,7 +414,9 @@ export default function Facturas() {
                          font-body focus:outline-none focus:border-brand-500 transition-all [color-scheme:dark]" />
           </div>
 
-          <Button onClick={buscar} icon={Eye}>Ver período</Button>
+          <Button onClick={() => buscar()} icon={Eye} disabled={cargando}>
+            {cargando ? 'Cargando…' : 'Ver período'}
+          </Button>
         </div>
 
         {error && (
@@ -486,22 +431,12 @@ export default function Facturas() {
       {datos && (
         <div className="grid grid-cols-2 gap-4">
           {[
-            {
-              tipo:   'noEfectivo',
-              label:  'Transferencia + CC',
-              grupos: datos.noEfectivo,
-              color:  'blue',
-            },
-            {
-              tipo:   'efectivo',
-              label:  'Efectivo',
-              grupos: datos.efectivo,
-              color:  'green',
-            },
-          ].map(({ tipo, label, grupos, color }) => {
-            const total     = grupos.reduce((acc, c) => acc + c.totalCliente, 0)
-            const clientes  = grupos.length
-            const presups   = grupos.reduce((acc, c) => acc + c.presupuestos.length, 0)
+            { tipo: 'noEfectivo', label: 'Transferencia + CC', grupos: datos.noEfectivo, color: 'blue' },
+            { tipo: 'efectivo',   label: 'Efectivo',           grupos: datos.efectivo,   color: 'green' },
+          ].map(({ tipo, label, grupos }) => {
+            const total   = grupos.reduce((acc, c) => acc + c.totalCliente, 0)
+            const clientes = grupos.length
+            const presups  = grupos.reduce((acc, c) => acc + c.presupuestos.length, 0)
             return (
               <div key={tipo}
                 className={`bg-surface-800 border rounded-2xl p-5 cursor-pointer transition-all duration-200

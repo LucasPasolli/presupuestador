@@ -1,6 +1,15 @@
 // src/pages/Inventario.jsx
 import { useState, useEffect, useCallback } from 'react'
-import { query, run } from '../lib/database'
+import {
+  obtenerProductos,
+  obtenerCategorias,
+  crearProducto,
+  actualizarProducto,
+  eliminarProducto,
+  actualizarCantidadProducto,
+  obtenerMedidasDeProducto,
+} from '../services/productosService'
+import { supabase } from '../lib/supabase'
 import { Button, Card, PageHeader, Modal, Input, Select, Badge, Table, Tr, Td } from '../components/ui'
 import { Plus, Search, Pencil, Trash2, ChevronDown, ChevronUp, PackagePlus, X, CheckCircle2, TrendingUp, FileSpreadsheet } from 'lucide-react'
 import * as XLSX from 'xlsx'
@@ -10,10 +19,7 @@ import * as XLSX from 'xlsx'
 const MEDIDAS_VALIDAS = ['standard', '0.25', '0.50', '0.75', '1.00', '1.25', '1.50', '1.75', '2.00']
 
 function normalize(str) {
-  return str
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+  return str.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 }
 
 function fmt(n) {
@@ -25,67 +31,39 @@ function fmt(n) {
 function Toast({ message, visible, onDone }) {
   useEffect(() => {
     if (!visible) return
-
     const t = setTimeout(onDone, 3000)
     return () => clearTimeout(t)
   }, [visible, onDone])
 
   return (
-    <div
-      className={`
-        fixed top-5 right-5 z-[9999]
-        transition-all duration-300 pointer-events-none
-        ${visible
-          ? 'opacity-100 translate-y-0'
-          : 'opacity-0 -translate-y-2'}
-      `}
-    >
+    <div className={`fixed top-5 right-5 z-[9999] transition-all duration-300 pointer-events-none
+      ${visible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2'}`}>
       <div className="flex items-center gap-3 bg-emerald-900/95 border border-emerald-500/50 rounded-2xl px-5 py-3 shadow-2xl backdrop-blur-sm">
         <CheckCircle2 size={18} className="text-emerald-400 flex-shrink-0" />
-
-        <span className="text-emerald-100 text-sm font-body">
-          {message}
-        </span>
+        <span className="text-emerald-100 text-sm font-body">{message}</span>
       </div>
     </div>
   )
 }
 
 // ─── Modal: editar producto ───────────────────────────────────────────────
-// Solo permite editar: nombre, categoría, precio proveedor y precio unitario.
-// El precio unitario puede calcularse automáticamente desde el margen.
 
 function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
   const [form, setForm] = useState({
-    nombre:          '',
-    idCategoria:     1,
-    precioProveedor: '',
-    precioUnitario:  '',
-    puntoReposicion: '',
+    nombre: '', idCategoria: 1, precioProveedor: '', precioUnitario: '', puntoReposicion: '',
   })
-  const [margen,  setMargen]  = useState('')   // porcentaje de ganancia
+  const [margen,  setMargen]  = useState('')
   const [errors,  setErrors]  = useState({})
+  const [loading, setLoading] = useState(false)
 
   useEffect(() => {
     if (!open || !producto) return
     setForm({
-      nombre: producto.nombre,
-      idCategoria: producto.idCategoria,
-
-      precioProveedor:
-        producto.precioProveedor && producto.precioProveedor > 0
-          ? String(producto.precioProveedor)
-          : '',
-
-      precioUnitario:
-        producto.precioUnitario && producto.precioUnitario > 0
-          ? String(producto.precioUnitario)
-          : '',
-
-      puntoReposicion:
-        producto.puntoReposicion && producto.puntoReposicion > 0
-          ? String(producto.puntoReposicion)
-          : '',
+      nombre:          producto.nombre,
+      idCategoria:     producto.idCategoria,
+      precioProveedor: producto.precioProveedor && producto.precioProveedor > 0 ? String(producto.precioProveedor) : '',
+      precioUnitario:  producto.precioUnitario  && producto.precioUnitario  > 0 ? String(producto.precioUnitario)  : '',
+      puntoReposicion: producto.puntoReposicion && producto.puntoReposicion > 0 ? String(producto.puntoReposicion) : '',
     })
     setMargen('')
     setErrors({})
@@ -93,211 +71,123 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
 
   function set(k, v) { setForm((p) => ({ ...p, [k]: v })) }
 
-  // Cuando cambia precio proveedor o margen, recalcular precio unitario
   function aplicarMargen(margenVal, proveedorVal) {
-    const pp = parseFloat(
-      String(proveedorVal ?? form.precioProveedor).replace(',', '.')
-    )
-
-    const mg = parseFloat(
-      String(margenVal).replace(',', '.')
-    )
-
-    // Evitar cálculos inválidos
+    const pp = parseFloat(String(proveedorVal ?? form.precioProveedor).replace(',', '.'))
+    const mg = parseFloat(String(margenVal).replace(',', '.'))
     if (isNaN(pp) || isNaN(mg)) return
-
-    const calculado = pp * (1 + mg / 100)
-
-    set('precioUnitario', calculado.toFixed(2))
+    set('precioUnitario', (pp * (1 + mg / 100)).toFixed(2))
   }
 
   function validate() {
     const e = {}
-
-    if (!form.nombre.trim()) {
-      e.nombre = 'Requerido'
-    }
-
-    const pp = parseFloat(
-      String(form.precioProveedor).replace(',', '.')
-    )
-
-    const pu = parseFloat(
-      String(form.precioUnitario).replace(',', '.')
-    )
-
-    if (
-      form.precioProveedor !== '' &&
-      isNaN(pp)
-    ) {
-      e.precioProveedor = 'Precio inválido'
-    }
-
-    if (
-      form.precioUnitario !== '' &&
-      isNaN(pu)
-    ) {
-      e.precioUnitario = 'Precio inválido'
-    }
-
+    if (!form.nombre.trim()) e.nombre = 'Requerido'
+    const pp = parseFloat(String(form.precioProveedor).replace(',', '.'))
+    const pu = parseFloat(String(form.precioUnitario).replace(',', '.'))
+    if (form.precioProveedor !== '' && isNaN(pp)) e.precioProveedor = 'Precio inválido'
+    if (form.precioUnitario  !== '' && isNaN(pu)) e.precioUnitario  = 'Precio inválido'
     setErrors(e)
-
     return Object.keys(e).length === 0
   }
 
-  function guardar() {
+  async function guardar() {
     if (!validate()) return
-    const pp = parseFloat(String(form.precioProveedor).replace(',', '.')) || 0
-    const pu =
-    form.precioUnitario === ''
-      ? 0
-      : parseFloat(
-          String(form.precioUnitario).replace(',', '.')
-        )
-    const pr = parseInt(form.puntoReposicion) || 0
-    run(
-      `UPDATE Producto SET nombre=?, idCategoria=?, precioProveedor=?, precioUnitario=?, puntoReposicion=? WHERE idProducto=?`,
-      [form.nombre.trim(), form.idCategoria, pp, pu, pr, producto.idProducto]
-    )
-    onSaved()
-    onClose()
+    setLoading(true)
+    try {
+      const pp = parseFloat(String(form.precioProveedor).replace(',', '.')) || 0
+      const pu = form.precioUnitario === '' ? 0 : parseFloat(String(form.precioUnitario).replace(',', '.'))
+      const pr = parseInt(form.puntoReposicion) || 0
+      await actualizarProducto(producto.idProducto, {
+        nombre: form.nombre.trim(), idCategoria: form.idCategoria,
+        precioProveedor: pp, precioUnitario: pu, puntoReposicion: pr,
+        cantidad: producto.cantidad, tieneMedidas: producto.tieneMedidas,
+      })
+      onSaved()
+      onClose()
+    } catch (err) {
+      setErrors({ general: err.message })
+    } finally {
+      setLoading(false)
+    }
   }
 
   const ppVal = parseFloat(String(form.precioProveedor).replace(',', '.')) || 0
-  const puVal = parseFloat(String(form.precioUnitario).replace(',', '.')) || 0
-  const margenCalculado = ppVal > 0 && puVal > 0
-    ? (((puVal - ppVal) / ppVal) * 100).toFixed(1)
-    : null
+  const puVal = parseFloat(String(form.precioUnitario).replace(',', '.'))  || 0
+  const margenCalculado = ppVal > 0 && puVal > 0 ? (((puVal - ppVal) / ppVal) * 100).toFixed(1) : null
 
   return (
     <Modal open={open} onClose={onClose} title="Editar Producto" width="max-w-lg">
       <div className="space-y-4">
-        {/* Nombre */}
-        <Input
-          label="Nombre del Producto *"
-          value={form.nombre}
-          onChange={(e) => set('nombre', e.target.value)}
-          error={errors.nombre}
-          placeholder="Ej: CADENA DE DISTRIBUCIÓN 25H-98L"
-        />
+        <Input label="Nombre del Producto *" value={form.nombre}
+          onChange={(e) => set('nombre', e.target.value)} error={errors.nombre}
+          placeholder="Ej: CADENA DE DISTRIBUCIÓN 25H-98L" />
 
-        {/* Categoría */}
-        <Select
-          label="Categoría"
-          value={form.idCategoria}
-          onChange={(e) => set('idCategoria', parseInt(e.target.value))}
-        >
+        <Select label="Categoría" value={form.idCategoria}
+          onChange={(e) => set('idCategoria', parseInt(e.target.value))}>
           {categorias.map((c) => (
             <option key={c.idCategoria} value={c.idCategoria} className="font-body">{c.nombre}</option>
           ))}
         </Select>
 
-        {/* Precio Proveedor */}
-        <Input
-          label="Precio del Proveedor"
-          value={form.precioProveedor}
+        <Input label="Precio del Proveedor" value={form.precioProveedor}
           onChange={(e) => {
             const v = e.target.value.replace(',', '.')
-            if (/^\d*\.?\d*$/.test(v)) {
-              set('precioProveedor', v)
-              if (margen) aplicarMargen(margen, v)
-            }
+            if (/^\d*\.?\d*$/.test(v)) { set('precioProveedor', v); if (margen) aplicarMargen(margen, v) }
           }}
-          error={errors.precioProveedor}
-          placeholder="0.00"
-        />
+          error={errors.precioProveedor} placeholder="0.00" />
 
-        {/* Margen de ganancia */}
         <div>
           <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1.5">
             Margen de Ganancia (%)
           </label>
           <div className="relative">
-            <TrendingUp
-              size={14}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none"
-            />
-
-            <input
-              type="text"
-              inputMode="decimal"
-              value={margen}
+            <TrendingUp size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
+            <input type="text" inputMode="decimal" value={margen}
               onChange={(e) => {
                 const v = e.target.value.replace(',', '.')
-
                 if (!/^\d*\.?\d*$/.test(v)) return
-
                 setMargen(v)
-
-                // Si se vacía el margen → quitar recargo
                 if (v.trim() === '') {
-                  const proveedor = parseFloat(
-                    String(form.precioProveedor).replace(',', '.')
-                  )
-
-                  if (!isNaN(proveedor)) {
-                    set('precioUnitario', proveedor.toFixed(2))
-                  }
-
+                  const proveedor = parseFloat(String(form.precioProveedor).replace(',', '.'))
+                  if (!isNaN(proveedor)) set('precioUnitario', proveedor.toFixed(2))
                   return
                 }
-
                 aplicarMargen(v, form.precioProveedor)
               }}
               placeholder="Ej: 42.5"
               className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-10 py-2 text-white
-                        text-sm font-body placeholder-surface-500
-                        focus:outline-none focus:border-brand-500 transition-all"
-            />
-
-            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 text-sm font-body">
-              %
-            </span>
+                        text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all" />
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 text-sm font-body">%</span>
           </div>
           {margenCalculado !== null && (
             <p className="text-surface-400 text-xs font-body mt-1.5">
-              Margen actual:
-              <span className="text-brand-400 font-mono ml-1">+{margenCalculado}%</span>
+              Margen actual: <span className="text-brand-400 font-mono ml-1">+{margenCalculado}%</span>
             </p>
           )}
         </div>
 
-        {/* Precio Unitario de Venta */}
         <div>
-          <Input
-            label="Precio Unitario de Venta"
-            value={form.precioUnitario}
-            onChange={(e) => {
-              const v = e.target.value.replace(',', '.')
-              if (/^\d*\.?\d*$/.test(v)) set('precioUnitario', v)
-            }}
-            error={errors.precioUnitario}
-            placeholder="0.00"
-          />
+          <Input label="Precio Unitario de Venta" value={form.precioUnitario}
+            onChange={(e) => { const v = e.target.value.replace(',', '.'); if (/^\d*\.?\d*$/.test(v)) set('precioUnitario', v) }}
+            error={errors.precioUnitario} placeholder="0.00" />
           {ppVal > 0 && puVal > 0 && (
             <p className="text-surface-500 text-xs font-body mt-1">
               Ganancia por unidad:&nbsp;
-              <span className={`font-mono ${puVal >= ppVal ? 'text-emerald-400' : 'text-red-400'}`}>
-                {fmt(puVal - ppVal)}
-              </span>
+              <span className={`font-mono ${puVal >= ppVal ? 'text-emerald-400' : 'text-red-400'}`}>{fmt(puVal - ppVal)}</span>
             </p>
           )}
         </div>
 
-        {/* Punto de Reposición */}
-        <Input
-          label="Punto de Reposición (stock mínimo)"
-          value={form.puntoReposicion}
-          onChange={(e) => {
-            const v = e.target.value.replace(/\D/g, '')
-            set('puntoReposicion', v)
-          }}
-          placeholder="Ej: 5"
-        />
+        <Input label="Punto de Reposición (stock mínimo)" value={form.puntoReposicion}
+          onChange={(e) => { const v = e.target.value.replace(/\D/g, ''); set('puntoReposicion', v) }}
+          placeholder="Ej: 5" />
+
+        {errors.general && <p className="text-red-400 text-xs font-body">{errors.general}</p>}
 
         <div className="flex gap-2 pt-2">
           <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button className="flex-1" onClick={guardar}>Guardar Cambios</Button>
+          <Button className="flex-1" onClick={guardar} disabled={loading}>
+            {loading ? 'Guardando...' : 'Guardar Cambios'}
+          </Button>
         </div>
       </div>
     </Modal>
@@ -308,8 +198,9 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
 
 function NuevoProductoModal({ open, onClose, categorias, onSaved }) {
   const emptyForm = { nombre: '', idCategoria: categorias[0]?.idCategoria ?? 1, precioUnitario: '' }
-  const [form,   setForm]   = useState(emptyForm)
-  const [errors, setErrors] = useState({})
+  const [form,    setForm]    = useState(emptyForm)
+  const [errors,  setErrors]  = useState({})
+  const [loading, setLoading] = useState(false)
 
   useEffect(() => {
     if (!open) return
@@ -326,241 +217,135 @@ function NuevoProductoModal({ open, onClose, categorias, onSaved }) {
     return Object.keys(e).length === 0
   }
 
-  function guardar() {
+  async function guardar() {
     if (!validate()) return
-    const precio = parseFloat(String(form.precioUnitario).replace(',', '.')) || 0
-    run(
-      `INSERT INTO Producto (idCategoria, nombre, precioProveedor, precioUnitario, cantidad, tieneMedidas) VALUES (?,?,0,?,0,0)`,
-      [form.idCategoria, form.nombre.trim(), precio]
-    )
-    onSaved()
-    onClose()
+    setLoading(true)
+    try {
+      const precio = parseFloat(String(form.precioUnitario).replace(',', '.')) || 0
+      await crearProducto({
+        idCategoria: form.idCategoria, nombre: form.nombre.trim(),
+        precioProveedor: 0, precioUnitario: precio, cantidad: 0, tieneMedidas: 0, puntoReposicion: 0,
+      })
+      onSaved()
+      onClose()
+    } catch (err) {
+      setErrors({ general: err.message })
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
     <Modal open={open} onClose={onClose} title="Nuevo Producto" width="max-w-md">
       <div className="space-y-4">
-        <Input
-          label="Nombre del Producto *"
-          value={form.nombre}
-          onChange={(e) => set('nombre', e.target.value)}
-          error={errors.nombre}
-          placeholder="Ej: CADENA DE DISTRIBUCIÓN 25H-98L"
-        />
-        <Select
-          label="Categoría"
-          value={form.idCategoria}
-          onChange={(e) => set('idCategoria', parseInt(e.target.value))}
-        >
+        <Input label="Nombre del Producto *" value={form.nombre}
+          onChange={(e) => set('nombre', e.target.value)} error={errors.nombre}
+          placeholder="Ej: CADENA DE DISTRIBUCIÓN 25H-98L" />
+        <Select label="Categoría" value={form.idCategoria}
+          onChange={(e) => set('idCategoria', parseInt(e.target.value))}>
           {categorias.map((c) => (
             <option key={c.idCategoria} value={c.idCategoria} className="font-body">{c.nombre}</option>
           ))}
         </Select>
-        <Input
-          label="Precio Unitario de Venta"
-          value={form.precioUnitario}
-          onChange={(e) => {
-            const v = e.target.value.replace(',', '.')
-            if (/^\d*\.?\d*$/.test(v)) set('precioUnitario', v)
-          }}
-          error={errors.precioUnitario}
-          placeholder="0.00"
-        />
+        <Input label="Precio Unitario de Venta" value={form.precioUnitario}
+          onChange={(e) => { const v = e.target.value.replace(',', '.'); if (/^\d*\.?\d*$/.test(v)) set('precioUnitario', v) }}
+          error={errors.precioUnitario} placeholder="0.00" />
+        {errors.general && <p className="text-red-400 text-xs font-body">{errors.general}</p>}
         <div className="flex gap-2 pt-2">
           <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button className="flex-1" onClick={guardar}>Crear Producto</Button>
+          <Button className="flex-1" onClick={guardar} disabled={loading}>{loading ? 'Creando...' : 'Crear Producto'}</Button>
         </div>
       </div>
     </Modal>
   )
 }
 
-// ─── Modal: actualizar stock (sin medidas o con medidas) ──────────────────
+// ─── Modal: actualizar stock ──────────────────────────────────────────────
 
 function StockModal({ open, onClose, producto, onSaved }) {
-  // 'sinMedidas' | 'conMedidas'
-  const [modo,          setModo]          = useState(null)
-  const [stockNuevo,    setStockNuevo]    = useState('')
-
-  const [tipoFijado, setTipoFijado] = useState(false)
-
-  // Estado para modo conMedidas
-  const [medidasStock,  setMedidasStock]  = useState([])   // rows existentes
-  const [editMedidas,   setEditMedidas]   = useState({})   // { idMedida: cantidad }
-  const [nuevaMedida,   setNuevaMedida]   = useState('')   // medida a agregar
-  const [medidasUsadas, setMedidasUsadas] = useState([])
+  const [modo,         setModo]         = useState(null)
+  const [stockNuevo,   setStockNuevo]   = useState('')
+  const [tipoFijado,   setTipoFijado]   = useState(false)
+  const [medidasStock, setMedidasStock] = useState([])
+  const [editMedidas,  setEditMedidas]  = useState({})
+  const [loading,      setLoading]      = useState(false)
 
   useEffect(() => {
     if (!open) {
-      setModo(null)
-      setStockNuevo('')
-      setEditMedidas({})
-      setTipoFijado(false)
+      setModo(null); setStockNuevo(''); setEditMedidas({}); setTipoFijado(false)
       return
     }
-
-    // Producto ya definido como CON medidas
     if (producto?.tieneMedidas === 1) {
-      setModo('conMedidas')
-      setTipoFijado(true)
-      cargarMedidas()
+      setModo('conMedidas'); setTipoFijado(true); cargarMedidas()
       return
     }
-
-    // Producto SIN medidas
     setModo('sinMedidas')
-    // Si el stock actual es 0, dejar el campo vacío en lugar de mostrar "0"
     setStockNuevo((producto?.cantidad ?? 0) > 0 ? String(producto.cantidad) : '')
-
-    // Si ya tiene stock cargado, fijar tipo
-    if ((producto?.cantidad ?? 0) > 0) {
-      setTipoFijado(true)
-    } else {
-      setTipoFijado(false)
-    }
+    setTipoFijado((producto?.cantidad ?? 0) > 0)
   }, [open, producto])
 
-  function cargarMedidas(prevEditMedidas = editMedidas) {
-    // Obtener medidas existentes
-    const existentes = query(
-      'SELECT * FROM ProductoMedida WHERE idProducto = ?',
-      [producto.idProducto]
-    )
-
-    // Crear mapa rápido
+  async function cargarMedidas(prevEdit = {}) {
+    const existentes = await obtenerMedidasDeProducto(producto.idProducto)
     const existentesMap = {}
-
-    existentes.forEach((m) => {
-      existentesMap[m.medida] = m
-    })
-
-    // Generar TODAS las medidas válidas
-    const rows = MEDIDAS_VALIDAS.map((medida) => {
-      if (existentesMap[medida]) {
-        return existentesMap[medida]
-      }
-
-      return {
-        idMedida: `nuevo-${medida}`,
-        medida,
-        cantidad: '',
-        esNueva: true,
-      }
-    })
-
+    existentes.forEach((m) => { existentesMap[m.medida] = m })
+    const rows = MEDIDAS_VALIDAS.map((medida) =>
+      existentesMap[medida] ?? { idMedida: `nuevo-${medida}`, medida, cantidad: '', esNueva: true }
+    )
     setMedidasStock(rows)
-
     const nuevosEditados = {}
-
-    rows.forEach((r) => {
-      if (prevEditMedidas[r.idMedida] !== undefined) {
-        nuevosEditados[r.idMedida] = prevEditMedidas[r.idMedida]
-      }
-    })
-
+    rows.forEach((r) => { if (prevEdit[r.idMedida] !== undefined) nuevosEditados[r.idMedida] = prevEdit[r.idMedida] })
     setEditMedidas(nuevosEditados)
   }
 
-  function agregarMedida() {
-    if (!nuevaMedida || medidasUsadas.includes(nuevaMedida)) return
-
-    const editActual = { ...editMedidas }
-
-    // Marcar producto como "con medidas"
-    run(
-      `UPDATE Producto SET tieneMedidas = 1 WHERE idProducto = ?`,
-      [producto.idProducto]
-    )
-
-    run(
-      `INSERT INTO ProductoMedida (idProducto, medida, cantidad) VALUES (?,?,0)`,
-      [producto.idProducto, nuevaMedida]
-    )
-
-    // Actualizar objeto local
-    producto.tieneMedidas = 1
-
-    cargarMedidas(editActual)
-}
-
-  function guardarSinMedidas() {
-    const val = parseInt(stockNuevo) || 0
-    run(`UPDATE Producto SET cantidad=? WHERE idProducto=?`, [val, producto.idProducto])
-    onSaved()
-    onClose()
+  async function guardarSinMedidas() {
+    setLoading(true)
+    try {
+      await actualizarCantidadProducto(producto.idProducto, parseInt(stockNuevo) || 0)
+      onSaved(); onClose()
+    } catch (err) { console.error('[StockModal]', err) }
+    finally { setLoading(false) }
   }
 
-  function guardarConMedidas() {
-    // Marcar producto como con medidas
-    run(
-      `UPDATE Producto
-      SET tieneMedidas = 1
-      WHERE idProducto = ?`,
-      [producto.idProducto]
-    )
-
-    for (const medida of medidasStock) {
-      const valor =
-        editMedidas[medida.idMedida] !== undefined
-          ? editMedidas[medida.idMedida]
-          : medida.cantidad
-
-      // Si está vacío → ignorar
-      if (valor === '' || valor === null || valor === undefined) {
-        continue
+  async function guardarConMedidas() {
+    setLoading(true)
+    try {
+      await supabase.from('producto').update({ tiene_medidas: true }).eq('id_producto', producto.idProducto)
+      for (const medida of medidasStock) {
+        const valor = editMedidas[medida.idMedida] !== undefined ? editMedidas[medida.idMedida] : medida.cantidad
+        if (valor === '' || valor === null || valor === undefined) continue
+        const cantidad = parseInt(valor) || 0
+        if (!medida.esNueva) {
+          await supabase.from('producto_medida').update({ cantidad }).eq('id_medida', medida.idMedida)
+        } else {
+          await supabase.from('producto_medida').upsert(
+            { id_producto: producto.idProducto, medida: medida.medida, cantidad },
+            { onConflict: 'id_producto,medida' }
+          )
+        }
       }
-
-      const cantidad = parseInt(valor) || 0
-
-      // Si la medida ya existe → update
-      if (!medida.esNueva) {
-        run(
-          `UPDATE ProductoMedida
-          SET cantidad = ?
-          WHERE idMedida = ?`,
-          [cantidad, medida.idMedida]
-        )
-      } else {
-        // Si no existe → insert
-        run(
-          `INSERT INTO ProductoMedida
-          (idProducto, medida, cantidad)
-          VALUES (?, ?, ?)`,
-          [producto.idProducto, medida.medida, cantidad]
-        )
-      }
-    }
-
-    onSaved()
-    onClose()
+      const { data } = await supabase.from('producto_medida').select('cantidad').eq('id_producto', producto.idProducto)
+      const total = (data ?? []).reduce((acc, m) => acc + m.cantidad, 0)
+      await actualizarCantidadProducto(producto.idProducto, total)
+      onSaved(); onClose()
+    } catch (err) { console.error('[StockModal conMedidas]', err) }
+    finally { setLoading(false) }
   }
 
   if (!producto) return null
 
-  const medidasLibres = MEDIDAS_VALIDAS.filter(m => !medidasUsadas.includes(m))
-
   return (
-    <Modal open={open} onClose={onClose} title={`Actualizar Stock`} width="max-w-md">
+    <Modal open={open} onClose={onClose} title="Actualizar Stock" width="max-w-md">
       <p className="text-surface-400 text-xs font-body mb-4 truncate">{producto.nombre}</p>
 
-      {/* Selector de modo — solo si el producto no tiene medidas ya definidas */}
       {!tipoFijado && (
         <div className="grid grid-cols-2 gap-2 mb-5">
           {[
             { v: 'sinMedidas', label: 'Sin Medidas', sub: 'Stock único general' },
             { v: 'conMedidas', label: 'Con Medidas', sub: 'Stock por medida' },
           ].map(({ v, label, sub }) => (
-            <button
-              key={v}
-              onClick={() => {
-                setModo(v)
-                if (v === 'conMedidas') cargarMedidas()
-              }}
+            <button key={v} onClick={() => { setModo(v); if (v === 'conMedidas') cargarMedidas() }}
               className={`rounded-xl px-4 py-3 text-left border text-sm font-body transition-all
-                ${modo === v
-                  ? 'bg-brand-500/15 border-brand-500/50 text-white'
-                  : 'bg-surface-700 border-surface-600 text-surface-400 hover:border-surface-500'}`}
-            >
+                ${modo === v ? 'bg-brand-500/15 border-brand-500/50 text-white' : 'bg-surface-700 border-surface-600 text-surface-400 hover:border-surface-500'}`}>
               <p className="font-medium">{label}</p>
               <p className={`text-xs mt-0.5 ${modo === v ? 'text-brand-400' : 'text-surface-500'}`}>{sub}</p>
             </button>
@@ -571,69 +356,52 @@ function StockModal({ open, onClose, producto, onSaved }) {
       {tipoFijado && (
         <div className="mb-5 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
           <p className="text-amber-300 text-sm font-body">
-            PRODUCTO
-            <span className="font-semibold ml-1">
-              {modo === 'conMedidas' ? 'CON MEDIDAS' : 'SIN MEDIDAS'}
-            </span>
+            PRODUCTO <span className="font-semibold ml-1">{modo === 'conMedidas' ? 'CON MEDIDAS' : 'SIN MEDIDAS'}</span>
           </p>
         </div>
       )}
 
-      {/* Sin medidas */}
       {modo === 'sinMedidas' && (
         <div className="space-y-4">
           <div className="bg-surface-700 rounded-xl px-4 py-3 text-center">
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body">Stock actual</p>
             <p className="text-3xl font-display text-white tracking-widest mt-1">{producto.cantidad}</p>
           </div>
-          <Input
-            label="Nuevo valor de stock"
-            type="text"
-            inputMode="numeric"
-            value={stockNuevo}
-            onChange={(e) => setStockNuevo(e.target.value.replace(/\D/g, ''))}
-            placeholder="Ej: 25"
-          />
+          <Input label="Nuevo valor de stock" type="text" inputMode="numeric" value={stockNuevo}
+            onChange={(e) => setStockNuevo(e.target.value.replace(/\D/g, ''))} placeholder="Ej: 25" />
           <div className="flex gap-2">
             <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-            <Button className="flex-1" onClick={guardarSinMedidas}>Aplicar</Button>
+            <Button className="flex-1" onClick={guardarSinMedidas} disabled={loading}>
+              {loading ? 'Aplicando...' : 'Aplicar'}
+            </Button>
           </div>
         </div>
       )}
 
-      {/* Con medidas */}
       {modo === 'conMedidas' && (
         <div className="space-y-4">
-          {/* Lista de medidas con stock editable */}
           {medidasStock.length === 0 ? (
-            <p className="text-surface-500 text-sm font-body py-2 text-center">
-              Sin medidas cargadas. Agregá una medida arriba.
-            </p>
+            <p className="text-surface-500 text-sm font-body py-2 text-center">Sin medidas cargadas.</p>
           ) : (
             <div className="space-y-2">
               {medidasStock.map((m) => (
                 <div key={m.idMedida} className="flex items-center gap-3 bg-surface-700 rounded-xl px-4 py-2.5">
                   <span className="text-white text-sm font-mono flex-1">{m.medida}</span>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    placeholder="—"
+                  <input type="text" inputMode="numeric" placeholder="—"
                     value={editMedidas[m.idMedida] !== undefined ? editMedidas[m.idMedida] : m.cantidad}
                     onChange={(e) => setEditMedidas((p) => ({ ...p, [m.idMedida]: e.target.value.replace(/\D/g, '') }))}
                     className="w-20 bg-surface-600 border border-surface-500 rounded-lg px-2 py-1 text-white
                                text-sm font-mono text-center focus:outline-none focus:border-brand-500 transition-all
-                               [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none"
-                  />
+                               [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none" />
                   <span className="text-surface-400 text-xs font-body">und.</span>
                 </div>
               ))}
             </div>
           )}
-
           <div className="flex gap-2">
             <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-            <Button className="flex-1" onClick={guardarConMedidas} disabled={medidasStock.length === 0}>
-              Guardar Stock
+            <Button className="flex-1" onClick={guardarConMedidas} disabled={medidasStock.length === 0 || loading}>
+              {loading ? 'Guardando...' : 'Guardar Stock'}
             </Button>
           </div>
         </div>
@@ -642,108 +410,50 @@ function StockModal({ open, onClose, producto, onSaved }) {
   )
 }
 
+// ─── Modal: actualizar precios masivamente ────────────────────────────────
+
 function ActualizarPreciosModal({ open, onClose, onSaved }) {
-  const [margen, setMargen] = useState('')
+  const [margen,  setMargen]  = useState('')
   const [loading, setLoading] = useState(false)
 
-  useEffect(() => {
-    if (!open) {
-      setMargen('')
-      setLoading(false)
-    }
-  }, [open])
+  useEffect(() => { if (!open) { setMargen(''); setLoading(false) } }, [open])
 
   async function actualizar() {
-    const mg = parseFloat(
-      String(margen).replace(',', '.')
-    )
-
+    const mg = parseFloat(String(margen).replace(',', '.'))
     if (isNaN(mg)) return
-
     setLoading(true)
-
-    // Obtener productos con precio proveedor
-    const productos = query(`
-      SELECT idProducto, precioProveedor
-      FROM Producto
-      WHERE precioProveedor > 0
-    `)
-
-    for (const p of productos) {
-      const nuevoPrecio =
-        p.precioProveedor * (1 + mg / 100)
-
-      run(
-        `UPDATE Producto
-         SET precioUnitario = ?
-         WHERE idProducto = ?`,
-        [nuevoPrecio.toFixed(2), p.idProducto]
-      )
-    }
-
-    setLoading(false)
-
-    onSaved()
-    onClose()
+    try {
+      const { data: productos, error } = await supabase.from('producto').select('id_producto, precio_proveedor').gt('precio_proveedor', 0)
+      if (error) throw error
+      for (const p of productos) {
+        const nuevoPrecio = Number(p.precio_proveedor) * (1 + mg / 100)
+        await supabase.from('producto').update({ precio_unitario: parseFloat(nuevoPrecio.toFixed(2)) }).eq('id_producto', p.id_producto)
+      }
+      onSaved(); onClose()
+    } catch (err) { console.error('[ActualizarPrecios]', err) }
+    finally { setLoading(false) }
   }
 
   return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title="Actualizar Precios Masivamente"
-      width="max-w-md"
-    >
+    <Modal open={open} onClose={onClose} title="Actualizar Precios Masivamente" width="max-w-md">
       <div className="space-y-4">
         <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
           <p className="text-amber-200 text-sm font-body">
-            Esta acción actualizará el precio de venta
-            de todos los productos utilizando el margen
-            indicado sobre el precio proveedor.
+            Esta acción actualizará el precio de venta de todos los productos utilizando el margen indicado sobre el precio proveedor.
           </p>
         </div>
-
         <div className="relative">
-          <TrendingUp
-            size={14}
-            className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none"
-          />
-
-          <input
-            type="text"
-            inputMode="decimal"
-            value={margen}
-            onChange={(e) => {
-              const v = e.target.value.replace(',', '.')
-
-              if (/^\d*\.?\d*$/.test(v)) {
-                setMargen(v)
-              }
-            }}
+          <TrendingUp size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
+          <input type="text" inputMode="decimal" value={margen}
+            onChange={(e) => { const v = e.target.value.replace(',', '.'); if (/^\d*\.?\d*$/.test(v)) setMargen(v) }}
             placeholder="Margen de ganancia (%)"
             className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-10 py-2 text-white
-                       text-sm font-mono focus:outline-none focus:border-brand-500 transition-all"
-          />
-
-          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 text-sm font-mono">
-            %
-          </span>
+                       text-sm font-mono focus:outline-none focus:border-brand-500 transition-all" />
+          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 text-sm font-mono">%</span>
         </div>
-
         <div className="flex gap-2 pt-2">
-          <Button
-            variant="secondary"
-            className="flex-1"
-            onClick={onClose}
-          >
-            Cancelar
-          </Button>
-
-          <Button
-            className="flex-1"
-            onClick={actualizar}
-            disabled={!margen || loading}
-          >
+          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
+          <Button className="flex-1" onClick={actualizar} disabled={!margen || loading}>
             {loading ? 'Actualizando...' : 'Actualizar'}
           </Button>
         </div>
@@ -755,85 +465,39 @@ function ActualizarPreciosModal({ open, onClose, onSaved }) {
 // ─── Modal: nueva categoría ───────────────────────────────────────────────
 
 function CatModal({ open, onClose, onSaved, categorias }) {
-  const [nombre, setNombre] = useState('')
-  const [error, setError] = useState('')
+  const [nombre,  setNombre]  = useState('')
+  const [error,   setError]   = useState('')
+  const [loading, setLoading] = useState(false)
 
-  const nombreNormalizado = nombre.trim().toLowerCase()
+  const nombreNormalizado  = nombre.trim().toLowerCase()
+  const categoriaExistente = categorias.some((c) => c.nombre.trim().toLowerCase() === nombreNormalizado)
 
-  const categoriaExistente = categorias.some(
-    (c) => c.nombre.trim().toLowerCase() === nombreNormalizado
-  )
-
-  function guardar() {
-    if (!nombre.trim()) {
-      setError('Requerido')
-      return
-    }
-
-    if (categoriaExistente) {
-      setError('Ya existe una categoría con ese nombre')
-      return
-    }
-
-    run(`INSERT INTO Categoria (nombre) VALUES (?)`, [nombre.trim()])
-
-    onSaved()
-    setNombre('')
-    setError('')
-    onClose()
+  async function guardar() {
+    if (!nombre.trim()) { setError('Requerido'); return }
+    if (categoriaExistente) { setError('Ya existe una categoría con ese nombre'); return }
+    setLoading(true)
+    try {
+      const { crearCategoria } = await import('../services/productosService')
+      await crearCategoria(nombre.trim())
+      onSaved(); setNombre(''); setError(''); onClose()
+    } catch (err) { setError(err.message) }
+    finally { setLoading(false) }
   }
 
   return (
-    <Modal
-      open={open}
-      onClose={() => {
-        setNombre('')
-        setError('')
-        onClose()
-      }}
-      title="Nueva Categoría"
-      width="max-w-sm"
-    >
+    <Modal open={open} onClose={() => { setNombre(''); setError(''); onClose() }} title="Nueva Categoría" width="max-w-sm">
       <div className="space-y-4">
-        <div>
-          <Input
-            label="Nombre"
-            value={nombre}
-            onChange={(e) => {
-              setNombre(e.target.value)
-
-              const nuevoValor = e.target.value.trim().toLowerCase()
-
-              const existe = categorias.some(
-                (c) => c.nombre.trim().toLowerCase() === nuevoValor
-              )
-
-              if (existe) {
-                setError('Ya existe una categoría con ese nombre')
-              } else {
-                setError('')
-              }
-            }}
-            error={error}
-            placeholder="Ej: Transmisión"
-          />
-        </div>
-
+        <Input label="Nombre" value={nombre}
+          onChange={(e) => {
+            setNombre(e.target.value)
+            const nuevoValor = e.target.value.trim().toLowerCase()
+            setError(categorias.some((c) => c.nombre.trim().toLowerCase() === nuevoValor) ? 'Ya existe una categoría con ese nombre' : '')
+          }}
+          error={error} placeholder="Ej: Transmisión" />
         <div className="flex gap-2">
-          <Button
-            variant="secondary"
-            className="flex-1"
-            onClick={onClose}
-          >
-            Cancelar
-          </Button>
-
-          <Button
-            className="flex-1"
-            onClick={guardar}
-            disabled={categoriaExistente || !nombre.trim()}
-          >
-            Crear
+          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
+          <Button className="flex-1" onClick={guardar} disabled={categoriaExistente || !nombre.trim() || loading}>
+            {loading ? 'Creando...' : 'Crear'}
           </Button>
         </div>
       </div>
@@ -847,10 +511,10 @@ const PAGE_SIZE = 50
 
 export default function Inventario() {
   const [productos,    setProductos]    = useState([])
-  const [allProductos, setAllProductos] = useState([])   // todos sin filtro para stats
+  const [allProductos, setAllProductos] = useState([])
   const [categorias,   setCategorias]   = useState([])
   const [searchNombre, setSearchNombre] = useState('')
-  const [searchId,     setSearchId]     = useState('')  
+  const [searchId,     setSearchId]     = useState('')
   const [filterCat,    setFilterCat]    = useState('all')
   const [filterStock,  setFilterStock]  = useState('all')
   const [filterBajoStock, setFilterBajoStock] = useState(false)
@@ -863,134 +527,47 @@ export default function Inventario() {
   const [modalStock,   setModalStock]   = useState(false)
   const [modalCat,     setModalCat]     = useState(false)
   const [modalActualizarPrecios, setModalActualizarPrecios] = useState(false)
-  const [selected,     setSelected]     = useState(null)
-  const [deleteConfirm,setDeleteConfirm]= useState(null)
-  const [toast,        setToast]        = useState('')
+  const [selected,      setSelected]      = useState(null)
+  const [deleteConfirm, setDeleteConfirm] = useState(null)
+  const [toast,         setToast]         = useState('')
 
-  const load = useCallback(() => {
-    const cats = query('SELECT * FROM Categoria ORDER BY nombre')
-    setCategorias(cats)
+  const load = useCallback(async (resetPage = true) => {
+    try {
+      const [cats, prods] = await Promise.all([obtenerCategorias(), obtenerProductos()])
+      setCategorias(cats)
 
-    // Cargar todos los productos para estadísticas globales
-    const todosSql = `
-      SELECT p.*, c.nombre as categoriaNombre,
-        CASE WHEN p.tieneMedidas=1
-          THEN (SELECT COALESCE(SUM(pm.cantidad),0) FROM ProductoMedida pm WHERE pm.idProducto=p.idProducto)
-          ELSE p.cantidad
-        END as stockTotal
-      FROM Producto p
-      JOIN Categoria c ON p.idCategoria=c.idCategoria`
-    setAllProductos(query(todosSql))
+      const conStock = prods.map((p) => ({ ...p, categoriaNombre: p.categoria, stockTotal: p.cantidad }))
+      setAllProductos(conStock)
 
-    let sql = `
-      SELECT p.*, c.nombre as categoriaNombre,
-        CASE WHEN p.tieneMedidas=1
-          THEN (SELECT COALESCE(SUM(pm.cantidad),0) FROM ProductoMedida pm WHERE pm.idProducto=p.idProducto)
-          ELSE p.cantidad
-        END as stockTotal
-      FROM Producto p
-      JOIN Categoria c ON p.idCategoria=c.idCategoria
-      WHERE 1=1`
-    const params = []
+      let resultado = conStock
 
-    if (searchNombre.trim()) {
-      // El filtro por nombre se aplica en JS para ignorar tildes
+      if (searchId.trim()) resultado = resultado.filter((p) => String(p.idProducto) === searchId.trim())
+      if (searchNombre.trim()) {
+        const needle = normalize(searchNombre.trim())
+        resultado = resultado.filter((p) => normalize(p.nombre).includes(needle))
+      }
+      if (filterCat !== 'all') resultado = resultado.filter((p) => p.idCategoria === parseInt(filterCat))
+      if (filterStock === 'con') resultado = resultado.filter((p) => p.stockTotal > 0)
+      else if (filterStock === 'sin') resultado = resultado.filter((p) => p.stockTotal === 0)
+      if (filterBajoStock) resultado = resultado.filter((p) => p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion)
+
+      resultado = [...resultado].sort((a, b) => {
+        let valA, valB
+        if (sortKey === 'stock')       { valA = a.stockTotal;      valB = b.stockTotal }
+        else if (sortKey === 'precio') { valA = a.precioUnitario;  valB = b.precioUnitario }
+        else                           { valA = a.nombre;           valB = b.nombre }
+        if (typeof valA === 'string') return sortDir === 'asc' ? valA.localeCompare(valB, 'es') : valB.localeCompare(valA, 'es')
+        return sortDir === 'asc' ? valA - valB : valB - valA
+      })
+
+      setProductos(resultado)
+      if (resetPage) setPage(1)
+    } catch (err) {
+      console.error('[Inventario] Error cargando datos:', err)
     }
-    if (searchId.trim()) {
-      sql += ` AND p.idProducto = ?`
-      params.push(parseInt(searchId) || -1)
-    }
-    if (filterCat !== 'all') {
-      sql += ` AND p.idCategoria=?`
-      params.push(parseInt(filterCat))
-    }
-    if (filterStock === 'con') {
-      sql += ` AND stockTotal > 0`
-    } else if (filterStock === 'sin') {
-      sql += ` AND stockTotal = 0`
-    }
-
-    sql += ` ORDER BY ${sortKey === 'stock' ? 'stockTotal' : sortKey === 'precio' ? 'precioUnitario' : 'p.nombre'} ${sortDir.toUpperCase()}`
-
-    let resultado = query(sql, params)
-
-    if (searchNombre.trim()) {
-      const needle = normalize(searchNombre.trim())
-      resultado = resultado.filter((p) => normalize(p.nombre).includes(needle))
-    }
-
-    if (filterBajoStock) {
-      resultado = resultado.filter(
-        (p) =>
-          p.puntoReposicion > 0 &&
-          p.stockTotal <= p.puntoReposicion
-      )
-    }
-
-setProductos(resultado)
-    setPage(1)
   }, [searchNombre, searchId, filterCat, filterStock, filterBajoStock, sortKey, sortDir])
 
-  // Igual que load() pero sin resetear la página (para editar/stock/eliminar/categoría/actualizar precios)
-  const loadSinResetPage = useCallback(() => {
-    const cats = query('SELECT * FROM Categoria ORDER BY nombre')
-    setCategorias(cats)
-
-    const todosSql = `
-      SELECT p.*, c.nombre as categoriaNombre,
-        CASE WHEN p.tieneMedidas=1
-          THEN (SELECT COALESCE(SUM(pm.cantidad),0) FROM ProductoMedida pm WHERE pm.idProducto=p.idProducto)
-          ELSE p.cantidad
-        END as stockTotal
-      FROM Producto p
-      JOIN Categoria c ON p.idCategoria=c.idCategoria`
-    setAllProductos(query(todosSql))
-
-    let sql = `
-      SELECT p.*, c.nombre as categoriaNombre,
-        CASE WHEN p.tieneMedidas=1
-          THEN (SELECT COALESCE(SUM(pm.cantidad),0) FROM ProductoMedida pm WHERE pm.idProducto=p.idProducto)
-          ELSE p.cantidad
-        END as stockTotal
-      FROM Producto p
-      JOIN Categoria c ON p.idCategoria=c.idCategoria
-      WHERE 1=1`
-    const params = []
-
-    if (searchId.trim()) {
-      sql += ` AND p.idProducto = ?`
-      params.push(parseInt(searchId) || -1)
-    }
-    if (filterCat !== 'all') {
-      sql += ` AND p.idCategoria=?`
-      params.push(parseInt(filterCat))
-    }
-    if (filterStock === 'con') {
-      sql += ` AND stockTotal > 0`
-    } else if (filterStock === 'sin') {
-      sql += ` AND stockTotal = 0`
-    }
-
-    sql += ` ORDER BY ${sortKey === 'stock' ? 'stockTotal' : sortKey === 'precio' ? 'precioUnitario' : 'p.nombre'} ${sortDir.toUpperCase()}`
-
-    let resultado = query(sql, params)
-
-    if (searchNombre.trim()) {
-      const needle = normalize(searchNombre.trim())
-      resultado = resultado.filter((p) => normalize(p.nombre).includes(needle))
-    }
-
-    if (filterBajoStock) {
-      resultado = resultado.filter(
-        (p) =>
-          p.puntoReposicion > 0 &&
-          p.stockTotal <= p.puntoReposicion
-      )
-    }
-
-    setProductos(resultado)
-    // NO se llama setPage(1) — se conserva la página actual
-  }, [searchNombre, searchId, filterCat, filterStock, filterBajoStock, sortKey, sortDir])
+  const loadSinResetPage = useCallback(() => load(false), [load])
 
   useEffect(() => { load() }, [load])
 
@@ -1004,75 +581,36 @@ setProductos(resultado)
     return sortDir === 'asc' ? <ChevronUp size={13} className="inline ml-1" /> : <ChevronDown size={13} className="inline ml-1" />
   }
 
-  function eliminar(p) {
-    run(`DELETE FROM Producto WHERE idProducto=?`, [p.idProducto])
-    setDeleteConfirm(null)
-    loadSinResetPage()
-    setToast(`"${p.nombre.slice(0, 30)}..." eliminado`)
+  async function eliminar(p) {
+    try {
+      await eliminarProducto(p.idProducto)
+      setDeleteConfirm(null)
+      loadSinResetPage()
+      setToast(`"${p.nombre.slice(0, 30)}..." eliminado`)
+    } catch (err) { console.error('[Inventario] Error eliminando:', err) }
   }
 
   function exportarExcel() {
-    const data = productos.map((p) => ({
-      Codigo: p.idProducto,
-      Producto: p.nombre,
-      Precio: p.precioUnitario || '',
-    }))
-
-    // Crear hoja
+    const data = productos.map((p) => ({ Codigo: p.idProducto, Producto: p.nombre, Precio: p.precioUnitario || '' }))
     const worksheet = XLSX.utils.json_to_sheet(data)
-
-    // Anchos automáticos prolijos
-    worksheet['!cols'] = [
-      { wch: 12 }, // Codigo
-      { wch: 55 }, // Producto
-      { wch: 15 }, // Precio
-    ]
-
-    // Estilo encabezados
+    worksheet['!cols'] = [{ wch: 12 }, { wch: 55 }, { wch: 15 }]
     const range = XLSX.utils.decode_range(worksheet['!ref'])
-
     for (let C = range.s.c; C <= range.e.c; ++C) {
       const cellAddress = XLSX.utils.encode_cell({ r: 0, c: C })
-
       if (!worksheet[cellAddress]) continue
-
       worksheet[cellAddress].s = {
-        font: {
-          bold: true,
-          color: { rgb: 'FFFFFF' },
-        },
-        fill: {
-          fgColor: { rgb: '1F2937' },
-        },
-        alignment: {
-          horizontal: 'center',
-          vertical: 'center',
-        },
+        font: { bold: true, color: { rgb: 'FFFFFF' } },
+        fill: { fgColor: { rgb: '1F2937' } },
+        alignment: { horizontal: 'center', vertical: 'center' },
       }
     }
-
-    // Formato columna precio
     for (let R = 1; R <= range.e.r; ++R) {
       const priceCell = XLSX.utils.encode_cell({ r: R, c: 2 })
-
-      if (worksheet[priceCell]) {
-        worksheet[priceCell].z = '$ #,##0.00'
-      }
+      if (worksheet[priceCell]) worksheet[priceCell].z = '$ #,##0.00'
     }
-
-    // Crear workbook
     const workbook = XLSX.utils.book_new()
-
-    XLSX.utils.book_append_sheet(
-      workbook,
-      worksheet,
-      'Lista Productos'
-    )
-
-    XLSX.writeFile(
-      workbook,
-      `Lista_Productos_${new Date().toISOString().slice(0, 10)}.xlsx`
-    )
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Lista Productos')
+    XLSX.writeFile(workbook, `Lista_Productos_${new Date().toISOString().slice(0, 10)}.xlsx`)
   }
 
   const paginated  = productos.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
@@ -1080,41 +618,15 @@ setProductos(resultado)
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
-      <Toast
-        message={toast}
-        visible={!!toast}
-        onDone={() => setToast('')}
-      />
+      <Toast message={toast} visible={!!toast} onDone={() => setToast('')} />
 
-      <PageHeader
-        title="Inventario"
-        subtitle="Gestión de productos"
+      <PageHeader title="Inventario" subtitle="Gestión de productos"
         actions={
           <div className="flex gap-2">
-            <Button variant="secondary" onClick={() => setModalCat(true)}>
-              + Categoría
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={() => setModalActualizarPrecios(true)}
-            >
-              Actualizar Precios
-            </Button>
-
-            <Button
-              variant="secondary"
-              icon={FileSpreadsheet}
-              onClick={exportarExcel}
-            >
-              Exportar Lista
-            </Button>
-
-            <Button
-              icon={PackagePlus}
-              onClick={() => setModalNuevo(true)}
-            >
-              Nuevo Producto
-            </Button>
+            <Button variant="secondary" onClick={() => setModalCat(true)}>+ Categoría</Button>
+            <Button variant="secondary" onClick={() => setModalActualizarPrecios(true)}>Actualizar Precios</Button>
+            <Button variant="secondary" icon={FileSpreadsheet} onClick={exportarExcel}>Exportar Lista</Button>
+            <Button icon={PackagePlus} onClick={() => setModalNuevo(true)}>Nuevo Producto</Button>
           </div>
         }
       />
@@ -1122,60 +634,25 @@ setProductos(resultado)
       {/* Resumen rápido */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
-          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">
-            Total productos
-          </p>
-          <p className="font-display text-3xl text-white tracking-widest mt-0.5">
-            {allProductos.length}
-          </p>
+          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">Total productos</p>
+          <p className="font-display text-3xl text-white tracking-widest mt-0.5">{allProductos.length}</p>
         </div>
-
         <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
-          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">
-            Con stock
-          </p>
-          <p className="font-display text-3xl text-white tracking-widest mt-0.5">
-            {allProductos.filter((p) => p.stockTotal > 0).length}
-          </p>
+          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">Con stock</p>
+          <p className="font-display text-3xl text-white tracking-widest mt-0.5">{allProductos.filter((p) => p.stockTotal > 0).length}</p>
         </div>
-
         <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
-          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">
-            Sin stock
-          </p>
-          <p className="font-display text-3xl text-white tracking-widest mt-0.5">
-            {allProductos.filter((p) => p.stockTotal === 0).length}
-          </p>
+          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">Sin stock</p>
+          <p className="font-display text-3xl text-white tracking-widest mt-0.5">{allProductos.filter((p) => p.stockTotal === 0).length}</p>
         </div>
-
-        <button
-          onClick={() => setFilterBajoStock((v) => !v)}
-          className={`
-            rounded-xl p-4 border text-left transition-all
-            ${
-              filterBajoStock
-                ? 'bg-yellow-500/20 border-yellow-400/60'
-                : 'bg-yellow-500/10 border-yellow-500/30 hover:bg-yellow-500/15'
-            }
-          `}
-        >
-          <p className="text-yellow-300 text-xs uppercase tracking-widest font-body">
-            Bajo stock
-          </p>
-
+        <button onClick={() => setFilterBajoStock((v) => !v)}
+          className={`rounded-xl p-4 border text-left transition-all
+            ${filterBajoStock ? 'bg-yellow-500/20 border-yellow-400/60' : 'bg-yellow-500/10 border-yellow-500/30 hover:bg-yellow-500/15'}`}>
+          <p className="text-yellow-300 text-xs uppercase tracking-widest font-body">Bajo stock</p>
           <p className="font-display text-3xl text-yellow-200 tracking-widest mt-0.5">
-            {
-              allProductos.filter(
-                (p) =>
-                  p.puntoReposicion > 0 &&
-                  p.stockTotal <= p.puntoReposicion
-              ).length
-            }
+            {allProductos.filter((p) => p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion).length}
           </p>
-
-          <p className="text-yellow-400/70 text-xs mt-1">
-            Click para filtrar
-          </p>
+          <p className="text-yellow-400/70 text-xs mt-1">Click para filtrar</p>
         </button>
       </div>
 
@@ -1186,74 +663,45 @@ setProductos(resultado)
           return (
             <div className="flex flex-wrap gap-3 items-center">
               <div className="flex flex-1 gap-3 min-w-[200px]">
-                {/* Buscar por nombre — se achica cuando aparece el botón limpiar */}
-                <div className={`relative transition-all duration-200 ${hayFiltros ? 'flex-1' : 'flex-1'}`}>
-                  <Search
-                    size={15}
-                    className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none"
-                  />
-                  <input
-                    value={searchNombre}
-                    onChange={(e) => setSearchNombre(e.target.value)}
+                <div className="relative flex-1">
+                  <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
+                  <input value={searchNombre} onChange={(e) => setSearchNombre(e.target.value)}
                     placeholder="Buscar por nombre..."
                     className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2 text-white
-                              text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
-                  />
+                              text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all" />
                 </div>
-
-                {/* Buscar por ID */}
                 <div className="relative w-40 flex-shrink-0">
-                  <input
-                    value={searchId}
-                    onChange={(e) => setSearchId(e.target.value.replace(/\D/g, ''))}
+                  <input value={searchId} onChange={(e) => setSearchId(e.target.value.replace(/\D/g, ''))}
                     placeholder="ID..."
                     className="w-full bg-surface-700 border border-surface-600 rounded-xl px-4 py-2 text-white
-                              text-sm font-mono placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
-                  />
+                              text-sm font-mono placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all" />
                 </div>
               </div>
 
-              {/* Filtro categoría */}
-              <select
-                value={filterCat}
-                onChange={(e) => setFilterCat(e.target.value)}
+              <select value={filterCat} onChange={(e) => setFilterCat(e.target.value)}
                 className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
-                           font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer"
-              >
+                           font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer">
                 <option value="all" className="font-body">Todas las categorías</option>
                 {categorias.map((c) => (
                   <option key={c.idCategoria} value={c.idCategoria} className="font-body">{c.nombre}</option>
                 ))}
               </select>
 
-              {/* Filtro stock */}
-              <select
-                value={filterStock}
-                onChange={(e) => setFilterStock(e.target.value)}
+              <select value={filterStock} onChange={(e) => setFilterStock(e.target.value)}
                 className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
-                           font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer"
-              >
+                           font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer">
                 <option value="all" className="font-body">Todo el stock</option>
                 <option value="con" className="font-body">Con stock</option>
                 <option value="sin" className="font-body">Sin stock</option>
               </select>
 
-              {/* Botón limpiar filtros — solo cuando hay filtros activos */}
               {hayFiltros && (
                 <button
-                  onClick={() => {
-                    setSearchNombre('')
-                    setSearchId('')
-                    setFilterCat('all')
-                    setFilterStock('all')
-                    setFilterBajoStock(false)
-                  }}
+                  onClick={() => { setSearchNombre(''); setSearchId(''); setFilterCat('all'); setFilterStock('all'); setFilterBajoStock(false) }}
                   className="flex items-center gap-2 bg-surface-700 border border-surface-600 rounded-xl px-3 py-2
                              text-surface-300 text-sm font-body hover:border-red-500/50 hover:text-red-400
-                             hover:bg-red-500/10 transition-all cursor-pointer whitespace-nowrap"
-                >
-                  <X size={13} />
-                  Limpiar filtros
+                             hover:bg-red-500/10 transition-all cursor-pointer whitespace-nowrap">
+                  <X size={13} /> Limpiar filtros
                 </button>
               )}
             </div>
@@ -1267,68 +715,33 @@ setProductos(resultado)
           <table className="w-full table-fixed text-sm font-body">
             <thead>
               <tr className="border-b border-surface-700">
-                <th className="w-16 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">
-                  ID
+                <th className="w-16 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">ID</th>
+                <th className="w-[32%] text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
+                  onClick={() => toggleSort('nombre')}>
+                  <div className="flex items-center gap-1"><span>NOMBRE</span><SortIcon col="nombre" /></div>
                 </th>
-
-                <th
-                  className="w-[32%] text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
-                  onClick={() => toggleSort('nombre')}
-                >
-                  <div className="flex items-center gap-1">
-                    <span>NOMBRE</span>
-                    <SortIcon col="nombre" />
-                  </div>
+                <th className="w-44 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">CATEGORÍA</th>
+                <th className="w-36 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">P. PROVEEDOR</th>
+                <th className="w-36 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
+                  onClick={() => toggleSort('precio')}>
+                  <div className="flex items-center gap-1"><span>P. VENTA</span><SortIcon col="precio" /></div>
                 </th>
-
-                <th className="w-44 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">
-                  CATEGORÍA
+                <th className="w-24 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
+                  onClick={() => toggleSort('stock')}>
+                  <div className="flex items-center gap-1"><span>STOCK</span><SortIcon col="stock" /></div>
                 </th>
-
-                <th className="w-36 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">
-                  P. PROVEEDOR
-                </th>
-
-                <th
-                  className="w-36 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
-                  onClick={() => toggleSort('precio')}
-                >
-                  <div className="flex items-center gap-1">
-                    <span>P. VENTA</span>
-                    <SortIcon col="precio" />
-                  </div>
-                </th>
-
-                <th
-                  className="w-24 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
-                  onClick={() => toggleSort('stock')}
-                >
-                  <div className="flex items-center gap-1">
-                    <span>STOCK</span>
-                    <SortIcon col="stock" />
-                  </div>
-                </th>
-
-                <th className="w-32 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">
-                  TIPO
-                </th>
-
+                <th className="w-32 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">TIPO</th>
                 <th className="w-28 py-3 px-4"></th>
               </tr>
             </thead>
             <tbody>
               {paginated.map((p) => (
-                <tr key={p.idProducto} className={`border-b border-surface-700/50 hover:bg-surface-700/30 transition-colors
-                  ${p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion ? 'bg-yellow-500/5' : ''}`}>
+                <tr key={p.idProducto}
+                  className={`border-b border-surface-700/50 hover:bg-surface-700/30 transition-colors
+                    ${p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion ? 'bg-yellow-500/5' : ''}`}>
                   <Td className="font-mono text-surface-400 whitespace-nowrap">#{p.idProducto}</Td>
-                  <Td>
-                    <span className="text-white font-body">{p.nombre}</span>
-                  </Td>
-                  <Td>
-                    <div className="truncate">
-                      <Badge color="gray">{p.categoriaNombre}</Badge>
-                    </div>
-                  </Td>
+                  <Td><span className="text-white font-body">{p.nombre}</span></Td>
+                  <Td><div className="truncate"><Badge color="gray">{p.categoriaNombre}</Badge></div></Td>
                   <Td className="font-mono text-surface-400 whitespace-nowrap">
                     {p.precioProveedor > 0 ? fmt(p.precioProveedor) : <span className="text-surface-600">—</span>}
                   </Td>
@@ -1337,45 +750,27 @@ setProductos(resultado)
                   </Td>
                   <Td>
                     <span className={`font-mono font-medium ${
-                      p.stockTotal === 0
-                        ? 'text-red-400'
-                        : p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion
-                          ? 'text-yellow-400'
-                          : 'text-emerald-400'
-                    }`}>
+                      p.stockTotal === 0 ? 'text-red-400'
+                      : p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion ? 'text-yellow-400'
+                      : 'text-emerald-400'}`}>
                       {p.stockTotal}
                     </span>
                   </Td>
                   <Td>
-                    {p.tieneMedidas
-                      ? <Badge color="blue">Con medidas</Badge>
-                      : <Badge color="gray">General</Badge>
-                    }
+                    {p.tieneMedidas ? <Badge color="blue">Con medidas</Badge> : <Badge color="gray">General</Badge>}
                   </Td>
                   <td className="py-2 px-4">
                     <div className="flex items-center gap-1 justify-end">
-                      {/* Actualizar stock (unificado) */}
-                      <button
-                        onClick={() => { setSelected(p); setModalStock(true) }}
-                        title="Actualizar stock"
-                        className="p-1.5 text-surface-400 hover:text-emerald-400 transition-colors rounded-lg hover:bg-surface-700"
-                      >
+                      <button onClick={() => { setSelected(p); setModalStock(true) }} title="Actualizar stock"
+                        className="p-1.5 text-surface-400 hover:text-emerald-400 transition-colors rounded-lg hover:bg-surface-700">
                         <PackagePlus size={15} />
                       </button>
-                      {/* Editar */}
-                      <button
-                        onClick={() => { setSelected(p); setModalEditar(true) }}
-                        title="Editar"
-                        className="p-1.5 text-surface-400 hover:text-brand-400 transition-colors rounded-lg hover:bg-surface-700"
-                      >
+                      <button onClick={() => { setSelected(p); setModalEditar(true) }} title="Editar"
+                        className="p-1.5 text-surface-400 hover:text-brand-400 transition-colors rounded-lg hover:bg-surface-700">
                         <Pencil size={15} />
                       </button>
-                      {/* Eliminar */}
-                      <button
-                        onClick={() => setDeleteConfirm(p)}
-                        title="Eliminar"
-                        className="p-1.5 text-surface-400 hover:text-red-400 transition-colors rounded-lg hover:bg-surface-700"
-                      >
+                      <button onClick={() => setDeleteConfirm(p)} title="Eliminar"
+                        className="p-1.5 text-surface-400 hover:text-red-400 transition-colors rounded-lg hover:bg-surface-700">
                         <Trash2 size={15} />
                       </button>
                     </div>
@@ -1387,67 +782,34 @@ setProductos(resultado)
         </div>
 
         {productos.length === 0 && (
-          <div className="text-center py-16 text-surface-500 font-body text-sm">
-            Sin resultados para la búsqueda actual.
-          </div>
+          <div className="text-center py-16 text-surface-500 font-body text-sm">Sin resultados para la búsqueda actual.</div>
         )}
 
-        {/* Paginación */}
         {totalPages > 1 && (
           <div className="flex items-center justify-between px-6 py-3 border-t border-surface-700">
             <p className="text-surface-400 text-xs font-body">
               {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, productos.length)} de {productos.length}
             </p>
             <div className="flex gap-2">
-              <Button size="sm" variant="secondary" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1}>
-                ← Anterior
-              </Button>
-              <Button size="sm" variant="secondary" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page === totalPages}>
-                Siguiente →
-              </Button>
+              <Button size="sm" variant="secondary" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1}>← Anterior</Button>
+              <Button size="sm" variant="secondary" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page === totalPages}>Siguiente →</Button>
             </div>
           </div>
         )}
       </Card>
 
       {/* ── Modales ── */}
-      <NuevoProductoModal
-        open={modalNuevo}
-        onClose={() => setModalNuevo(false)}
-        categorias={categorias}
-        onSaved={() => { loadSinResetPage(); setToast('Producto creado correctamente ✓') }}
-      />
+      <NuevoProductoModal open={modalNuevo} onClose={() => setModalNuevo(false)} categorias={categorias}
+        onSaved={() => { loadSinResetPage(); setToast('Producto creado correctamente ✓') }} />
+      <EditarProductoModal open={modalEditar} onClose={() => setModalEditar(false)} producto={selected} categorias={categorias}
+        onSaved={() => { loadSinResetPage(); setToast('Producto actualizado ✓') }} />
+      <StockModal open={modalStock} onClose={() => setModalStock(false)} producto={selected}
+        onSaved={() => { loadSinResetPage(); setToast('Stock actualizado ✓') }} />
+      <CatModal open={modalCat} onClose={() => setModalCat(false)} categorias={categorias}
+        onSaved={() => { loadSinResetPage(); setToast('Categoría creada ✓') }} />
+      <ActualizarPreciosModal open={modalActualizarPrecios} onClose={() => setModalActualizarPrecios(false)}
+        onSaved={() => { loadSinResetPage(); setToast('Precios actualizados correctamente ✓') }} />
 
-      <EditarProductoModal
-        open={modalEditar}
-        onClose={() => setModalEditar(false)}
-        producto={selected}
-        categorias={categorias}
-        onSaved={() => { loadSinResetPage(); setToast('Producto actualizado ✓') }}
-      />
-
-      <StockModal
-        open={modalStock}
-        onClose={() => setModalStock(false)}
-        producto={selected}
-        onSaved={() => { loadSinResetPage(); setToast('Stock actualizado ✓') }}
-      />
-
-      <CatModal
-        open={modalCat}
-        onClose={() => setModalCat(false)}
-        categorias={categorias}
-        onSaved={() => { loadSinResetPage(); setToast('Categoría creada ✓') }}
-      />
-      <ActualizarPreciosModal
-        open={modalActualizarPrecios}
-        onClose={() => setModalActualizarPrecios(false)}
-        onSaved={() => {
-          loadSinResetPage()
-          setToast('Precios actualizados correctamente ✓')
-        }}
-      />
-      {/* Confirm delete */}
       <Modal open={!!deleteConfirm} onClose={() => setDeleteConfirm(null)} title="Confirmar eliminación" width="max-w-sm">
         <p className="text-surface-300 text-sm font-body mb-4">
           ¿Eliminar <span className="text-white font-medium">"{deleteConfirm?.nombre?.slice(0, 50)}"</span>?

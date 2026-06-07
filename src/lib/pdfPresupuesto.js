@@ -2,14 +2,16 @@
 // Función unificada de generación de PDF de presupuesto.
 // Usada por Presupuestador.jsx e Historial.jsx.
 
-import { query } from './database'
+import { obtenerPresupuestoPorId } from '../services/presupuestosService'
+import { obtenerClientePorId }     from '../services/clientesService'
+import { obtenerDetallesConNombreDePresupuesto } from '../services/presupuestosService'
 
 // ─── Mapa de métodos de pago (fuente de verdad compartida con Presupuestador) ─
 // Exportado para que otros módulos puedan consultarlo sin duplicar la definición.
 export const METODOS_BASE_PDF = [
-  { value: 'efectivo',      label: 'Efectivo',          factor: 0.95,  pct: -5   },
-  { value: 'transferencia', label: 'Transferencia',      factor: 0.95,  pct: -5   },
-  { value: 'cc15',          label: 'CC 15 días',         factor: 1.00,  pct:  0   },
+  { value: 'efectivo',      label: 'Efectivo',          factor: 0.95,  pct: -5    },
+  { value: 'transferencia', label: 'Transferencia',      factor: 0.95,  pct: -5    },
+  { value: 'cc15',          label: 'CC 15 días',         factor: 1.00,  pct:  0    },
   { value: 'cc30',          label: 'CC 30 días',         factor: 1.105, pct:  10.5 },
 ]
 
@@ -17,16 +19,9 @@ export const METODOS_BASE_PDF = [
  * Devuelve el string de porcentaje fijo del método de pago para mostrar en PDF.
  * Ej: "efectivo" → "(5% descuento)", "cc30" → "(10.5% recargo)", "cc15" → null
  * Para excepciones, devuelve el % calculado entre montoOriginal y montoConPromos.
- *
- * @param {string} metodoPago   - valor del método (efectivo, transferencia, cc15, cc30)
- * @param {boolean} esExcepcion
- * @param {number}  montoFinal       - pres.monto
- * @param {number}  subtotalConPromo - suma de subtotales de detalles
- * @returns {string|null}
  */
 function pctMetodoPago(metodoPago, esExcepcion, montoFinal, subtotalConPromo) {
   if (esExcepcion) {
-    // Para excepciones calculamos el ajuste real sobre el subtotal con promos
     if (!subtotalConPromo || subtotalConPromo === 0) return null
     const ajuste = montoFinal - subtotalConPromo
     if (Math.abs(ajuste) < 0.01) return null
@@ -55,25 +50,27 @@ export async function generarPDFPresupuesto(idPresupuesto) {
   const { default: jsPDF }     = await import('jspdf')
   const { default: autoTable } = await import('jspdf-autotable')
 
-  const pres = query(`
-    SELECT p.*,
-           COALESCE(c.nombre,  p.nombreCliente)   AS cNombre,
-           COALESCE(c.apellido,p.apellidoCliente) AS cApellido,
-           c.cuit, c.telefono, c.mail
-    FROM Presupuesto p
-    LEFT JOIN Cliente c ON c.idCliente = p.idCliente
-    WHERE p.idPresupuesto = ?
-  `, [idPresupuesto])[0]
+  // ── Cargar datos desde los services ────────────────────────────────────────
+  const [pres, detalles] = await Promise.all([
+    obtenerPresupuestoPorId(idPresupuesto),
+    obtenerDetallesConNombreDePresupuesto(idPresupuesto),
+  ])
   if (!pres) return
 
-  const detalles = query(`
-    SELECT dp.*,
-           COALESCE(dp.nombreProducto, pr.nombre, '(producto eliminado #' || dp.idProducto || ')') AS nombreProducto
-    FROM DetallePresupuesto dp
-    LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
-    WHERE dp.idPresupuesto = ?
-    ORDER BY dp.idDetalle
-  `, [idPresupuesto])
+  // Traer datos frescos del cliente (cuit, telefono, mail)
+  // con fallback a los snapshots del presupuesto si el cliente fue borrado
+  let clienteData = null
+  try {
+    clienteData = await obtenerClientePorId(pres.idCliente)
+  } catch {
+    // cliente eliminado — se usan los snapshots del presupuesto
+  }
+
+  const cNombre   = clienteData?.nombre   ?? pres.nombreCliente   ?? ''
+  const cApellido = clienteData?.apellido ?? pres.apellidoCliente ?? ''
+  const cCuit     = clienteData?.cuit     ?? null
+  const cTelefono = clienteData?.telefono ?? null
+  const cMail     = clienteData?.mail     ?? null
 
   // ── Cálculo de desglose de totales ──────────────────────────────────────
   const montoOriginal = pres.montoOriginal ??
@@ -86,7 +83,6 @@ export async function generarPDFPresupuesto(idPresupuesto) {
 
   const esExcepcion = pres.esExcepcion === 1
 
-  // Etiqueta del método con porcentaje fijo
   const metodoLabelBase = {
     efectivo:      'Efectivo',
     transferencia: 'Transferencia',
@@ -95,9 +91,7 @@ export async function generarPDFPresupuesto(idPresupuesto) {
   }
   const metodoNombre = metodoLabelBase[pres.metodoPago] ?? pres.metodoPago
   const pctSufijo = pctMetodoPago(pres.metodoPago, esExcepcion, parseFloat(pres.monto) || 0, subtotalConPromo)
-  const ajusteLineaLabel = esExcepcion
-    ? `Ajuste${pctSufijo ? ' ' + pctSufijo : ''}:`
-    : `Ajuste${pctSufijo ? ' ' + pctSufijo : ''}:`
+  const ajusteLineaLabel = `Ajuste${pctSufijo ? ' ' + pctSufijo : ''}:`
 
   // ── Helpers ──────────────────────────────────────────────────────────────
   const fmtFecha = iso => {
@@ -107,15 +101,14 @@ export async function generarPDFPresupuesto(idPresupuesto) {
   }
 
   // ── Paleta de grises ─────────────────────────────────────────────────────
-  // Todos los colores del PDF son tonos de gris para impresión en blanco y negro.
-  const GRIS_HEADER   = [200, 200, 200]  // fondo encabezado / total
-  const GRIS_TEXTO    = [50,  50,  50]   // texto principal
-  const GRIS_SUAVE    = [100, 100, 100]  // texto secundario / etiquetas
-  const GRIS_ALT_ROW  = [245, 245, 245]  // filas alternadas tabla
-  const GRIS_LINEA    = [220, 220, 220]  // línea separadora
-  const GRIS_DESCUENTO= [80,  80,  80]   // descuentos (gris oscuro, reemplaza verde)
-  const GRIS_RECARGO  = [40,  40,  40]   // recargos (gris muy oscuro / casi negro)
-  const GRIS_NOTA     = [130, 130, 130]  // nota al pie
+  const GRIS_HEADER    = [200, 200, 200]
+  const GRIS_TEXTO     = [50,  50,  50]
+  const GRIS_SUAVE     = [100, 100, 100]
+  const GRIS_ALT_ROW   = [245, 245, 245]
+  const GRIS_LINEA     = [220, 220, 220]
+  const GRIS_DESCUENTO = [80,  80,  80]
+  const GRIS_RECARGO   = [40,  40,  40]
+  const GRIS_NOTA      = [130, 130, 130]
 
   // ── Documento ────────────────────────────────────────────────────────────
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
@@ -142,10 +135,10 @@ export async function generarPDFPresupuesto(idPresupuesto) {
   doc.setFontSize(9); doc.setFont('helvetica', 'bold'); doc.setTextColor(...GRIS_TEXTO)
   doc.text('CLIENTE', PW - ML - 70, 26)
   doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...GRIS_SUAVE)
-  doc.text(`${pres.cNombre} ${pres.cApellido}`, PW - ML - 70, 32)
-  if (pres.cuit)     doc.text(`CUIT: ${pres.cuit}`,    PW - ML - 70, 37)
-  if (pres.telefono) doc.text(`Tel: ${pres.telefono}`, PW - ML - 70, 42)
-  if (pres.mail)     doc.text(pres.mail,               PW - ML - 70, 47)
+  doc.text(`${cNombre} ${cApellido}`, PW - ML - 70, 32)
+  if (cCuit)     doc.text(`CUIT: ${cCuit}`,    PW - ML - 70, 37)
+  if (cTelefono) doc.text(`Tel: ${cTelefono}`, PW - ML - 70, 42)
+  if (cMail)     doc.text(cMail,               PW - ML - 70, 47)
 
   // Tabla de productos
   autoTable(doc, {
@@ -192,7 +185,7 @@ export async function generarPDFPresupuesto(idPresupuesto) {
   if (ahorroPromo > 0.01) {
     doc.setTextColor(...GRIS_SUAVE)
     doc.text('Promoción:', PW - ML - 70, curY)
-    doc.setTextColor(...GRIS_DESCUENTO)   // gris oscuro (antes verde)
+    doc.setTextColor(...GRIS_DESCUENTO)
     doc.text(`- ${fmt(ahorroPromo)}`, PW - ML, curY, { align: 'right' })
     curY += 6
 
@@ -204,16 +197,16 @@ export async function generarPDFPresupuesto(idPresupuesto) {
     curY += 6
   }
 
-  // 4. Ajuste por método de pago (solo si existe) — incluye % fijo del método
+  // 4. Ajuste por método de pago (solo si existe)
   if (Math.abs(ajusteMetodo) > 0.01) {
     doc.setFontSize(8.5); doc.setTextColor(...GRIS_SUAVE)
     doc.text(ajusteLineaLabel, PW - ML - 70, curY)
     doc.setFontSize(8.5)
     if (ajusteMetodo < 0) {
-      doc.setTextColor(...GRIS_DESCUENTO)  // gris oscuro — descuento (antes verde)
+      doc.setTextColor(...GRIS_DESCUENTO)
       doc.text(`- ${fmt(Math.abs(ajusteMetodo))}`, PW - ML, curY, { align: 'right' })
     } else {
-      doc.setTextColor(...GRIS_RECARGO)    // gris muy oscuro — recargo (antes rojo)
+      doc.setTextColor(...GRIS_RECARGO)
       doc.text(`+ ${fmt(ajusteMetodo)}`, PW - ML, curY, { align: 'right' })
     }
     curY += 6
@@ -234,5 +227,5 @@ export async function generarPDFPresupuesto(idPresupuesto) {
     doc.text('* Precio con descuento promocional aplicado.', ML, noteY)
   }
 
-  doc.save(`Presupuesto_${idPresupuesto}_${pres.cNombre}_${pres.cApellido}.pdf`)
+  doc.save(`Presupuesto_${idPresupuesto}_${cNombre}_${cApellido}.pdf`)
 }

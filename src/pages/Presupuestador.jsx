@@ -2,8 +2,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { query, run } from '../lib/database'
-import { aplicarPromociones, calcularTotales } from '../lib/promociones'
+
+// ─── Services ────────────────────────────────────────────────────────────────
+import { crearCliente, buscarClientes, obtenerClientePorId } from '../services/clientesService'
+import { crearPresupuesto, actualizarPresupuesto, obtenerPresupuestoPorId, obtenerDetallesDePresupuesto } from '../services/presupuestosService'
+import { buscarProductos, obtenerProductoPorId, obtenerMedidasDeProducto } from '../services/productosService'
+import { calcularPromocionParaItem, obtenerPromocionesVigentes } from '../services/promocionesService'
+import { obtenerSaldosPendientesDeCliente } from '../services/saldosService'
+
 import { generarPDFPresupuesto } from '../lib/pdfPresupuesto'
 import { Button, Card, PageHeader, Modal, Input } from '../components/ui'
 import { Plus, Trash2, Search, UserPlus, CheckCircle2, AlertCircle, Download, FileText, ArrowLeft, X, Tag } from 'lucide-react'
@@ -31,6 +37,30 @@ function norm(s) {
 
 const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
 
+// ─── Helpers de totales ────────────────────────────────────────────────────
+
+/**
+ * Calcula los totales del carrito a partir de ítems ya enriquecidos con promos.
+ * Reemplaza calcularTotales() de lib/promociones.js.
+ */
+function calcularTotales(itemsConPromo, factor) {
+  let subtotalSinPromo = 0
+  let subtotalConPromo = 0
+
+  for (const it of itemsConPromo) {
+    const cant     = parseInt(it.cantidad) || 0
+    const precio   = parseFloat(it.precioUnitario) || 0
+    const efectivo = it.precioConPromo != null ? it.precioConPromo : precio
+    subtotalSinPromo += cant * precio
+    subtotalConPromo += cant * efectivo
+  }
+
+  const ahorro     = subtotalSinPromo - subtotalConPromo
+  const totalFinal = Math.round(subtotalConPromo * factor * 100) / 100
+
+  return { subtotalSinPromo, subtotalConPromo, ahorro, totalFinal }
+}
+
 // ─── Toast ─────────────────────────────────────────────────────────────────
 
 function Toast({ message, onDone }) {
@@ -56,6 +86,7 @@ function NuevoClienteModal({ open, onClose, onCreated }) {
   const empty = { nombre: '', apellido: '', cuit: '', domicilio: '', telefono: '', mail: '', apodo: '', nombreComercio: '' }
   const [form, setForm]     = useState(empty)
   const [errors, setErrors] = useState({})
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => { if (!open) { setForm(empty); setErrors({}) } }, [open])
 
@@ -68,7 +99,7 @@ function NuevoClienteModal({ open, onClose, onCreated }) {
     setForm(p => ({ ...p, [k]: val }))
   }
 
-  function guardar() {
+  async function guardar() {
     const e = {}
     if (!form.nombre.trim())   e.nombre   = 'Requerido'
     if (!form.apellido.trim()) e.apellido = 'Requerido'
@@ -81,20 +112,34 @@ function NuevoClienteModal({ open, onClose, onCreated }) {
     const nombreComercio = cap(form.nombreComercio)
     const domicilio      = form.domicilio.replace(/\b\w/g, c => c.toUpperCase())
 
-    const id = run(
-      `INSERT INTO Cliente (nombre,apellido,cuit,domicilio,telefono,mail,apodo,nombreComercio,activo)
-       VALUES (?,?,?,?,?,?,?,?,1)`,
-      [nombre, apellido, form.cuit, domicilio,
-       form.telefono, form.mail, apodo, nombreComercio]
-    )
-    const cliente = query('SELECT * FROM Cliente WHERE idCliente = ?', [id])[0]
-    onClose()
-    setTimeout(() => onCreated(cliente), 0)
+    setSaving(true)
+    try {
+      const cliente = await crearCliente({
+        nombre, apellido,
+        cuit:           form.cuit     || null,
+        domicilio:      domicilio     || null,
+        telefono:       form.telefono || null,
+        mail:           form.mail     || null,
+        apodo:          apodo         || null,
+        nombreComercio: nombreComercio || null,
+      })
+      onClose()
+      setTimeout(() => onCreated(cliente), 0)
+    } catch (err) {
+      setErrors({ general: err.message })
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
     <Modal open={open} onClose={onClose} title="Nuevo Cliente">
       <div className="space-y-4">
+        {errors.general && (
+          <div className="text-red-400 text-xs bg-red-500/10 border border-red-500/30 rounded-xl px-3 py-2">
+            {errors.general}
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <Input label="Nombre *"   value={form.nombre}   onChange={e => set('nombre', e.target.value)}   error={errors.nombre}   placeholder="Juan" />
           <Input label="Apellido *" value={form.apellido} onChange={e => set('apellido', e.target.value)} error={errors.apellido} placeholder="García" />
@@ -112,8 +157,8 @@ function NuevoClienteModal({ open, onClose, onCreated }) {
           <Input label="Email" value={form.mail} onChange={e => set('mail', e.target.value)} placeholder="email@ejemplo.com" />
         </div>
         <div className="flex gap-2 pt-2">
-          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button className="flex-1" onClick={guardar}>Crear Cliente</Button>
+          <Button variant="secondary" className="flex-1" onClick={onClose} disabled={saving}>Cancelar</Button>
+          <Button className="flex-1" onClick={guardar} disabled={saving}>{saving ? 'Creando…' : 'Crear Cliente'}</Button>
         </div>
       </div>
     </Modal>
@@ -135,18 +180,20 @@ function ClienteSelector({ value, onChange, onToast }) {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  function buscar(text) {
+  async function buscar(text) {
     setSearch(text)
     if (!text.trim()) { setResults([]); setShowDrop(false); return }
-    const normText = norm(text.trim())
-    const byId = query(`SELECT * FROM Cliente WHERE CAST(idCliente AS TEXT) = ? AND activo = 1 LIMIT 1`, [text.trim()])
-    const byName = query(`SELECT * FROM Cliente WHERE activo = 1 LIMIT 300`)
-      .filter(c => norm(c.nombre).includes(normText) || norm(c.apellido).includes(normText)
-               || norm(c.apodo ?? '').includes(normText) || norm(c.nombreComercio ?? '').includes(normText))
-    const seen = new Set(byId.map(c => c.idCliente))
-    const rows = [...byId, ...byName.filter(c => !seen.has(c.idCliente))].slice(0, 8)
-    setResults(rows)
-    setShowDrop(true)
+
+    try {
+      const { porId, porNombre } = await buscarClientes(text)
+      const seen = new Set(porId.map(c => c.idCliente))
+      const rows = [...porId, ...porNombre.filter(c => !seen.has(c.idCliente))].slice(0, 8)
+      setResults(rows)
+      setShowDrop(true)
+    } catch {
+      setResults([])
+      setShowDrop(true)
+    }
   }
 
   function seleccionar(c) {
@@ -227,11 +274,6 @@ function ClienteSelector({ value, onChange, onToast }) {
 }
 
 // ─── Fila de ítem ───────────────────────────────────────────────────────────
-// CAMBIOS vs. versión original:
-//  · Recibe `itemConPromo` (objeto enriquecido por aplicarPromociones) además de `item`.
-//  · Si hay precioConPromo, muestra precio original tachado + precio promo en verde.
-//  · El subtotal se calcula con el precio promocional cuando aplica.
-//  · Badge de nombre de promo junto al precio.
 
 function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearError, onStockError }) {
   const [nombreSearch,   setNombreSearch]   = useState(item.nombreProducto || '')
@@ -281,44 +323,58 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
     return () => { window.removeEventListener('scroll', update, true); window.removeEventListener('resize', update) }
   }, [showDrop])
 
+  // Cargar medidas cuando cambia el producto seleccionado
   useEffect(() => {
     if (!item.idProducto) { setMedidas([]); return }
-    const prod = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(item.idProducto)])[0]
-    if (prod?.tieneMedidas) {
-      const ms = query('SELECT medida FROM ProductoMedida WHERE idProducto = ? ORDER BY medida', [parseInt(item.idProducto)])
-      setMedidas(ms.map(r => r.medida))
-    } else {
-      setMedidas([])
-      onUpdate(uid, 'medida', null)
-    }
+    let cancelled = false
+    obtenerProductoPorId(parseInt(item.idProducto))
+      .then(prod => {
+        if (cancelled || !prod) return
+        if (prod.tieneMedidas) {
+          return obtenerMedidasDeProducto(parseInt(item.idProducto))
+            .then(ms => { if (!cancelled) setMedidas(ms.map(r => r.medida)) })
+        } else {
+          setMedidas([])
+          onUpdate(uid, 'medida', null)
+        }
+      })
+      .catch(() => setMedidas([]))
+    return () => { cancelled = true }
   }, [item.idProducto])
 
-  function checkStock(idProducto, medida, cantidad) {
+  async function checkStock(idProducto, medida, cantidad) {
     if (!idProducto || !cantidad || parseInt(cantidad) <= 0) {
       setStockWarning(''); onStockError(uid, false); return
     }
-    const prod = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(idProducto)])[0]
-    if (!prod) { setStockWarning(''); onStockError(uid, false); return }
-    let stockDisp = 0
-    if (prod.tieneMedidas && medida) {
-      const pm = query('SELECT cantidad FROM ProductoMedida WHERE idProducto = ? AND medida = ?', [parseInt(idProducto), medida])[0]
-      stockDisp = pm?.cantidad ?? 0
-    } else if (!prod.tieneMedidas) {
-      stockDisp = prod.cantidad ?? 0
-    } else {
-      setStockWarning(''); onStockError(uid, false); return
-    }
-    const pedido = parseInt(cantidad) || 0
-    if (pedido > stockDisp) {
-      setStockWarning(`Stock Disponible: ${stockDisp}.`)
-      onStockError(uid, true)
-    } else {
-      setStockWarning('')
-      onStockError(uid, false)
+    try {
+      const prod = await obtenerProductoPorId(parseInt(idProducto))
+      if (!prod) { setStockWarning(''); onStockError(uid, false); return }
+
+      let stockDisp = 0
+      if (prod.tieneMedidas && medida) {
+        const medidasProd = await obtenerMedidasDeProducto(parseInt(idProducto))
+        const pm = medidasProd.find(m => m.medida === medida)
+        stockDisp = pm?.cantidad ?? 0
+      } else if (!prod.tieneMedidas) {
+        stockDisp = prod.cantidad ?? 0
+      } else {
+        setStockWarning(''); onStockError(uid, false); return
+      }
+
+      const pedido = parseInt(cantidad) || 0
+      if (pedido > stockDisp) {
+        setStockWarning(`Stock Disponible: ${stockDisp}.`)
+        onStockError(uid, true)
+      } else {
+        setStockWarning('')
+        onStockError(uid, false)
+      }
+    } catch {
+      setStockWarning(''); onStockError(uid, false)
     }
   }
 
-  function buscarPorNombre(text) {
+  async function buscarPorNombre(text) {
     setNombreSearch(text)
     onClearError()
     onUpdate(uid, 'nombreProducto', text)
@@ -331,12 +387,14 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
       setPriceWarning(false)
     }
     if (!text.trim()) { setNombreResults([]); setShowDrop(false); return }
-    const normText = norm(text.trim())
-    const rows = query(`SELECT * FROM Producto LIMIT 2000`)
-      .filter(p => norm(p.nombre).includes(normText))
-      .slice(0, 12)
-    setNombreResults(rows)
-    setShowDrop(true)
+    try {
+      const rows = await buscarProductos({ texto: text.trim() })
+      setNombreResults(rows.slice(0, 12))
+      setShowDrop(true)
+    } catch {
+      setNombreResults([])
+      setShowDrop(true)
+    }
   }
 
   function seleccionarProducto(p) {
@@ -352,21 +410,29 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
     checkStock(p.idProducto, null, item.cantidad)
   }
 
-  function handleIdChange(val) {
+  async function handleIdChange(val) {
     const clean = val.replace(/\D/g, '')
     onClearError()
     onUpdate(uid, 'idProducto', clean)
     if (clean) {
-      const p = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(clean)])[0]
-      if (p) {
-        setNombreSearch(p.nombre)
-        onUpdate(uid, 'nombreProducto', p.nombre)
-        onUpdate(uid, 'precioUnitario', p.precioUnitario)
-        onUpdate(uid, 'medida', null)
-        setIdError('')
-        setPriceWarning(!p.precioUnitario)
-        checkStock(p.idProducto, null, item.cantidad)
-      } else {
+      try {
+        const p = await obtenerProductoPorId(parseInt(clean))
+        if (p) {
+          setNombreSearch(p.nombre)
+          onUpdate(uid, 'nombreProducto', p.nombre)
+          onUpdate(uid, 'precioUnitario', p.precioUnitario)
+          onUpdate(uid, 'medida', null)
+          setIdError('')
+          setPriceWarning(!p.precioUnitario)
+          checkStock(p.idProducto, null, item.cantidad)
+        } else {
+          setNombreSearch('')
+          onUpdate(uid, 'nombreProducto', '')
+          onUpdate(uid, 'precioUnitario', 0)
+          onUpdate(uid, 'medida', null)
+          setIdError(`Sin producto con ID ${clean}`)
+        }
+      } catch {
         setNombreSearch('')
         onUpdate(uid, 'nombreProducto', '')
         onUpdate(uid, 'precioUnitario', 0)
@@ -501,7 +567,7 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
               <div className="flex items-center gap-1 mt-0.5">
                 <Tag size={10} className="text-emerald-500 flex-shrink-0" />
                 <span className="text-emerald-500 text-[10px] font-body truncate max-w-[100px]">
-                  {itemConPromo.promoAplicada}
+                  {itemConPromo.promoAplicada?.nombre ?? ''}
                 </span>
               </div>
             </>
@@ -630,81 +696,101 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
   const navigate = useNavigate()
   const modoEdicion = !!presupuestoEditar
 
-  function cargarDatosEdicion() {
-    if (!presupuestoEditar) return {}
-    const pres = query(
-      'SELECT p.*, c.nombre, c.apellido, c.cuit, c.domicilio, c.telefono, c.mail FROM Presupuesto p JOIN Cliente c ON c.idCliente = p.idCliente WHERE p.idPresupuesto = ?',
-      [presupuestoEditar]
-    )[0]
-    if (!pres) return {}
+  // ── Estado de inicialización (async) ──
+  const [initDone,  setInitDone]  = useState(!modoEdicion)
+  const [initError, setInitError] = useState('')
 
-    const detalles = query(
-      `SELECT dp.*, pr.nombre AS nombreProducto FROM DetallePresupuesto dp
-       LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
-       WHERE dp.idPresupuesto = ? ORDER BY dp.idDetalle`,
-      [presupuestoEditar]
-    )
-
-    const clienteObj = {
-      idCliente: pres.idCliente,
-      nombre: pres.nombre,
-      apellido: pres.apellido,
-      cuit: pres.cuit,
-      domicilio: pres.domicilio,
-      telefono: pres.telefono,
-      mail: pres.mail,
-    }
-
-    const esExcepcionDB = pres.esExcepcion === 1
-    const factorDB = pres.montoOriginal > 0 ? pres.monto / pres.montoOriginal : 1
-    const pctDB = esExcepcionDB ? String(((1 - factorDB) * 100).toFixed(4).replace(/\.?0+$/, '')) : ''
-
-    const itemsDB = detalles.map(d => ({
-      _uid: Math.random().toString(36).slice(2),
-      idProducto: String(d.idProducto),
-      nombreProducto: d.nombreProducto ?? '',
-      cantidad: String(d.cantidad),
-      precioUnitario: d.precioUnitario,
-      medida: d.medida ?? null,
-    }))
-
-    return {
-      clienteObj,
-      metodoPagoInit: esExcepcionDB ? 'excepcion' : pres.metodoPago,
-      excepcionSubMetodoInit: esExcepcionDB ? pres.metodoPago : 'efectivo',
-      excepcionFactorInit: factorDB,
-      pctInit: pctDB,
-      itemsInit: itemsDB.length ? itemsDB : [ITEM_EMPTY()],
-    }
-  }
-
-  const init = cargarDatosEdicion()
-
-  const [cliente,            setCliente]            = useState(init.clienteObj ?? null)
-  const [metodoPago,         setMetodoPago]          = useState(init.metodoPagoInit ?? 'efectivo')
-  const [excepcionFactor,    setExcepcionFactor]     = useState(init.excepcionFactorInit ?? 1)
-  const [excepcionSubMetodo, setExcepcionSubMetodo]  = useState(init.excepcionSubMetodoInit ?? 'efectivo')
-  const [items,              setItems]               = useState(init.itemsInit ?? [ITEM_EMPTY()])
-  const [pctInit]                                    = useState(init.pctInit ?? '')
+  const [cliente,            setCliente]            = useState(null)
+  const [metodoPago,         setMetodoPago]          = useState('efectivo')
+  const [excepcionFactor,    setExcepcionFactor]     = useState(1)
+  const [excepcionSubMetodo, setExcepcionSubMetodo]  = useState('efectivo')
+  const [items,              setItems]               = useState([ITEM_EMPTY()])
+  const [pctInit,            setPctInit]             = useState('')
   const [guardado,           setGuardado]            = useState(null)
   const [error,              setError]               = useState('')
   const [toast,              setToast]               = useState('')
   const [stockErrors,        setStockErrors]         = useState({})
+  const [saving,             setSaving]              = useState(false)
+
+  // ── Promociones vigentes — se cargan una sola vez ──
+  const [promoVigentes, setPromoVigentes] = useState([])
+  useEffect(() => {
+    obtenerPromocionesVigentes().then(setPromoVigentes).catch(() => {})
+  }, [])
+
+  // ── Cargar datos de edición de forma asíncrona ──
+  useEffect(() => {
+    if (!presupuestoEditar) return
+
+    async function cargar() {
+      try {
+        const pres    = await obtenerPresupuestoPorId(presupuestoEditar)
+        if (!pres) { setInitError('No se encontró el presupuesto.'); return }
+
+        const cliente = await obtenerClientePorId(pres.idCliente)
+        const detalles = await obtenerDetallesDePresupuesto(presupuestoEditar)
+
+        const esExcepcionDB = pres.esExcepcion === 1
+        const factorDB = pres.montoOriginal > 0 ? pres.monto / pres.montoOriginal : 1
+        const pctDB = esExcepcionDB
+          ? String(((1 - factorDB) * 100).toFixed(4).replace(/\.?0+$/, ''))
+          : ''
+
+        const itemsDB = detalles.map(d => ({
+          _uid: Math.random().toString(36).slice(2),
+          idProducto:     String(d.idProducto),
+          nombreProducto: d.nombreProducto ?? '',
+          cantidad:       String(d.cantidad),
+          precioUnitario: d.precioUnitario,
+          medida:         d.medida ?? null,
+        }))
+
+        setCliente(cliente)
+        setMetodoPago(esExcepcionDB ? 'excepcion' : pres.metodoPago)
+        setExcepcionSubMetodo(esExcepcionDB ? pres.metodoPago : 'efectivo')
+        setExcepcionFactor(factorDB)
+        setPctInit(pctDB)
+        setItems(itemsDB.length ? itemsDB : [ITEM_EMPTY()])
+        setInitDone(true)
+      } catch (err) {
+        setInitError(err.message || 'Error al cargar el presupuesto.')
+      }
+    }
+
+    cargar()
+  }, [presupuestoEditar])
 
   const esExcepcion = metodoPago === 'excepcion'
   const factorReal  = esExcepcion
     ? excepcionFactor
     : (METODOS_BASE.find(m => m.value === metodoPago)?.factor ?? 1)
 
-  // ── Aplicar promociones al carrito actual ──
-  // Se recalcula en cada render para reflejar cambios de ítems y cantidad en tiempo real.
-  const itemsConPromo = aplicarPromociones(items)
+  // ── Aplicar promociones al carrito ──
+  const itemsConPromo = items.map(item => {
+    const { promoAplicada, precioFinal, ahorro } = calcularPromocionParaItem(
+      {
+        idProducto:     parseInt(item.idProducto) || null,
+        // idCategoria: el service necesita esto — se propaga desde el producto
+        // En el carrito no tenemos idCategoria directamente; se usa el que
+        // quedó guardado en el item si existiera, o null.
+        idCategoria:    item.idCategoria ?? null,
+        precioUnitario: parseFloat(item.precioUnitario) || 0,
+        cantidad:       parseInt(item.cantidad) || 0,
+      },
+      promoVigentes
+    )
+    return {
+      ...item,
+      promoAplicada,
+      precioConPromo: promoAplicada ? precioFinal : null,
+      idPromocion:    promoAplicada?.idPromocion ?? null,
+      ahorro,
+    }
+  })
 
-  // ── Totales con soporte de promos ──
   const { subtotalSinPromo, subtotalConPromo, ahorro, totalFinal } =
     calcularTotales(itemsConPromo, factorReal)
 
-  // Alias para retrocompatibilidad con la pantalla de éxito y el guardar()
   const subtotalOriginal = subtotalSinPromo
 
   function updateItem(uid, key, val) {
@@ -720,102 +806,140 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
     setStockErrors(prev => ({ ...prev, [uid]: hasError }))
   }
 
-  function guardar() {
+  const guardandoRef = useRef(false)
+
+  async function guardar() {
+    // Bloqueo sincrónico: evita que múltiples clicks disparen guardados simultáneos
+    // aunque las validaciones asíncronas demoren varios segundos.
+    if (guardandoRef.current) return
+    guardandoRef.current = true
+
     setError('')
-    if (!cliente) { setError('Seleccioná un cliente antes de guardar.'); return }
+    setSaving(true)
 
-    const validItems = items.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
-    if (!validItems.length) { setError('Agregá al menos un producto con ID válido.'); return }
-
-    for (const it of validItems) {
-      const existe = query('SELECT idProducto, tieneMedidas FROM Producto WHERE idProducto = ?', [parseInt(it.idProducto)])[0]
-      if (!existe) { setError(`El producto ID ${it.idProducto} no existe en el inventario.`); return }
-      if (existe.tieneMedidas && !it.medida) { setError(`Seleccioná una medida para el producto ID ${it.idProducto}.`); return }
-    }
-
-    for (const it of validItems) {
-      if (!parseFloat(it.precioUnitario)) {
-        setError(`El producto "${it.nombreProducto || 'ID ' + it.idProducto}" no tiene precio definido. Asignalo desde Inventario.`)
+    try {
+      if (!cliente) {
+        setError('Seleccioná un cliente antes de guardar.')
         return
       }
-    }
 
-    for (const it of validItems) {
-      const prod = query('SELECT * FROM Producto WHERE idProducto = ?', [parseInt(it.idProducto)])[0]
-      if (!prod) continue
-      let stockDisp = 0
-      if (prod.tieneMedidas && it.medida) {
-        const pm = query('SELECT cantidad FROM ProductoMedida WHERE idProducto = ? AND medida = ?', [parseInt(it.idProducto), it.medida])[0]
-        stockDisp = pm?.cantidad ?? 0
-      } else if (!prod.tieneMedidas) {
-        stockDisp = prod.cantidad ?? 0
-      } else continue
-      if (parseInt(it.cantidad) > stockDisp) {
-        setError(`Stock insuficiente de algun producto.`)
-        return
+      const validItems = items.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
+      if (!validItems.length) { setError('Agregá al menos un producto con ID válido.'); return }
+
+      // Validar que los productos existen y tienen medida si corresponde
+      for (const it of validItems) {
+        let prod
+        try { prod = await obtenerProductoPorId(parseInt(it.idProducto)) } catch { prod = null }
+        if (!prod) { setError(`El producto ID ${it.idProducto} no existe en el inventario.`); return }
+        if (prod.tieneMedidas && !it.medida) { setError(`Seleccioná una medida para el producto ID ${it.idProducto}.`); return }
       }
-    }
 
-    const fecha = today()
-    const metodoDb = esExcepcion ? excepcionSubMetodo : metodoPago
-
-    // Mapear items con sus datos de promo para persistir snapshots
-    const itemsConPromoValidos = itemsConPromo.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
-
-    let presupuestoReal
-
-    if (modoEdicion) {
-      run(
-        `UPDATE Presupuesto SET idCliente=?, nombreCliente=?, apellidoCliente=?, metodoPago=?, montoOriginal=?, monto=?, esExcepcion=? WHERE idPresupuesto=?`,
-        [cliente.idCliente, cliente.nombre, cliente.apellido, metodoDb, subtotalSinPromo, totalFinal, esExcepcion ? 1 : 0, presupuestoEditar]
-      )
-      run(`DELETE FROM DetallePresupuesto WHERE idPresupuesto = ?`, [presupuestoEditar])
-      for (const it of itemsConPromoValidos) {
-        const precio       = parseFloat(it.precioUnitario) || 0
-        const precioFinal  = it.precioConPromo != null ? it.precioConPromo : precio
-        const cantidad     = parseInt(it.cantidad)
-        run(
-          `INSERT INTO DetallePresupuesto (idPresupuesto, idProducto, nombreProducto, medida, cantidad, precioUnitario, subtotal, precioConPromo, idPromocion) VALUES (?,?,?,?,?,?,?,?,?)`,
-          [presupuestoEditar, parseInt(it.idProducto), it.nombreProducto || null, it.medida || null,
-           cantidad, precio, cantidad * precioFinal,
-           it.precioConPromo ?? null, it.idPromocion ?? null]
-        )
+      // Validar precios
+      for (const it of validItems) {
+        if (!parseFloat(it.precioUnitario)) {
+          setError(`El producto "${it.nombreProducto || 'ID ' + it.idProducto}" no tiene precio definido. Asignalo desde Inventario.`)
+          return
+        }
       }
-      presupuestoReal = presupuestoEditar
-      if (onEditarVolver) { onEditarVolver(presupuestoReal); return }
-    } else {
-      const idPresupuesto = run(
-        `INSERT INTO Presupuesto (idCliente, nombreCliente, apellidoCliente, fecha, metodoPago, montoOriginal, monto, estado, esExcepcion) VALUES (?,?,?,?,?,?,?,'borrador',?)`,
-        [cliente.idCliente, cliente.nombre, cliente.apellido, fecha, metodoDb, subtotalSinPromo, totalFinal, esExcepcion ? 1 : 0]
-      )
-      presupuestoReal = query('SELECT MAX(idPresupuesto) as id FROM Presupuesto WHERE idCliente = ? AND fecha = ?', [cliente.idCliente, fecha])[0]?.id ?? idPresupuesto
 
-      for (const it of itemsConPromoValidos) {
+      // Validar stock
+      for (const it of validItems) {
+        let prod
+        try { prod = await obtenerProductoPorId(parseInt(it.idProducto)) } catch { continue }
+        if (!prod) continue
+        let stockDisp = 0
+        if (prod.tieneMedidas && it.medida) {
+          const medidasProd = await obtenerMedidasDeProducto(parseInt(it.idProducto))
+          const pm = medidasProd.find(m => m.medida === it.medida)
+          stockDisp = pm?.cantidad ?? 0
+        } else if (!prod.tieneMedidas) {
+          stockDisp = prod.cantidad ?? 0
+        } else continue
+        if (parseInt(it.cantidad) > stockDisp) {
+          setError(`Stock insuficiente de algún producto.`)
+          return
+        }
+      }
+
+      const fecha    = today()
+      const metodoDb = esExcepcion ? excepcionSubMetodo : metodoPago
+
+      const itemsConPromoValidos = itemsConPromo.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
+
+      const detalles = itemsConPromoValidos.map(it => {
         const precio      = parseFloat(it.precioUnitario) || 0
         const precioFinal = it.precioConPromo != null ? it.precioConPromo : precio
         const cantidad    = parseInt(it.cantidad)
-        run(
-          `INSERT INTO DetallePresupuesto (idPresupuesto, idProducto, nombreProducto, medida, cantidad, precioUnitario, subtotal, precioConPromo, idPromocion) VALUES (?,?,?,?,?,?,?,?,?)`,
-          [idPresupuesto, parseInt(it.idProducto), it.nombreProducto || null, it.medida || null,
-           cantidad, precio, cantidad * precioFinal,
-           it.precioConPromo ?? null, it.idPromocion ?? null]
-        )
+        return {
+          idProducto:      parseInt(it.idProducto),
+          nombreProducto:  it.nombreProducto || null,
+          medida:          it.medida || null,
+          cantidad,
+          precioUnitario:  precio,
+          subtotal:        cantidad * precioFinal,
+          precioConPromo:  it.precioConPromo ?? null,
+          idPromocion:     it.idPromocion ?? null,
+        }
+      })
+
+      const cabecera = {
+        idCliente:       cliente.idCliente,
+        nombreCliente:   cliente.nombre,
+        apellidoCliente: cliente.apellido,
+        fecha,
+        metodoPago:      metodoDb,
+        montoOriginal:   subtotalSinPromo,
+        monto:           totalFinal,
+        estado:          'borrador',
+        esExcepcion:     esExcepcion ? 1 : 0,
       }
+
+      let presupuestoReal
+
+      if (modoEdicion) {
+        await actualizarPresupuesto(presupuestoEditar, cabecera, detalles)
+        presupuestoReal = presupuestoEditar
+        if (onEditarVolver) { onEditarVolver(presupuestoReal); return }
+      } else {
+        const pres = await crearPresupuesto(cabecera, detalles)
+        presupuestoReal = pres.idPresupuesto
+      }
+
+      const esCuenta = metodoPago === 'cc15' || metodoPago === 'cc30' ||
+                       (esExcepcion && (excepcionSubMetodo === 'cc15' || excepcionSubMetodo === 'cc30'))
+
+      const metodoLabel = esExcepcion
+        ? `Excepción (${METODOS_BASE.find(m => m.value === excepcionSubMetodo)?.label})`
+        : METODOS_BASE.find(m => m.value === metodoPago)?.label ?? metodoPago
+
+      setGuardado({ idPresupuesto: presupuestoReal, esCuenta, totalFinal, metodoLabel, clienteNombre: `${cliente.nombre} ${cliente.apellido}`, clienteId: cliente.idCliente })
+    } catch (err) {
+      setError(err.message || 'Error al guardar el presupuesto.')
+    } finally {
+      setSaving(false)
+      guardandoRef.current = false
     }
-
-    const esCuenta = metodoPago === 'cc15' || metodoPago === 'cc30' ||
-                     (esExcepcion && (excepcionSubMetodo === 'cc15' || excepcionSubMetodo === 'cc30'))
-
-    const metodoLabel = esExcepcion
-      ? `Excepción (${METODOS_BASE.find(m => m.value === excepcionSubMetodo)?.label})`
-      : METODOS_BASE.find(m => m.value === metodoPago)?.label ?? metodoPago
-
-    setGuardado({ idPresupuesto: presupuestoReal, esCuenta, totalFinal, metodoLabel, clienteNombre: `${cliente.nombre} ${cliente.apellido}`, clienteId: cliente.idCliente })
   }
 
   function nuevo() {
     setCliente(null); setMetodoPago('efectivo'); setItems([ITEM_EMPTY()])
     setGuardado(null); setError(''); setExcepcionFactor(1); setExcepcionSubMetodo('efectivo')
+  }
+
+  // ── Estados de carga ──
+  if (modoEdicion && !initDone) {
+    if (initError) return (
+      <div className="max-w-5xl mx-auto p-6">
+        <div className="flex items-center gap-2 text-red-400 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3">
+          <AlertCircle size={16} />{initError}
+        </div>
+      </div>
+    )
+    return (
+      <div className="max-w-5xl mx-auto p-6 text-surface-400 font-body text-sm">
+        Cargando presupuesto…
+      </div>
+    )
   }
 
   // ── Pantalla de éxito ──
@@ -982,7 +1106,7 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
               </div>
             )}
 
-            {/* Ajuste por método de pago — se aplica sobre el subtotal ya promociado */}
+            {/* Ajuste por método de pago */}
             <div className="flex justify-between gap-12">
               <span className="text-surface-400">Ajuste ({metodoLabel}):</span>
               <span className={`font-mono font-medium ${factorReal < 1 ? 'text-emerald-400' : factorReal > 1 ? 'text-red-400' : 'text-surface-400'}`}>
@@ -1007,7 +1131,9 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
                 </div>
               )}
             </div>
-            <Button size="lg" onClick={guardar} className="w-full md:w-auto">{modoEdicion ? 'Guardar Cambios' : 'Guardar Presupuesto'}</Button>
+            <Button size="lg" onClick={guardar} disabled={saving} className="w-full md:w-auto">
+              {saving ? 'Guardando…' : modoEdicion ? 'Guardar Cambios' : 'Guardar Presupuesto'}
+            </Button>
           </div>
         </div>
       </Card>

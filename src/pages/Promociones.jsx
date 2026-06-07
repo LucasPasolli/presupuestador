@@ -1,10 +1,16 @@
 // src/pages/Promociones.jsx
 // ABMC completo para el sistema de Promociones.
-// Sigue el mismo design system dark que el resto de la app:
-//   surface-700/800, brand-400, font-body/display, componentes ui reutilizados.
+// Refactorizado para usar exclusivamente promocionesService y productosService.
+// Sin lógica de BD directa en el componente.
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { query, run } from '../lib/database'
+import {
+  obtenerPromociones,
+  crearPromocion,
+  actualizarPromocion,
+  togglePromocion,
+} from '../services/promocionesService'
+import { obtenerProductos, obtenerCategorias } from '../services/productosService'
 import { Button, Card, PageHeader, Modal, Input } from '../components/ui'
 import { Plus, Tag, Edit2, Power, PowerOff, AlertCircle, CheckCircle2, X, Search } from 'lucide-react'
 import { createPortal } from 'react-dom'
@@ -69,10 +75,10 @@ const FORM_EMPTY = {
   fechaInicio: today(),
   fechaFin:    '',
   valor:       '',
-  activo:      1,
+  activo:      true,
 }
 
-// ─── Buscador de producto (reemplaza al select) ──────────────────────────────
+// ─── Buscador de producto ────────────────────────────────────────────────────
 
 function norm(s) {
   return (s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
@@ -90,7 +96,6 @@ function norm(s) {
  *   error       {string}   – mensaje de error a mostrar
  */
 function ProductoBuscador({ value, onChange, productos, error }) {
-  // Texto visible en el input
   const [search,   setSearch]   = useState('')
   const [results,  setResults]  = useState([])
   const [showDrop, setShowDrop] = useState(false)
@@ -117,7 +122,6 @@ function ProductoBuscador({ value, onChange, productos, error }) {
 
   function buscar(text) {
     setSearch(text)
-    // Si el usuario modifica el texto luego de haber seleccionado, limpiar selección
     onChange('')
     if (!text.trim()) { setResults([]); setShowDrop(false); return }
     const normText = norm(text.trim())
@@ -198,18 +202,20 @@ function ProductoBuscador({ value, onChange, productos, error }) {
 // ─── Modal Formulario ───────────────────────────────────────────────────────
 
 function PromoModal({ open, onClose, onSaved, promoEditar }) {
-  const [form,   setForm]   = useState(FORM_EMPTY)
-  const [errors, setErrors] = useState({})
-  const [productos,   setProductos]   = useState([])
-  const [categorias,  setCategorias]  = useState([])
+  const [form,      setForm]      = useState(FORM_EMPTY)
+  const [errors,    setErrors]    = useState({})
+  const [productos,  setProductos]  = useState([])
+  const [categorias, setCategorias] = useState([])
+  const [loading,   setLoading]   = useState(false)
 
   const esNueva = !promoEditar
 
   // Cargar listas auxiliares al abrir
   useEffect(() => {
     if (!open) return
-    setProductos(query('SELECT idProducto, nombre FROM Producto ORDER BY nombre LIMIT 2000'))
-    setCategorias(query('SELECT idCategoria, nombre FROM Categoria ORDER BY nombre'))
+    // obtenerProductos() devuelve { idProducto, nombre, ... } — compatible con ProductoBuscador
+    obtenerProductos().then(setProductos).catch(console.error)
+    obtenerCategorias().then(setCategorias).catch(console.error)
   }, [open])
 
   // Rellenar form si estamos editando
@@ -221,12 +227,14 @@ function PromoModal({ open, onClose, onSaved, promoEditar }) {
         descripcion: promoEditar.descripcion ?? '',
         tipo:        promoEditar.tipo        ?? 'porcentaje_producto',
         alcance:     promoEditar.alcance     ?? 'global',
+        // el service devuelve números; el buscador compara con String()
         idProducto:  promoEditar.idProducto  != null ? String(promoEditar.idProducto) : '',
         idCategoria: promoEditar.idCategoria != null ? String(promoEditar.idCategoria) : '',
         fechaInicio: promoEditar.fechaInicio ?? today(),
         fechaFin:    promoEditar.fechaFin    ?? '',
         valor:       promoEditar.valor       != null ? String(promoEditar.valor) : '',
-        activo:      promoEditar.activo      ?? 1,
+        // el service devuelve boolean; el form lo mantiene como boolean
+        activo:      promoEditar.activo      ?? true,
       })
     } else {
       setForm(FORM_EMPTY)
@@ -257,45 +265,52 @@ function PromoModal({ open, onClose, onSaved, promoEditar }) {
     return e
   }
 
-  function guardar() {
+  async function guardar() {
     const e = validar()
     setErrors(e)
     if (Object.keys(e).length) return
 
-    const params = [
-      form.nombre.trim(),
-      form.descripcion.trim() || null,
-      form.tipo,
-      form.alcance,
-      form.alcance === 'producto'  ? parseInt(form.idProducto)  : null,
-      form.alcance === 'categoria' ? parseInt(form.idCategoria) : null,
-      form.fechaInicio,
-      form.fechaFin,
-      requiereValor ? parseFloat(form.valor) : null,
-      form.activo,
-    ]
-
-    if (esNueva) {
-      run(
-        `INSERT INTO Promocion (nombre, descripcion, tipo, alcance, idProducto, idCategoria, fechaInicio, fechaFin, valor, activo)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`,
-        params
-      )
-    } else {
-      run(
-        `UPDATE Promocion SET nombre=?, descripcion=?, tipo=?, alcance=?, idProducto=?, idCategoria=?,
-         fechaInicio=?, fechaFin=?, valor=?, activo=? WHERE idPromocion=?`,
-        [...params, promoEditar.idPromocion]
-      )
+    // Construir el payload en el formato que espera el service
+    const payload = {
+      nombre:      form.nombre.trim(),
+      descripcion: form.descripcion.trim() || null,
+      tipo:        form.tipo,
+      alcance:     form.alcance,
+      idProducto:  form.alcance === 'producto'  ? parseInt(form.idProducto,  10) : null,
+      idCategoria: form.alcance === 'categoria' ? parseInt(form.idCategoria, 10) : null,
+      fechaInicio: form.fechaInicio,
+      fechaFin:    form.fechaFin,
+      valor:       requiereValor ? parseFloat(form.valor) : null,
+      activo:      form.activo,
     }
 
-    onClose()
-    onSaved(esNueva ? 'Promoción creada correctamente ✓' : 'Promoción actualizada ✓')
+    setLoading(true)
+    try {
+      if (esNueva) {
+        await crearPromocion(payload)
+      } else {
+        await actualizarPromocion(promoEditar.idPromocion, payload)
+      }
+      onClose()
+      onSaved(esNueva ? 'Promoción creada correctamente ✓' : 'Promoción actualizada ✓')
+    } catch (err) {
+      setErrors({ _general: err.message })
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
     <Modal open={open} onClose={onClose} title={esNueva ? 'Nueva Promoción' : 'Editar Promoción'}>
       <div className="space-y-4">
+
+        {/* Error general (fallo de red / BD) */}
+        {errors._general && (
+          <div className="flex items-center gap-2 bg-red-900/30 border border-red-500/40 rounded-xl px-4 py-3">
+            <AlertCircle size={15} className="text-red-400 flex-shrink-0" />
+            <p className="text-red-300 text-xs font-body">{errors._general}</p>
+          </div>
+        )}
 
         {/* Nombre */}
         <Input
@@ -342,7 +357,7 @@ function PromoModal({ open, onClose, onSaved, promoEditar }) {
           </div>
         </div>
 
-        {/* Campos condicionales por alcance (Builder pattern) */}
+        {/* Campos condicionales por alcance */}
         {form.alcance === 'producto' && (
           <div>
             <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1">Producto *</label>
@@ -378,7 +393,7 @@ function PromoModal({ open, onClose, onSaved, promoEditar }) {
             value={form.valor}
             onChange={e => { const v = e.target.value.replace(',', '.'); if (/^\d*\.?\d*$/.test(v)) set('valor', v) }}
             error={errors.valor}
-            placeholder={form.tipo === 'porcentaje_producto' ? 'Ej: 15 (para 15%)'  : 'Ej: 9500'}
+            placeholder={form.tipo === 'porcentaje_producto' ? 'Ej: 15 (para 15%)' : 'Ej: 9500'}
             inputMode="decimal"
           />
         )}
@@ -424,9 +439,11 @@ function PromoModal({ open, onClose, onSaved, promoEditar }) {
 
         {/* Botones */}
         <div className="flex gap-2 pt-2">
-          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button className="flex-1" onClick={guardar}>
-            {esNueva ? 'Crear Promoción' : 'Guardar Cambios'}
+          <Button variant="secondary" className="flex-1" onClick={onClose} disabled={loading}>Cancelar</Button>
+          <Button className="flex-1" onClick={guardar} disabled={loading}>
+            {loading
+              ? (esNueva ? 'Creando…' : 'Guardando…')
+              : (esNueva ? 'Crear Promoción' : 'Guardar Cambios')}
           </Button>
         </div>
       </div>
@@ -437,50 +454,65 @@ function PromoModal({ open, onClose, onSaved, promoEditar }) {
 // ─── Página principal ────────────────────────────────────────────────────────
 
 export default function Promociones() {
-  const [promos,      setPromos]      = useState([])
-  const [modalOpen,   setModalOpen]   = useState(false)
-  const [editando,    setEditando]    = useState(null)   // promo o null
-  const [toast,       setToast]       = useState('')
-  const [filtro,      setFiltro]      = useState('todas') // 'todas' | 'activas' | 'inactivas'
+  const [promos,    setPromos]    = useState([])
+  const [modalOpen, setModalOpen] = useState(false)
+  const [editando,  setEditando]  = useState(null)
+  const [toast,     setToast]     = useState('')
+  const [filtro,    setFiltro]    = useState('todas') // 'todas' | 'activas' | 'inactivas'
 
-  const cargar = useCallback(() => {
-    const rows = query(`
-      SELECT p.*,
-             pr.nombre AS nombreProducto,
-             c.nombre  AS nombreCategoria
-      FROM   Promocion p
-      LEFT JOIN Producto  pr ON pr.idProducto  = p.idProducto
-      LEFT JOIN Categoria c  ON c.idCategoria  = p.idCategoria
-      ORDER BY p.activo DESC, p.fechaFin DESC, p.idPromocion DESC
-    `)
-    setPromos(rows)
+  // ── Carga de datos ──────────────────────────────────────────────────────
+  // obtenerPromociones ordena por fecha_inicio DESC por defecto.
+  // El .jsx original ordenaba: activo DESC, fechaFin DESC, idPromocion DESC.
+  // Replicamos ese orden en el cliente (sin tocar el service) para no romper
+  // la presentación visual sin necesidad de un nuevo parámetro de orden.
+  const cargar = useCallback(async () => {
+    try {
+      const data = await obtenerPromociones()
+      // Replicar el orden original: activo DESC → fechaFin DESC → idPromocion DESC
+      data.sort((a, b) => {
+        if (b.activo !== a.activo) return (b.activo ? 1 : 0) - (a.activo ? 1 : 0)
+        if (b.fechaFin !== a.fechaFin) return b.fechaFin.localeCompare(a.fechaFin)
+        return b.idPromocion - a.idPromocion
+      })
+      setPromos(data)
+    } catch (err) {
+      console.error('[Promociones] cargar:', err.message)
+    }
   }, [])
 
   useEffect(() => { cargar() }, [cargar])
 
-  function toggleActivo(promo) {
-    run('UPDATE Promocion SET activo = ? WHERE idPromocion = ?', [promo.activo ? 0 : 1, promo.idPromocion])
-    cargar()
-    setToast(promo.activo ? 'Promoción desactivada' : 'Promoción activada ✓')
+  // ── Toggle activo/inactivo ──────────────────────────────────────────────
+  async function toggleActivo(promo) {
+    try {
+      await togglePromocion(promo.idPromocion, !promo.activo)
+      await cargar()
+      setToast(promo.activo ? 'Promoción desactivada' : 'Promoción activada ✓')
+    } catch (err) {
+      console.error('[Promociones] toggleActivo:', err.message)
+    }
   }
 
-  function abrirNueva() { setEditando(null); setModalOpen(true) }
-  function abrirEditar(promo) { setEditando(promo); setModalOpen(true) }
+  function abrirNueva()        { setEditando(null);  setModalOpen(true) }
+  function abrirEditar(promo)  { setEditando(promo); setModalOpen(true) }
 
-  function handleSaved(msg) {
-    cargar()
+  async function handleSaved(msg) {
+    await cargar()
     setToast(msg)
   }
 
+  // ── Filtros client-side ─────────────────────────────────────────────────
+  // El service devuelve `activo` como boolean; comparamos con true/false.
   const promosFiltradas = promos.filter(p => {
-    if (filtro === 'activas')   return p.activo === 1
-    if (filtro === 'inactivas') return p.activo === 0
+    if (filtro === 'activas')   return p.activo === true
+    if (filtro === 'inactivas') return p.activo === false
     return true
   })
 
+  // ── Resumen rápido ──────────────────────────────────────────────────────
   const hoy = today()
-  const totalActivas  = promos.filter(p => p.activo === 1 && p.fechaInicio <= hoy && p.fechaFin >= hoy).length
-  const totalProximas = promos.filter(p => p.activo === 1 && p.fechaInicio  > hoy).length
+  const totalActivas  = promos.filter(p => p.activo === true  && p.fechaInicio <= hoy && p.fechaFin >= hoy).length
+  const totalProximas = promos.filter(p => p.activo === true  && p.fechaInicio  > hoy).length
   const totalVencidas = promos.filter(p => p.fechaFin < hoy).length
 
   return (

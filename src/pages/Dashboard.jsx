@@ -5,7 +5,7 @@ import {
   BarChart2, ShoppingCart, Wallet, ArrowRight, Tag
 } from 'lucide-react'
 import { useEffect, useState, useCallback } from 'react'
-import { query } from '../lib/database'
+import { obtenerDatosDashboard } from '../services/dashboardService'
 
 const SECTIONS = [
   {
@@ -70,14 +70,18 @@ export default function Dashboard() {
   const [stats, setStats] = useState({ presupuestos: 0, pendientes: 0, productos: 0 })
 
   const loadStats = useCallback(() => {
-    try {
-      const p  = query('SELECT COUNT(*) as c FROM Presupuesto')[0]?.c ?? 0
-      const s  = query('SELECT COUNT(*) as c FROM Saldo WHERE estado = ?', ['pendiente'])[0]?.c ?? 0
-      const pr = query('SELECT COUNT(*) as c FROM Producto')[0]?.c ?? 0
-      setStats({ presupuestos: p, pendientes: s, productos: pr })
-    } catch {
-      // db might not be ready yet on first load
-    }
+    obtenerDatosDashboard()
+      .then(datos => {
+        setStats({
+          presupuestos: datos.presupuestosBorrador + datos.presupuestosAprobadosMes,
+          pendientes:   datos.saldosPendientes,
+          productos:    datos.totalProductos,
+        })
+      })
+      .catch(err => {
+        // Si falla silenciosamente igual que antes, no interrumpe la UI
+        console.error('[Dashboard] Error cargando stats:', err)
+      })
   }, [])
 
   useEffect(() => {

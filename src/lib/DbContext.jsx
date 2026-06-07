@@ -1,47 +1,60 @@
 // src/lib/DbContext.jsx
+// Con Supabase no hay inicialización asíncrona de BD local.
+// Este contexto ahora verifica que las variables de entorno estén presentes
+// y que la conexión con Supabase sea alcanzable antes de renderizar la app.
+
 import { createContext, useContext, useEffect, useState } from 'react'
-import { initDB } from './database'
+import { supabase } from './supabase'
 
 const DbContext = createContext(null)
 
 export function DbProvider({ children }) {
-  const [ready, setReady] = useState(false)
-  const [error, setError]  = useState(null)
+  const [dbReady, setDbReady]   = useState(false)
+  const [dbError, setDbError]   = useState(null)
 
   useEffect(() => {
-    initDB()
-      .then(() => setReady(true))
-      .catch((err) => {
-        console.error('DB init failed', err)
-        setError(err.message)
+    // Verificación liviana: hace un SELECT 1 para confirmar
+    // que Supabase es alcanzable y las credenciales son válidas.
+    // Si falla, muestra el error antes de intentar cargar cualquier página.
+    supabase
+      .from('cliente')
+      .select('id_cliente', { count: 'exact', head: true })
+      .then(({ error }) => {
+        if (error) {
+          console.error('[DbContext] Error de conexión con Supabase:', error.message)
+          setDbError(error.message)
+        } else {
+          setDbReady(true)
+        }
       })
   }, [])
 
-  if (error) {
+  if (dbError) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-surface-900 text-red-400 font-mono text-sm p-8">
-        <div className="max-w-md text-center space-y-3">
-          <p className="text-2xl">⚠ Error al inicializar la base de datos</p>
-          <p className="text-surface-400">{error}</p>
-        </div>
+      <div style={{ padding: 32, color: 'red' }}>
+        <h2>Error al conectar con la base de datos</h2>
+        <pre>{dbError}</pre>
+        <p style={{ marginTop: 16, color: '#555', fontSize: 14 }}>
+          Verificá que VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY
+          estén correctamente definidas en .env.local
+        </p>
       </div>
     )
   }
 
-  if (!ready) {
+  if (!dbReady) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-surface-900">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-10 h-10 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
-          <p className="text-surface-400 font-body text-sm tracking-widest uppercase">
-            Iniciando base de datos…
-          </p>
-        </div>
+      <div style={{ padding: 32 }}>
+        Conectando con la base de datos...
       </div>
     )
   }
 
-  return <DbContext.Provider value={{ ready }}>{children}</DbContext.Provider>
+  return (
+    <DbContext.Provider value={{ dbReady }}>
+      {children}
+    </DbContext.Provider>
+  )
 }
 
 export function useDb() {

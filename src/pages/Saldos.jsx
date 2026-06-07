@@ -1,7 +1,14 @@
 // src/pages/Saldos.jsx
 import { useState, useEffect, useCallback } from 'react'
 import { useLocation } from 'react-router-dom'
-import { query, run } from '../lib/database'
+import {
+  obtenerSaldos,
+  obtenerKPIsSaldos,
+  marcarSaldoPagado,
+} from '../services/saldosService'
+import { obtenerClientePorId }                    from '../services/clientesService'
+import { obtenerPresupuestoPorId }                from '../services/presupuestosService'
+import { obtenerDetallesConNombreDePresupuesto }   from '../services/presupuestosService'
 import { Card, PageHeader, Button, Badge, Modal } from '../components/ui'
 import {
   ArrowLeft, Wallet, Clock, CheckCircle2, AlertTriangle,
@@ -70,35 +77,34 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
   const [confirmPago, setConfirmPago] = useState(false)
 
   useEffect(() => {
-    const p = query(`SELECT * FROM Presupuesto WHERE idPresupuesto = ?`, [saldo.idPresupuesto])[0]
-    setPresupuesto(p ?? null)
-
-    const c = query(`SELECT * FROM Cliente WHERE idCliente = ?`, [saldo.idCliente])[0]
-    setCliente(c ?? null)
-
-    const d = query(`
-      SELECT dp.*, pr.nombre AS nombreProducto
-      FROM DetallePresupuesto dp
-      LEFT JOIN Producto pr ON pr.idProducto = dp.idProducto
-      WHERE dp.idPresupuesto = ?
-      ORDER BY dp.idDetalle
-    `, [saldo.idPresupuesto])
-    setDetalles(d)
+    async function cargar() {
+      // Los tres fetches en paralelo para minimizar latencia
+      const [pres, cli, dets] = await Promise.all([
+        obtenerPresupuestoPorId(saldo.idPresupuesto),
+        obtenerClientePorId(saldo.idCliente),
+        obtenerDetallesConNombreDePresupuesto(saldo.idPresupuesto),
+      ])
+      setPresupuesto(pres)
+      setCliente(cli)
+      setDetalles(dets)
+    }
+    cargar()
   }, [saldo.idPresupuesto, saldo.idCliente])
 
-  function marcarPagado() {
+  async function marcarPagado() {
+    // CORRECCIÓN #4: marcarSaldoPagado también actualiza el presupuesto
     const hoy = new Date().toISOString().slice(0, 10)
-    run(`UPDATE Saldo SET estado = 'pagado', fechaPago = ? WHERE idSaldo = ?`, [hoy, saldo.idSaldo])
-    run(`UPDATE Presupuesto SET estado = 'pagado' WHERE idPresupuesto = ?`, [saldo.idPresupuesto])
+    await marcarSaldoPagado(saldo.idSaldo, saldo.idPresupuesto, hoy)
     setConfirmPago(false)
     onUpdated('Saldo marcado como pagado')
     onBack()
   }
 
-  const dias      = diasRestantes(saldo.fechaFin)
-  const colores   = colorDias(dias)
+  // CORRECCIÓN #1: usar fechaVto en lugar de fechaFin
+  const dias        = diasRestantes(saldo.fechaVto)
+  const colores     = colorDias(dias)
   const esPendiente = saldo.estado === 'pendiente'
-  const metodoLabel = { efectivo:'Efectivo', transferencia:'Transferencia', cc15:'CC 15 días', cc30:'CC 30 días' }
+  const metodoLabel = { efectivo: 'Efectivo', transferencia: 'Transferencia', cc15: 'CC 15 días', cc30: 'CC 30 días' }
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 animate-slide-up">
@@ -140,7 +146,8 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
             <div>
               <p className={`font-body font-semibold text-sm ${colores.text}`}>{labelDias(dias)}</p>
               <p className="text-surface-400 text-xs font-body">
-                Fecha de vencimiento: {fmtFecha(saldo.fechaFin)}
+                {/* CORRECCIÓN #1: usar fechaVto */}
+                Fecha de vencimiento: {fmtFecha(saldo.fechaVto)}
               </p>
             </div>
             <div className="ml-auto text-right">
@@ -176,6 +183,7 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
           </div>
 
           {/* Cliente */}
+          {/* CORRECCIÓN #7: usar campos extra del cliente disponibles en el service */}
           <div className={`bg-surface-700 rounded-xl p-4 ${esPendiente ? 'col-span-2' : ''}`}>
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1 flex items-center gap-1">
               <User size={11} />Cliente
@@ -188,7 +196,7 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
                 <p className="text-surface-400 text-xs font-mono mt-0.5">
                   ID #{cliente.idCliente}
                   {cliente.telefono ? ` · ${cliente.telefono}` : ''}
-                  {cliente.mail ? ` · ${cliente.mail}` : ''}
+                  {cliente.mail     ? ` · ${cliente.mail}`     : ''}
                 </p>
               </>
             ) : (
@@ -229,7 +237,7 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
             <table className="w-full text-sm font-body">
               <thead>
                 <tr className="border-b border-surface-700">
-                  {['#','Producto','Medida','Cant.','Precio Unit.','Subtotal'].map(h => (
+                  {['#', 'Producto', 'Medida', 'Cant.', 'Precio Unit.', 'Subtotal'].map(h => (
                     <th key={h} className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">{h}</th>
                   ))}
                 </tr>
@@ -304,77 +312,55 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
 
 export default function Saldos() {
   const location = useLocation()
-  const [saldos,     setSaldos]     = useState([])
-  const [selected,   setSelected]   = useState(null)
-  const [filterEst,  setFilterEst]  = useState('pendiente')
-  const [search,     setSearch]     = useState('')
-  const [sortDias,   setSortDias]   = useState('asc')
-  const [page,       setPage]       = useState(1)
-  const [toast,      setToast]      = useState('')
+  const [saldos,    setSaldos]    = useState([])
+  const [selected,  setSelected]  = useState(null)
+  const [filterEst, setFilterEst] = useState('pendiente')
+  const [search,    setSearch]    = useState('')
+  const [sortDias,  setSortDias]  = useState('asc')
+  const [page,      setPage]      = useState(1)
+  const [toast,     setToast]     = useState('')
+  // CORRECCIÓN #3: KPIs en estado propio, calculados por el service
+  const [kpis, setKpis] = useState({
+    totalPendiente: 0,
+    cantPendientes: 0,
+    vencidos:       0,
+    cantVencidos:   0,
+    totalCobrado:   0,
+  })
 
   // Si venimos desde Historial con un saldo pre-seleccionado, abrirlo directo
   useEffect(() => {
     if (location.state?.saldoInicial) {
       setSelected(location.state.saldoInicial)
-      // Limpiar el state para que no persista si el usuario navega de vuelta
       window.history.replaceState({}, '')
     }
   }, [location.state])
 
-  const load = useCallback(() => {
-    let sql = `
-      SELECT s.*,
-             c.nombre   AS clienteNombre,
-             c.apellido AS clienteApellido
-      FROM Saldo s
-      JOIN Cliente c ON c.idCliente = s.idCliente
-      WHERE 1=1`
-    const params = []
+  // CORRECCIÓN #3: cargar KPIs independientemente de los filtros de la tabla
+  useEffect(() => {
+    obtenerKPIsSaldos().then(setKpis)
+  }, [])
 
-    if (filterEst !== 'all') { sql += ` AND s.estado = ?`; params.push(filterEst) }
-
-    if (search.trim()) {
-      sql += ` AND (c.nombre LIKE ? OR c.apellido LIKE ? OR (c.nombre || ' ' || c.apellido) LIKE ? OR CAST(s.idPresupuesto AS TEXT) = ? OR CAST(s.idSaldo AS TEXT) = ?)`
-      const s = search.trim()
-      params.push(`%${s}%`, `%${s}%`, `%${s}%`, s, s)
-    }
-
-    // Orden: pendientes por urgencia (días restantes ASC = más urgente primero), pagados por fecha DESC
-    if (filterEst === 'pendiente' || filterEst === 'all') {
-      sql += ` ORDER BY s.fechaFin ${sortDias === 'asc' ? 'ASC' : 'DESC'}`
-    } else {
-      sql += ` ORDER BY s.idSaldo DESC`
-    }
-
-    setSaldos(query(sql, params))
+  const load = useCallback(async () => {
+    // CORRECCIONES #5 y #6: búsqueda y orden delegados al service
+    const data = await obtenerSaldos({
+      estado:  filterEst !== 'all' ? filterEst : null,
+      orden:   sortDias,
+      search,
+    })
+    setSaldos(data)
     setPage(1)
   }, [filterEst, search, sortDias])
 
   useEffect(() => { load() }, [load])
-
-  // KPIs globales siempre (independientes del filtro)
-  const kpis = (() => {
-    const todos = query(`
-      SELECT s.monto, s.estado, s.fechaFin
-      FROM Saldo s
-    `)
-    const hoy = today()
-    const pendientes = todos.filter(s => s.estado === 'pendiente')
-    const vencidos   = pendientes.filter(s => s.fechaFin < hoy)
-    return {
-      totalPendiente: pendientes.reduce((a, s) => a + s.monto, 0),
-      cantPendientes: pendientes.length,
-      vencidos:       vencidos.reduce((a, s) => a + s.monto, 0),
-      cantVencidos:   vencidos.length,
-      totalCobrado:   todos.filter(s => s.estado === 'pagado').reduce((a, s) => a + s.monto, 0),
-    }
-  })()
 
   const paginated  = saldos.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const totalPages = Math.max(1, Math.ceil(saldos.length / PAGE_SIZE))
 
   function handleUpdated(msg) {
     setToast(msg)
+    // Refrescar también los KPIs después de marcar un pago
+    obtenerKPIsSaldos().then(setKpis)
     load()
   }
 
@@ -477,28 +463,31 @@ export default function Saldos() {
           <table className="w-full text-sm font-body">
             <thead>
               <tr className="border-b border-surface-700">
-                {['Saldo','Presupuesto','Cliente','Emisión','Vencimiento','Días','Monto','Estado',''].map(h => (
+                {['Saldo', 'Presupuesto', 'Cliente', 'Emisión', 'Vencimiento', 'Días', 'Monto', 'Estado', ''].map(h => (
                   <th key={h} className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-3 font-body">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {paginated.map(s => {
-                const dias    = diasRestantes(s.fechaFin)
-                const cols    = colorDias(dias)
-                const esPend  = s.estado === 'pendiente'
+                // CORRECCIÓN #1: usar fechaVto en lugar de fechaFin
+                const dias   = diasRestantes(s.fechaVto)
+                const cols   = colorDias(dias)
+                const esPend = s.estado === 'pendiente'
                 return (
                   <tr key={s.idSaldo} onClick={() => setSelected(s)}
                     className="border-b border-surface-700/50 hover:bg-surface-700/40 cursor-pointer transition-colors">
                     <td className="py-3 px-3 text-brand-400 font-mono text-sm font-bold">#{s.idSaldo}</td>
                     <td className="py-3 px-3 text-surface-400 font-mono text-xs">#{s.idPresupuesto}</td>
                     <td className="py-3 px-3">
+                      {/* CORRECCIÓN #2: usar clienteNombre / clienteApellido */}
                       <p className="text-white text-sm font-body leading-tight">
                         {s.clienteNombre} {s.clienteApellido}
                       </p>
                     </td>
                     <td className="py-3 px-3 text-surface-400 font-mono text-xs">{fmtFecha(s.fechaInicio)}</td>
-                    <td className="py-3 px-3 text-surface-300 font-mono text-xs">{fmtFecha(s.fechaFin)}</td>
+                    {/* CORRECCIÓN #1: usar fechaVto */}
+                    <td className="py-3 px-3 text-surface-300 font-mono text-xs">{fmtFecha(s.fechaVto)}</td>
                     <td className="py-3 px-3">
                       {esPend ? (
                         <span className={`text-xs font-mono font-bold ${cols.text}`}>
@@ -536,11 +525,11 @@ export default function Saldos() {
         {totalPages > 1 && (
           <div className="flex items-center justify-between px-5 py-3 border-t border-surface-700">
             <p className="text-surface-400 text-xs font-body">
-              {(page-1)*PAGE_SIZE+1}–{Math.min(page*PAGE_SIZE, saldos.length)} de {saldos.length}
+              {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, saldos.length)} de {saldos.length}
             </p>
             <div className="flex gap-2">
-              <Button size="sm" variant="secondary" onClick={() => setPage(p => Math.max(1,p-1))} disabled={page===1}>← Ant.</Button>
-              <Button size="sm" variant="secondary" onClick={() => setPage(p => Math.min(totalPages,p+1))} disabled={page===totalPages}>Sig. →</Button>
+              <Button size="sm" variant="secondary" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>← Ant.</Button>
+              <Button size="sm" variant="secondary" onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}>Sig. →</Button>
             </div>
           </div>
         )}

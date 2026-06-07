@@ -2,6 +2,8 @@
 // Lógica de negocio para el sistema de promociones.
 // Sin JSX, sin queries al DOM, sin efectos secundarios.
 // Open/Closed: agregar un nuevo tipo → agregar una clave a `estrategias`.
+//Una vez que Presupuestador.jsx y Promociones.jsx migren a consumir promocionesService.js, 
+// este archivo puede eliminarse. Por ahora dejarlo en su lugar sin modificarlo hasta que se complete la migración de los componentes.
 
 import { query } from './database'
 
