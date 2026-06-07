@@ -863,6 +863,7 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
   const [toast,      setToast]      = useState('')
   const [error,      setError]      = useState('')
   const [saving,     setSaving]     = useState(false)
+  const savingRef                   = useRef(false)   // guardia síncrona contra doble-click
   const [loadingInit, setLoadingInit] = useState(esEdicion)
 
   // En edición: cargar detalles y proveedor desde el service
@@ -915,27 +916,31 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
   function removeItem(idx) { setItems(prev => prev.filter((_, i) => i !== idx)) }
 
   async function guardar() {
-    setError('')
-    if (!proveedor) { setError('Seleccioná un proveedor antes de guardar el pedido.'); return }
-    const validItems = items.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
-    if (!validItems.length) { setError('Agregá al menos un producto con ID válido.'); return }
-
-    // Validaciones previas: precio, existencia, medida
-    for (const it of validItems) {
-      const precio = parseFloat(String(it.precioUnitario).replace(',', '.')) || 0
-      if (precio <= 0) { setError(`Ingresá el precio del proveedor para "${it.nombreProducto || `ID ${it.idProducto}`}".`); return }
-
-      const { data: existe } = await supabase
-        .from('producto')
-        .select('id_producto, tiene_medidas')
-        .eq('id_producto', parseInt(it.idProducto))
-        .single()
-      if (!existe) { setError(`El producto ID ${it.idProducto} no existe en el inventario.`); return }
-      if (existe.tiene_medidas && !it.medida) { setError(`Seleccioná una medida para el producto ID ${it.idProducto}.`); return }
-    }
-
+    // Protección síncrona: si ya hay un guardado en curso, ignorar clicks adicionales
+    if (savingRef.current) return
+    savingRef.current = true
     setSaving(true)
+    setError('')
+
     try {
+      if (!proveedor) { setError('Seleccioná un proveedor antes de guardar el pedido.'); return }
+      const validItems = items.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
+      if (!validItems.length) { setError('Agregá al menos un producto con ID válido.'); return }
+
+      // Validaciones previas: precio, existencia, medida
+      for (const it of validItems) {
+        const precio = parseFloat(String(it.precioUnitario).replace(',', '.')) || 0
+        if (precio <= 0) { setError(`Ingresá el precio del proveedor para "${it.nombreProducto || `ID ${it.idProducto}`}".`); return }
+
+        const { data: existe } = await supabase
+          .from('producto')
+          .select('id_producto, tiene_medidas')
+          .eq('id_producto', parseInt(it.idProducto))
+          .single()
+        if (!existe) { setError(`El producto ID ${it.idProducto} no existe en el inventario.`); return }
+        if (existe.tiene_medidas && !it.medida) { setError(`Seleccioná una medida para el producto ID ${it.idProducto}.`); return }
+      }
+
       const detallesPayload = validItems.map(it => ({
         idProducto:     parseInt(it.idProducto),
         nombreProducto: it.nombreProducto || null,
@@ -976,6 +981,7 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
     } catch (err) {
       setError(err.message || 'Ocurrió un error al guardar el pedido.')
     } finally {
+      savingRef.current = false
       setSaving(false)
     }
   }
