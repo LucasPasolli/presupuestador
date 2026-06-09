@@ -1,5 +1,5 @@
 // src/lib/AuthContext.jsx
-import { createContext, useContext, useState, useEffect } from 'react'
+import { createContext, useContext, useState, useEffect, useRef } from 'react'
 import { supabase } from './supabase'
 
 // Dominio ficticio interno — el usuario nunca lo ve
@@ -23,6 +23,14 @@ export function AuthProvider({ children }) {
   const [user,    setUser]    = useState(null)
   const [loading, setLoading] = useState(true)
 
+  /**
+   * Ref para el callback de limpieza de tokens especiales.
+   * SpecialAuthProvider lo registra llamando a registerLogoutCallback().
+   * Usamos un ref para evitar dependencia circular entre contextos:
+   *   AuthContext no importa SpecialAuthContext, solo guarda una función.
+   */
+  const onLogoutCallbackRef = useRef(null)
+
   useEffect(() => {
     // 1. Recuperar sesión existente al montar (F5 / regreso al tab)
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -34,11 +42,28 @@ export function AuthProvider({ children }) {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (_event, session) => {
         setUser(session?.user ?? false)
+
+        // Si la sesión se cerró (por expiración, logout externo, etc.)
+        // también limpiamos los tokens especiales
+        if (!session && onLogoutCallbackRef.current) {
+          onLogoutCallbackRef.current()
+        }
       }
     )
 
     return () => subscription.unsubscribe()
   }, [])
+
+  /**
+   * Permite a SpecialAuthProvider registrar su función clearAllTokens
+   * para que AuthContext la llame al hacer logout.
+   * No crea dependencia de importación circular.
+   *
+   * @param {() => void} callback
+   */
+  function registerLogoutCallback(callback) {
+    onLogoutCallbackRef.current = callback
+  }
 
   /**
    * login(username, password)
@@ -53,8 +78,6 @@ export function AuthProvider({ children }) {
     const { error } = await supabase.auth.signInWithPassword({ email, password })
 
     if (error) {
-      // Supabase devuelve "Invalid login credentials" para usuario o pass incorrectos.
-      // Devolvemos un mensaje genérico para no revelar cuál de los dos falló.
       return { ok: false, message: 'Usuario o contraseña incorrectos.' }
     }
 
@@ -63,9 +86,13 @@ export function AuthProvider({ children }) {
 
   /**
    * logout()
-   * Limpia la sesión en Supabase y en el estado local.
+   * Limpia tokens especiales, luego cierra sesión en Supabase.
    */
   async function logout() {
+    // Primero limpiamos los tokens especiales de memoria
+    if (onLogoutCallbackRef.current) {
+      onLogoutCallbackRef.current()
+    }
     await supabase.auth.signOut()
     // onAuthStateChange se dispara solo y setea user a false
   }
@@ -74,7 +101,14 @@ export function AuthProvider({ children }) {
   const authed = !!user && user !== false
 
   return (
-    <AuthContext.Provider value={{ authed, loading, user, login, logout }}>
+    <AuthContext.Provider value={{
+      authed,
+      loading,
+      user,
+      login,
+      logout,
+      registerLogoutCallback,
+    }}>
       {children}
     </AuthContext.Provider>
   )
@@ -85,5 +119,3 @@ export function useAuth() {
   if (!ctx) throw new Error('useAuth debe usarse dentro de <AuthProvider>')
   return ctx
 }
-
-
