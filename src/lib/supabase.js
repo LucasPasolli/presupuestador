@@ -5,8 +5,8 @@
 
 import { createClient } from '@supabase/supabase-js'
 
-const supabaseUrl  = import.meta.env.VITE_SUPABASE_URL
-const supabaseKey  = import.meta.env.VITE_SUPABASE_ANON_KEY
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY
 
 if (!supabaseUrl || !supabaseKey) {
   throw new Error(
@@ -17,9 +17,8 @@ if (!supabaseUrl || !supabaseKey) {
 
 export const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
-    // La app usa su propio sistema de auth por contraseña.
-    // Deshabilitamos la sesión automática de Supabase Auth para evitar conflictos.
-    persistSession: false,
-    autoRefreshToken: false,
+    persistSession: true,      // La sesión se guarda en localStorage (sobrevive F5)
+    autoRefreshToken: true,    // Supabase renueva el JWT automáticamente antes de que expire
+    detectSessionInUrl: false, // No necesitamos magic links ni OAuth callbacks
   },
 })

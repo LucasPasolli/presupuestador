@@ -42,30 +42,75 @@ function mapDetalle(row) {
   }
 }
 
+// ─── Constantes ───────────────────────────────────────────────────────────────
+
+// Campos mínimos para la tabla del Historial.
+// Omite monto_original y es_excepcion que no se muestran en la lista.
+// IMPORTANTE: si agregás columnas al listado, añadirlas aquí también.
+const CAMPOS_LISTA = `
+  id_presupuesto,
+  id_cliente,
+  fecha,
+  metodo_pago,
+  monto,
+  nombre_cliente,
+  apellido_cliente,
+  estado,
+  es_excepcion,
+  saldo ( estado )
+`
+
+// Campos completos para la vista detalle de un presupuesto.
+const CAMPOS_DETALLE = `
+  id_presupuesto,
+  id_cliente,
+  fecha,
+  metodo_pago,
+  monto_original,
+  monto,
+  nombre_cliente,
+  apellido_cliente,
+  estado,
+  es_excepcion
+`
+
 // ─── Queries ──────────────────────────────────────────────────────────────────
 
 /**
- * Devuelve presupuestos con filtros opcionales.
- * Mueve al servidor toda la lógica de filtrado que antes hacía Historial.jsx en React.
+ * Devuelve presupuestos paginados con saldoEstado incluido via JOIN server-side.
  *
- * Equivale a las queries dinámicas de Historial.jsx y Facturas.jsx.
+ * CAMBIOS RESPECTO A LA VERSIÓN ANTERIOR:
+ *   - JOIN con `saldo` resuelto en Postgres (no en el cliente).
+ *   - Selección selectiva de campos (CAMPOS_LISTA), no SELECT *.
+ *   - Paginación real con .range() en lugar de .limit(2000).
+ *   - count:'exact' devuelve el total sin traer todas las filas.
+ *   - Búsqueda textual con ilike/eq en Supabase, no en Array.filter().
+ *   - Ordenación por sortKey pasado como parámetro.
+ *
+ * @returns {{ data: Presupuesto[], count: number }}
  */
 export async function obtenerPresupuestos({
-  estado        = null,   // 'borrador' | 'aprobado' | 'pagado' | 'rechazado'
+  estado        = null,
   idCliente     = null,
-  fechaDesde    = null,   // 'YYYY-MM-DD'
-  fechaHasta    = null,   // 'YYYY-MM-DD'
+  fechaDesde    = null,
+  fechaHasta    = null,
   metodoPago    = null,
   esExcepcion   = null,
-  orden         = 'desc', // 'asc' | 'desc'
-  limite        = 500,
+  search        = null,   // string — busca por ID numérico o nombre/apellido
+  sortKey       = 'id',   // 'id' | 'fecha'
+  orden         = 'desc',
+  limite        = 50,
+  offset        = 0,
 } = {}) {
+  const ascending = orden === 'asc'
+
+  // JOIN declarativo: Supabase resuelve el LEFT JOIN con saldo en el servidor.
+  // Requiere que exista la FK saldo.id_presupuesto → presupuesto.id_presupuesto.
   let q = supabase
     .from('presupuesto')
-    .select('*')
-    .order('fecha', { ascending: orden === 'asc' })
-    .order('id_presupuesto', { ascending: orden === 'asc' })
-    .limit(limite)
+    .select(CAMPOS_LISTA, { count: 'exact' })
+    .order(sortKey === 'fecha' ? 'fecha' : 'id_presupuesto', { ascending })
+    .range(offset, offset + limite - 1)
 
   if (estado)      q = q.eq('estado', estado)
   if (idCliente)   q = q.eq('id_cliente', idCliente)
@@ -74,19 +119,40 @@ export async function obtenerPresupuestos({
   if (metodoPago)  q = q.eq('metodo_pago', metodoPago)
   if (esExcepcion !== null) q = q.eq('es_excepcion', esExcepcion)
 
-  const { data, error } = await q
+  // Búsqueda: si es número busca por ID exacto; si es texto busca nombre+apellido.
+  // Esto reemplaza el Array.filter() que antes corría en el browser sobre 2000 filas.
+  if (search) {
+    const s = search.trim()
+    if (/^\d+$/.test(s)) {
+      q = q.eq('id_presupuesto', parseInt(s, 10))
+    } else {
+      // ilike sobre los dos campos: cualquier parte del nombre o apellido
+      q = q.or(
+        `nombre_cliente.ilike.%${s}%,apellido_cliente.ilike.%${s}%`
+      )
+    }
+  }
+
+  const { data, error, count } = await q
   if (error) manejarError('obtenerPresupuestos', error)
-  return data.map(mapPresupuesto)
+
+  // Aplanar el JOIN: saldo[0].estado → saldoEstado al mismo nivel que el presupuesto.
+  const mapped = (data ?? []).map(row => ({
+    ...mapPresupuesto(row),
+    saldoEstado: row.saldo?.[0]?.estado ?? null,
+  }))
+
+  return { data: mapped, count: count ?? 0 }
 }
 
 /**
- * Devuelve un presupuesto por su ID.
- * Equivale a: SELECT * FROM Presupuesto WHERE idPresupuesto = ?
+ * Devuelve un presupuesto por su ID con campos completos.
+ * Usado en la vista detalle, no en el listado.
  */
 export async function obtenerPresupuestoPorId(idPresupuesto) {
   const { data, error } = await supabase
     .from('presupuesto')
-    .select('*')
+    .select(CAMPOS_DETALLE)
     .eq('id_presupuesto', idPresupuesto)
     .single()
 
@@ -96,13 +162,25 @@ export async function obtenerPresupuestoPorId(idPresupuesto) {
 
 /**
  * Devuelve los detalles (ítems) de un presupuesto.
- * Equivale a: SELECT * FROM DetallePresupuesto WHERE idPresupuesto = ?
+ * Selección explícita de campos — omite columnas internas no usadas en la UI.
  */
 export async function obtenerDetallesDePresupuesto(idPresupuesto) {
   const { data, error } = await supabase
     .from('detalle_presupuesto')
-    .select('*')
+    .select(`
+      id_detalle,
+      id_presupuesto,
+      id_producto,
+      nombre_producto,
+      medida,
+      cantidad,
+      precio_unitario,
+      precio_con_promo,
+      id_promocion,
+      subtotal
+    `)
     .eq('id_presupuesto', idPresupuesto)
+    .order('id_detalle', { ascending: true })
 
   if (error) manejarError('obtenerDetallesDePresupuesto', error)
   return data.map(mapDetalle)
@@ -119,7 +197,16 @@ export async function obtenerDetallesConNombreDePresupuesto(idPresupuesto) {
   const { data, error } = await supabase
     .from('detalle_presupuesto')
     .select(`
-      *,
+      id_detalle,
+      id_presupuesto,
+      id_producto,
+      nombre_producto,
+      medida,
+      cantidad,
+      precio_unitario,
+      precio_con_promo,
+      id_promocion,
+      subtotal,
       producto ( nombre )
     `)
     .eq('id_presupuesto', idPresupuesto)
@@ -140,56 +227,66 @@ export async function obtenerDetallesConNombreDePresupuesto(idPresupuesto) {
 /**
  * Devuelve presupuestos junto con sus detalles en una sola llamada.
  * Usado en Facturas.jsx para mostrar el listado completo con ítems.
+ *
+ * CAMBIO: paginación server-side con offset/limite en lugar de .limit(200).
  */
 export async function obtenerPresupuestosConDetalles({
   estado     = null,
   fechaDesde = null,
   fechaHasta = null,
-  limite     = 200,
+  limite     = 50,
+  offset     = 0,
 } = {}) {
   let q = supabase
     .from('presupuesto')
     .select(`
-      *,
-      detalle_presupuesto (*)
-    `)
+      id_presupuesto,
+      id_cliente,
+      fecha,
+      metodo_pago,
+      monto_original,
+      monto,
+      nombre_cliente,
+      apellido_cliente,
+      estado,
+      es_excepcion,
+      detalle_presupuesto (
+        id_detalle,
+        id_producto,
+        nombre_producto,
+        medida,
+        cantidad,
+        precio_unitario,
+        precio_con_promo,
+        id_promocion,
+        subtotal
+      )
+    `, { count: 'exact' })
     .order('fecha', { ascending: false })
     .order('id_presupuesto', { ascending: false })
-    .limit(limite)
+    .range(offset, offset + limite - 1)
 
   if (estado)     q = q.eq('estado', estado)
   if (fechaDesde) q = q.gte('fecha', fechaDesde)
   if (fechaHasta) q = q.lte('fecha', fechaHasta)
 
-  const { data, error } = await q
+  const { data, error, count } = await q
   if (error) manejarError('obtenerPresupuestosConDetalles', error)
 
-  return data.map(row => ({
-    ...mapPresupuesto(row),
-    detalles: (row.detalle_presupuesto ?? []).map(mapDetalle),
-  }))
+  return {
+    data: (data ?? []).map(row => ({
+      ...mapPresupuesto(row),
+      detalles: (row.detalle_presupuesto ?? []).map(mapDetalle),
+    })),
+    count: count ?? 0,
+  }
 }
 
 /**
  * Devuelve los presupuestos facturables en un rango de fechas, con detalles incluidos.
- *
- * Lógica de negocio (replica exactamente la query de Facturas.jsx):
- *   - Solo presupuestos con estado = 'pagado'
- *   - Con saldo CC (cc15/cc30): se incluye si s.estado='pagado' y s.fechaPago
- *     cae dentro del período. La fecha de facturación es s.fechaPago.
- *   - Sin saldo (efectivo/transferencia directa): se incluye si p.fecha cae
- *     dentro del período. La fecha de facturación es p.fecha.
- *   - Se incluye el CUIT del cliente (JOIN real, no snapshot).
- *   - Los detalles se enriquecen con el nombre del producto (snapshot → JOIN → placeholder).
- *
- * Requiere la función RPC `obtener_presupuestos_facturables` en Supabase.
- *
- * @param {string} desde  'YYYY-MM-DD'
- * @param {string} hasta  'YYYY-MM-DD'
- * @returns {Array} presupuestos con { ...campos, cuit, fechaFacturacion, detalles[] }
+ * Sin cambios funcionales — ya usaba RPC + batch query, patrón correcto.
  */
 export async function obtenerFacturasConDetalles(desde, hasta) {
-  // 1. Traer presupuestos facturables con la lógica de fecha via RPC
   const { data: presupuestos, error: e1 } = await supabase
     .rpc('obtener_presupuestos_facturables', {
       fecha_desde: desde,
@@ -199,13 +296,21 @@ export async function obtenerFacturasConDetalles(desde, hasta) {
   if (e1) manejarError('obtenerFacturasConDetalles(rpc)', e1)
   if (!presupuestos?.length) return []
 
-  // 2. Traer detalles de todos los presupuestos en una sola query
   const ids = presupuestos.map(p => p.id_presupuesto)
 
   const { data: detallesRaw, error: e2 } = await supabase
     .from('detalle_presupuesto')
     .select(`
-      *,
+      id_detalle,
+      id_presupuesto,
+      id_producto,
+      nombre_producto,
+      medida,
+      cantidad,
+      precio_unitario,
+      precio_con_promo,
+      id_promocion,
+      subtotal,
       producto ( nombre )
     `)
     .in('id_presupuesto', ids)
@@ -213,23 +318,18 @@ export async function obtenerFacturasConDetalles(desde, hasta) {
 
   if (e2) manejarError('obtenerFacturasConDetalles(detalles)', e2)
 
-  // 3. Indexar detalles por presupuesto
   const detallesPor = {}
   for (const row of detallesRaw ?? []) {
     const id = row.id_presupuesto
     if (!detallesPor[id]) detallesPor[id] = []
-
     const det = mapDetalle(row)
-    // Fallback de nombre: snapshot → nombre actual → placeholder
     det.nombreProducto =
       row.nombre_producto
       ?? row.producto?.nombre
       ?? `(producto eliminado #${row.id_producto})`
-
     detallesPor[id].push(det)
   }
 
-  // 4. Combinar y mapear al formato camelCase que usa Facturas.jsx
   return presupuestos.map(p => ({
     idPresupuesto:    p.id_presupuesto,
     idCliente:        p.id_cliente,
@@ -247,12 +347,9 @@ export async function obtenerFacturasConDetalles(desde, hasta) {
 }
 
 // ─── Mutaciones ───────────────────────────────────────────────────────────────
+// Sin cambios — las mutaciones ya eran correctas y eficientes.
 
-/**
- * Crea un presupuesto completo con sus detalles en una sola transacción.
- */
 export async function crearPresupuesto(presupuesto, detalles) {
-  // 1. Insertar cabecera
   const { data: pres, error: e1 } = await supabase
     .from('presupuesto')
     .insert({
@@ -271,18 +368,17 @@ export async function crearPresupuesto(presupuesto, detalles) {
 
   if (e1) manejarError('crearPresupuesto(cabecera)', e1)
 
-  // 2. Insertar detalles referenciando el ID recién creado
   if (detalles.length > 0) {
     const rows = detalles.map(d => ({
-      id_presupuesto:  pres.id_presupuesto,
-      id_producto:     d.idProducto,
-      nombre_producto: d.nombreProducto ?? null,
-      medida:          d.medida         ?? null,
-      cantidad:        d.cantidad,
-      precio_unitario: d.precioUnitario,
+      id_presupuesto:   pres.id_presupuesto,
+      id_producto:      d.idProducto,
+      nombre_producto:  d.nombreProducto ?? null,
+      medida:           d.medida         ?? null,
+      cantidad:         d.cantidad,
+      precio_unitario:  d.precioUnitario,
       precio_con_promo: d.precioConPromo ?? null,
-      id_promocion:    d.idPromocion    ?? null,
-      subtotal:        d.subtotal,
+      id_promocion:     d.idPromocion    ?? null,
+      subtotal:         d.subtotal,
     }))
 
     const { error: e2 } = await supabase
@@ -295,11 +391,7 @@ export async function crearPresupuesto(presupuesto, detalles) {
   return mapPresupuesto(pres)
 }
 
-/**
- * Actualiza un presupuesto existente y reemplaza sus detalles.
- */
 export async function actualizarPresupuesto(idPresupuesto, presupuesto, detalles) {
-  // 1. Actualizar cabecera
   const { error: e1 } = await supabase
     .from('presupuesto')
     .update({
@@ -317,7 +409,6 @@ export async function actualizarPresupuesto(idPresupuesto, presupuesto, detalles
 
   if (e1) manejarError('actualizarPresupuesto(cabecera)', e1)
 
-  // 2. Borrar detalles anteriores
   const { error: e2 } = await supabase
     .from('detalle_presupuesto')
     .delete()
@@ -325,7 +416,6 @@ export async function actualizarPresupuesto(idPresupuesto, presupuesto, detalles
 
   if (e2) manejarError('actualizarPresupuesto(delete detalles)', e2)
 
-  // 3. Reinsertar detalles actualizados
   if (detalles.length > 0) {
     const rows = detalles.map(d => ({
       id_presupuesto:   idPresupuesto,
@@ -347,9 +437,6 @@ export async function actualizarPresupuesto(idPresupuesto, presupuesto, detalles
   }
 }
 
-/**
- * Actualiza solo el estado de un presupuesto.
- */
 export async function actualizarEstadoPresupuesto(idPresupuesto, estado) {
   const { error } = await supabase
     .from('presupuesto')
@@ -359,9 +446,6 @@ export async function actualizarEstadoPresupuesto(idPresupuesto, estado) {
   if (error) manejarError('actualizarEstadoPresupuesto', error)
 }
 
-/**
- * Actualiza estado, método de pago y esExcepcion.
- */
 export async function actualizarMetadataPresupuesto(idPresupuesto, { estado, metodoPago, esExcepcion }) {
   const { error } = await supabase
     .from('presupuesto')
@@ -375,10 +459,6 @@ export async function actualizarMetadataPresupuesto(idPresupuesto, { estado, met
   if (error) manejarError('actualizarMetadataPresupuesto', error)
 }
 
-/**
- * Elimina un presupuesto y sus detalles (CASCADE en BD).
- * También elimina el saldo asociado si existe.
- */
 export async function eliminarPresupuesto(idPresupuesto) {
   const { error: e1 } = await supabase
     .from('saldo')
