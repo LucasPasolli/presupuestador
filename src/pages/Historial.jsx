@@ -1,5 +1,5 @@
 // src/pages/Historial.jsx
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import Presupuestador from './Presupuestador'
 import { generarPDFPresupuesto } from '../lib/pdfPresupuesto'
@@ -18,11 +18,11 @@ import {
 import { obtenerClientePorId } from '../services/clientesService'
 import {
   crearSaldo,
-  obtenerSaldos,
   obtenerSaldoPorPresupuesto,
   eliminarSaldoPorPresupuesto,
 } from '../services/saldosService'
 import { descontarStock } from '../services/productosService'
+import { useDebounce } from '../hooks/useDebounce'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -55,13 +55,35 @@ function pctLabel(factor) {
   return `+${diff.toFixed(2)}% recargo`
 }
 
-const PAGE_SIZE = 30
+// Cuántos registros pedir al servidor por página.
+// Supabase resuelve el LIMIT/OFFSET; el browser solo renderiza estos N.
+const PAGE_SIZE = 50
 
 const METODOS_FACTOR = {
   efectivo:      0.95,
   transferencia: 0.95,
   cc15:          1.00,
   cc30:          1.105,
+}
+
+// ─── Skeleton de fila ──────────────────────────────────────────────────────
+// Muestra filas "fantasma" con animate-pulse mientras se carga la data.
+// Evita el parpadeo / tabla-vacía que da sensación de lentitud.
+function SkeletonRows({ count = 8 }) {
+  const widths = ['w-12', 'w-20', 'w-40', 'w-24', 'w-20', 'w-24', 'w-16', 'w-8']
+  return (
+    <>
+      {Array.from({ length: count }).map((_, i) => (
+        <tr key={i} className="border-b border-surface-700/50">
+          {widths.map((w, j) => (
+            <td key={j} className="py-3 px-4">
+              <div className={`h-4 ${w} bg-surface-700 rounded animate-pulse`} />
+            </td>
+          ))}
+        </tr>
+      ))}
+    </>
+  )
 }
 
 // ─── Vista detalle ─────────────────────────────────────────────────────────
@@ -75,6 +97,16 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
   const [modal,      setModal]      = useState(null)
   const [errorModal, setErrorModal] = useState('')
   const [delConfirm, setDelConfirm] = useState(false)
+
+  // Memoizado para que las sumas de detalles no se recalculen en cada render
+  // del detalle (p.ej. al abrir/cerrar modales).
+  const totalesDetalle = useMemo(() => {
+    const precioLista      = detalles.reduce((acc, d) => acc + (parseFloat(d.precioUnitario) || 0) * (parseFloat(d.cantidad) || 0), 0)
+    const subtotalConPromo = detalles.reduce((acc, d) => acc + (parseFloat(d.subtotal) || 0), 0)
+    const ahorroPromo      = precioLista - subtotalConPromo
+    const ajusteMetodo     = (parseFloat(pres.monto) || 0) - subtotalConPromo
+    return { precioLista, subtotalConPromo, ahorroPromo, ajusteMetodo }
+  }, [detalles, pres.monto])
 
   const reload = useCallback(async () => {
     setLoading(true)
@@ -125,7 +157,6 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
 
       await actualizarEstadoPresupuesto(pres.idPresupuesto, nuevoEstado)
 
-      // Descontar stock si pasa a aprobado/pagado por primera vez
       const debeDescontar = (nuevoEstado === 'aprobado' || nuevoEstado === 'pagado') &&
                             estadoAnterior !== 'aprobado' && estadoAnterior !== 'pagado'
       if (debeDescontar) {
@@ -138,7 +169,6 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
         }
       }
 
-      // Crear saldo si pasa a aprobado y es CC
       if (nuevoEstado === 'aprobado' && esCC) {
         const yaExiste = await obtenerSaldoPorPresupuesto(pres.idPresupuesto)
         if (!yaExiste) {
@@ -156,7 +186,6 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
         }
       }
 
-      // Eliminar saldo si se rechaza
       if (nuevoEstado === 'rechazado') {
         await eliminarSaldoPorPresupuesto(pres.idPresupuesto)
       }
@@ -339,54 +368,46 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
         }
       </Card>
 
-      {/* Totales */}
+      {/* Totales — ahora usa totalesDetalle memoizado */}
       <Card className="p-6">
-        {(() => {
-          const precioLista      = detalles.reduce((acc, d) => acc + (parseFloat(d.precioUnitario) || 0) * (parseFloat(d.cantidad) || 0), 0)
-          const subtotalConPromo = detalles.reduce((acc, d) => acc + (parseFloat(d.subtotal) || 0), 0)
-          const ahorroPromo      = precioLista - subtotalConPromo
-          const ajusteMetodo     = (parseFloat(pres.monto) || 0) - subtotalConPromo
-          return (
-            <div className="ml-auto w-fit min-w-[280px] space-y-2 text-sm font-body">
-              <div className="flex justify-between gap-8">
-                <span className="text-surface-400 shrink-0">Subtotal (lista):</span>
-                <span className="text-surface-200 font-mono text-right">{fmt(precioLista)}</span>
-              </div>
-              {ahorroPromo > 0.01 && (
-                <>
-                  <div className="flex justify-between gap-8 items-center">
-                    <span className="flex items-center gap-1.5 text-emerald-400 shrink-0">
-                      <Tag size={11} />Ahorro por promociones:
-                    </span>
-                    <span className="text-emerald-400 font-mono font-medium text-right">− {fmt(ahorroPromo)}</span>
-                  </div>
-                  <div className="flex justify-between gap-8">
-                    <span className="text-surface-400 shrink-0">Subtotal con promos:</span>
-                    <span className="text-surface-200 font-mono text-right">{fmt(subtotalConPromo)}</span>
-                  </div>
-                </>
-              )}
-              <div className="flex justify-between gap-8">
-                <span className="text-surface-400 shrink-0">
-                  Ajuste por método de pago
-                  {esExcepcion && ajusteMetodo !== 0 && (
-                    <span className="ml-1 text-xs text-violet-400 font-body">[Excepción]</span>
-                  )}:
+        <div className="ml-auto w-fit min-w-[280px] space-y-2 text-sm font-body">
+          <div className="flex justify-between gap-8">
+            <span className="text-surface-400 shrink-0">Subtotal (lista):</span>
+            <span className="text-surface-200 font-mono text-right">{fmt(totalesDetalle.precioLista)}</span>
+          </div>
+          {totalesDetalle.ahorroPromo > 0.01 && (
+            <>
+              <div className="flex justify-between gap-8 items-center">
+                <span className="flex items-center gap-1.5 text-emerald-400 shrink-0">
+                  <Tag size={11} />Ahorro por promociones:
                 </span>
-                <span className={`font-mono font-medium text-right ${
-                  Math.abs(ajusteMetodo) < 0.01 ? 'text-surface-400'
-                  : ajusteMetodo < 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {Math.abs(ajusteMetodo) < 0.01 ? '—'
-                    : ajusteMetodo < 0 ? `- ${fmt(Math.abs(ajusteMetodo))}` : `+ ${fmt(ajusteMetodo)}`}
-                </span>
+                <span className="text-emerald-400 font-mono font-medium text-right">− {fmt(totalesDetalle.ahorroPromo)}</span>
               </div>
-              <div className="border-t border-surface-700 pt-2 flex justify-between gap-8">
-                <span className="text-white font-semibold shrink-0">Total:</span>
-                <span className="text-brand-400 font-mono font-bold text-lg text-right">{fmt(pres.monto)}</span>
+              <div className="flex justify-between gap-8">
+                <span className="text-surface-400 shrink-0">Subtotal con promos:</span>
+                <span className="text-surface-200 font-mono text-right">{fmt(totalesDetalle.subtotalConPromo)}</span>
               </div>
-            </div>
-          )
-        })()}
+            </>
+          )}
+          <div className="flex justify-between gap-8">
+            <span className="text-surface-400 shrink-0">
+              Ajuste por método de pago
+              {esExcepcion && totalesDetalle.ajusteMetodo !== 0 && (
+                <span className="ml-1 text-xs text-violet-400 font-body">[Excepción]</span>
+              )}:
+            </span>
+            <span className={`font-mono font-medium text-right ${
+              Math.abs(totalesDetalle.ajusteMetodo) < 0.01 ? 'text-surface-400'
+              : totalesDetalle.ajusteMetodo < 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {Math.abs(totalesDetalle.ajusteMetodo) < 0.01 ? '—'
+                : totalesDetalle.ajusteMetodo < 0 ? `- ${fmt(Math.abs(totalesDetalle.ajusteMetodo))}` : `+ ${fmt(totalesDetalle.ajusteMetodo)}`}
+            </span>
+          </div>
+          <div className="border-t border-surface-700 pt-2 flex justify-between gap-8">
+            <span className="text-white font-semibold shrink-0">Total:</span>
+            <span className="text-brand-400 font-mono font-bold text-lg text-right">{fmt(pres.monto)}</span>
+          </div>
+        </div>
       </Card>
 
       {saldo && (
@@ -463,81 +484,74 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
 export default function Historial() {
   const navigate = useNavigate()
   const location = useLocation()
+
+  // ── Filtros ──────────────────────────────────────────────────────────────
+  const [search,        setSearch]        = useState('')
+  const [filterMetodo,  setFilterMetodo]  = useState('all')
+  const [filterEstado,  setFilterEstado]  = useState('all')
+  const [soloExcepcion, setSoloExcepcion] = useState(false)
+  const [filterFechaD,  setFilterFechaD]  = useState('')
+  const [filterFechaH,  setFilterFechaH]  = useState('')
+  const [sortDir,       setSortDir]       = useState('desc')
+  const [sortKey,       setSortKey]       = useState('id')
+
+  // ── Paginación server-side ────────────────────────────────────────────────
+  // `page` controla el offset que se envía a Supabase.
+  // `totalCount` viene del count:'exact' de la query — nunca descargamos todas las filas.
+  const [page,       setPage]       = useState(1)
+  const [totalCount, setTotalCount] = useState(0)
+
+  // ── Data y estado de carga ────────────────────────────────────────────────
   const [presupuestos, setPresupuestos] = useState([])
-  const [search,       setSearch]       = useState('')
-  const [filterMetodo, setFilterMetodo] = useState('all')
-  const [filterEstado, setFilterEstado] = useState('all')
-  const [soloExcepcion,setSoloExcepcion]= useState(false)
-  const [filterFechaD, setFilterFechaD] = useState('')
-  const [filterFechaH, setFilterFechaH] = useState('')
-  const [sortDir,      setSortDir]      = useState('desc')
-  const [sortKey,      setSortKey]      = useState('id')
-  const [page,         setPage]         = useState(1)
-  const [selected,     setSelected]     = useState(null)
-  const [editando,     setEditando]     = useState(null)
+  const [loading,      setLoading]      = useState(true)
 
+  // ── Vista activa ──────────────────────────────────────────────────────────
+  const [selected, setSelected] = useState(null)
+  const [editando, setEditando] = useState(null)
+
+  // ── Debounce del buscador ─────────────────────────────────────────────────
+  // El input actualiza `search` en cada keystroke (fluido para el usuario),
+  // pero `debouncedSearch` solo cambia 400ms después de que el usuario para de escribir.
+  // Esto evita disparar una query a Supabase por cada letra ingresada.
+  const debouncedSearch = useDebounce(search, 400)
+
+  // ── Fetch principal ───────────────────────────────────────────────────────
+  // IMPORTANTE: `debouncedSearch` está en el array de dependencias, no `search`.
+  // `page` también es dependencia: cambiar de página re-fetcha con el nuevo offset.
+  // Cuando cambia un filtro, reseteamos a página 1 (ver useEffect más abajo).
   const load = useCallback(async () => {
+    setLoading(true)
     try {
-      // Cargar presupuestos y todos los saldos en paralelo
-      const [datos, saldos] = await Promise.all([
-        obtenerPresupuestos({
-          estado:      filterEstado !== 'all' ? filterEstado : null,
-          metodoPago:  filterMetodo !== 'all' ? filterMetodo : null,
-          esExcepcion: soloExcepcion ? true : null,
-          fechaDesde:  filterFechaD || null,
-          fechaHasta:  filterFechaH || null,
-          orden:       sortDir,
-          limite:      2000,
-        }),
-        // Traer todos los saldos para cruzar con presupuestos (igual que el LEFT JOIN original)
-        obtenerSaldos({ limite: 5000 }),
-      ])
-
-      // Construir mapa de saldos por idPresupuesto para O(1) lookup
-      const saldoMap = {}
-      for (const s of saldos) {
-        saldoMap[s.idPresupuesto] = s.estado
-      }
-
-      // Enriquecer presupuestos con saldoEstado (igual que el LEFT JOIN original)
-      let resultado = datos.map(p => ({
-        ...p,
-        saldoEstado: saldoMap[p.idPresupuesto] ?? null,
-      }))
-
-      // Filtrado de texto en cliente (requiere lógica multi-campo con split)
-      if (search.trim()) {
-        const q = search.trim()
-        const isNumeric = /^\d+$/.test(q)
-        if (isNumeric) {
-          resultado = resultado.filter(p => String(p.idPresupuesto) === q)
-        } else {
-          const parts = q.toLowerCase().split(/\s+/)
-          resultado = resultado.filter(p => {
-            const nombre   = (p.nombreCliente   ?? '').toLowerCase()
-            const apellido = (p.apellidoCliente ?? '').toLowerCase()
-            const full     = `${nombre} ${apellido}`
-            return parts.every(part => full.includes(part))
-          })
-        }
-      }
-
-      // Ordenar en cliente según sortKey
-      resultado = [...resultado].sort((a, b) => {
-        const valA = sortKey === 'fecha' ? a.fecha : a.idPresupuesto
-        const valB = sortKey === 'fecha' ? b.fecha : b.idPresupuesto
-        if (typeof valA === 'string') return sortDir === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA)
-        return sortDir === 'asc' ? valA - valB : valB - valA
+      const { data, count } = await obtenerPresupuestos({
+        estado:      filterEstado !== 'all' ? filterEstado : null,
+        metodoPago:  filterMetodo !== 'all' ? filterMetodo : null,
+        esExcepcion: soloExcepcion || null,
+        fechaDesde:  filterFechaD || null,
+        fechaHasta:  filterFechaH || null,
+        sortKey,
+        orden:       sortDir,
+        search:      debouncedSearch.trim() || null,
+        limite:      PAGE_SIZE,
+        offset:      (page - 1) * PAGE_SIZE,
       })
-
-      setPresupuestos(resultado)
-      setPage(1)
+      setPresupuestos(data)
+      setTotalCount(count)
     } catch (err) {
       console.error('[Historial] Error cargando:', err)
+    } finally {
+      setLoading(false)
     }
-  }, [search, filterMetodo, filterEstado, soloExcepcion, filterFechaD, filterFechaH, sortDir, sortKey])
+  }, [page, filterMetodo, filterEstado, soloExcepcion,
+      filterFechaD, filterFechaH, sortDir, sortKey, debouncedSearch])
 
   useEffect(() => { load() }, [load])
+
+  // Resetear a página 1 cuando cambia cualquier filtro (no la página en sí).
+  // Sin esto, al filtrar desde la página 3 no volvería a la 1.
+  useEffect(() => {
+    setPage(1)
+  }, [filterMetodo, filterEstado, soloExcepcion,
+      filterFechaD, filterFechaH, sortDir, sortKey, debouncedSearch])
 
   // Si venimos del Presupuestador con state.verPresupuesto, abrir el detalle directamente
   useEffect(() => {
@@ -547,13 +561,21 @@ export default function Historial() {
     navigate(location.pathname, { replace: true, state: {} })
   }, [location.state?.verPresupuesto])
 
-  const paginated  = presupuestos.slice((page-1)*PAGE_SIZE, page*PAGE_SIZE)
-  const totalPages = Math.max(1, Math.ceil(presupuestos.length/PAGE_SIZE))
-  // Idéntico al original
-  const totalMonto = presupuestos.filter(p => p.estado === 'pagado' || p.saldoEstado === 'pagado').reduce((a, p) => a + p.monto, 0)
-  const pendCobro  = presupuestos.filter(p => p.saldoEstado === 'pendiente').length
-  const hasAnyFilter = search || filterMetodo !== 'all' || filterEstado !== 'all' || filterFechaD || filterFechaH || soloExcepcion
+  // ── Derivados memoizados ──────────────────────────────────────────────────
+  // Se recalculan solo cuando `presupuestos` cambia, no en cada re-render
+  // causado por aperturas de modal, hover, etc.
+  const { totalMonto, pendCobro, totalPages } = useMemo(() => ({
+    totalMonto: presupuestos
+      .filter(p => p.estado === 'pagado' || p.saldoEstado === 'pagado')
+      .reduce((a, p) => a + (p.monto ?? 0), 0),
+    pendCobro:  presupuestos.filter(p => p.saldoEstado === 'pendiente').length,
+    totalPages: Math.max(1, Math.ceil(totalCount / PAGE_SIZE)),
+  }), [presupuestos, totalCount])
 
+  const hasAnyFilter = search || filterMetodo !== 'all' || filterEstado !== 'all'
+    || filterFechaD || filterFechaH || soloExcepcion
+
+  // ── Helpers de UI ─────────────────────────────────────────────────────────
   function toggleSort(key) {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
     else { setSortKey(key); setSortDir('desc') }
@@ -561,7 +583,9 @@ export default function Historial() {
 
   function SortIcon({ col }) {
     if (sortKey !== col) return <span className="text-surface-600 ml-1">↕</span>
-    return sortDir === 'asc' ? <ChevronUp size={13} className="inline ml-1" /> : <ChevronDown size={13} className="inline ml-1" />
+    return sortDir === 'asc'
+      ? <ChevronUp size={13} className="inline ml-1" />
+      : <ChevronDown size={13} className="inline ml-1" />
   }
 
   async function irADetalle(id) {
@@ -573,6 +597,7 @@ export default function Historial() {
     } catch (err) { console.error('[Historial] irADetalle:', err) }
   }
 
+  // ── Renders condicionales ─────────────────────────────────────────────────
   if (editando) return (
     <Presupuestador
       presupuestoEditar={editando}
@@ -594,6 +619,7 @@ export default function Historial() {
     />
   )
 
+  // ── Render principal ──────────────────────────────────────────────────────
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       <PageHeader title="Historial" subtitle="Presupuestos emitidos" />
@@ -603,7 +629,9 @@ export default function Historial() {
         <div className="flex flex-wrap gap-3 items-end">
           <div className="relative flex-1 min-w-[180px]">
             <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
-            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Buscar por ID o cliente..."
+            {/* Input controlado por `search` (fluido), query usa `debouncedSearch` (optimizado) */}
+            <input value={search} onChange={e => setSearch(e.target.value)}
+              placeholder="Buscar por ID o cliente..."
               className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2 text-white
                          text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all" />
           </div>
@@ -707,55 +735,64 @@ export default function Historial() {
               </tr>
             </thead>
             <tbody>
-              {paginated.map(p => {
-                const m = METODOS_PAGO[p.metodoPago] ?? { label: p.metodoPago, badge: 'gray' }
-                const e = ESTADOS[p.estado] ?? ESTADOS.borrador
-                return (
-                  <tr key={p.idPresupuesto} onClick={() => setSelected(p)}
-                    className="border-b border-surface-700/50 hover:bg-surface-700/40 cursor-pointer transition-colors">
-                    <td className="py-3 px-4 text-brand-400 font-mono text-sm font-bold">#{p.idPresupuesto}</td>
-                    <td className="py-3 px-4 text-surface-300 font-mono text-xs">{fmtFecha(p.fecha)}</td>
-                    <td className="py-3 px-4 text-white font-body">
-                      {p.nombreCliente
-                        ? `${p.nombreCliente} ${p.apellidoCliente ?? ''}`
-                        : <span className="text-surface-500 font-mono text-xs">#{p.idCliente}</span>}
-                    </td>
-                    <td className="py-3 px-4">
-                      <div className="flex items-center gap-1">
-                        <Badge color={BADGE[m.badge]}>{m.label}</Badge>
-                        {p.esExcepcion === 1 && <Badge color="violet">Exc.</Badge>}
-                      </div>
-                    </td>
-                    <td className="py-3 px-4"><Badge color={BADGE[e.color]}>{e.label}</Badge></td>
-                    <td className="py-3 px-4 text-white font-mono font-medium">{fmt(p.monto)}</td>
-                    <td className="py-3 px-4">
-                      {p.saldoEstado === 'pendiente' && <Badge color="yellow">Pendiente</Badge>}
-                      {p.saldoEstado === 'pagado'    && <Badge color="green">Cobrado</Badge>}
-                      {!p.saldoEstado                && <span className="text-surface-600 text-xs">—</span>}
-                    </td>
-                    <td className="py-3 px-4 text-surface-500"><FileText size={15}/></td>
-                  </tr>
-                )
-              })}
+              {/* Skeleton mientras carga — reemplaza el "tabla vacía" anterior */}
+              {loading
+                ? <SkeletonRows count={PAGE_SIZE > 8 ? 8 : PAGE_SIZE} />
+                : presupuestos.map(p => {
+                    const m = METODOS_PAGO[p.metodoPago] ?? { label: p.metodoPago, badge: 'gray' }
+                    const e = ESTADOS[p.estado] ?? ESTADOS.borrador
+                    return (
+                      <tr key={p.idPresupuesto} onClick={() => setSelected(p)}
+                        className="border-b border-surface-700/50 hover:bg-surface-700/40 cursor-pointer transition-colors">
+                        <td className="py-3 px-4 text-brand-400 font-mono text-sm font-bold">#{p.idPresupuesto}</td>
+                        <td className="py-3 px-4 text-surface-300 font-mono text-xs">{fmtFecha(p.fecha)}</td>
+                        <td className="py-3 px-4 text-white font-body">
+                          {p.nombreCliente
+                            ? `${p.nombreCliente} ${p.apellidoCliente ?? ''}`
+                            : <span className="text-surface-500 font-mono text-xs">#{p.idCliente}</span>}
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="flex items-center gap-1">
+                            <Badge color={BADGE[m.badge]}>{m.label}</Badge>
+                            {p.esExcepcion === 1 && <Badge color="violet">Exc.</Badge>}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4"><Badge color={BADGE[e.color]}>{e.label}</Badge></td>
+                        <td className="py-3 px-4 text-white font-mono font-medium">{fmt(p.monto)}</td>
+                        <td className="py-3 px-4">
+                          {p.saldoEstado === 'pendiente' && <Badge color="yellow">Pendiente</Badge>}
+                          {p.saldoEstado === 'pagado'    && <Badge color="green">Cobrado</Badge>}
+                          {!p.saldoEstado                && <span className="text-surface-600 text-xs">—</span>}
+                        </td>
+                        <td className="py-3 px-4 text-surface-500"><FileText size={15}/></td>
+                      </tr>
+                    )
+                  })
+              }
             </tbody>
           </table>
         </div>
 
-        {presupuestos.length === 0 && (
+        {!loading && presupuestos.length === 0 && (
           <div className="flex flex-col items-center py-16 gap-3 text-surface-500">
             <Clock size={32} className="opacity-30"/>
             <p className="font-body text-sm">No hay presupuestos que coincidan.</p>
           </div>
         )}
 
+        {/* Paginación — ahora muestra totalCount real del servidor */}
         {totalPages > 1 && (
           <div className="flex items-center justify-between px-6 py-3 border-t border-surface-700">
             <p className="text-surface-400 text-xs font-body">
-              {(page-1)*PAGE_SIZE+1}–{Math.min(page*PAGE_SIZE, presupuestos.length)} de {presupuestos.length}
+              {(page-1)*PAGE_SIZE+1}–{Math.min(page*PAGE_SIZE, totalCount)} de {totalCount}
             </p>
             <div className="flex gap-2">
-              <Button size="sm" variant="secondary" onClick={() => setPage(p => Math.max(1, p-1))} disabled={page===1}>← Anterior</Button>
-              <Button size="sm" variant="secondary" onClick={() => setPage(p => Math.min(totalPages, p+1))} disabled={page===totalPages}>Siguiente →</Button>
+              <Button size="sm" variant="secondary"
+                onClick={() => setPage(p => Math.max(1, p-1))}
+                disabled={page === 1 || loading}>← Anterior</Button>
+              <Button size="sm" variant="secondary"
+                onClick={() => setPage(p => Math.min(totalPages, p+1))}
+                disabled={page === totalPages || loading}>Siguiente →</Button>
             </div>
           </div>
         )}
