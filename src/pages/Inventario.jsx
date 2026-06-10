@@ -636,29 +636,46 @@ export default function Inventario() {
       />
 
       {/* Resumen rápido */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
-          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">Total productos</p>
-          <p className="font-display text-3xl text-white tracking-widest mt-0.5">{allProductos.length}</p>
-        </div>
-        <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
-          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">Con stock</p>
-          <p className="font-display text-3xl text-white tracking-widest mt-0.5">{allProductos.filter((p) => p.stockTotal > 0).length}</p>
-        </div>
-        <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
-          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">Sin stock</p>
-          <p className="font-display text-3xl text-white tracking-widest mt-0.5">{allProductos.filter((p) => p.stockTotal === 0).length}</p>
-        </div>
-        <button onClick={() => setFilterBajoStock((v) => !v)}
-          className={`rounded-xl p-4 border text-left transition-all
-            ${filterBajoStock ? 'bg-yellow-500/20 border-yellow-400/60' : 'bg-yellow-500/10 border-yellow-500/30 hover:bg-yellow-500/15'}`}>
-          <p className="text-yellow-300 text-xs uppercase tracking-widest font-body">Bajo stock</p>
-          <p className="font-display text-3xl text-yellow-200 tracking-widest mt-0.5">
-            {allProductos.filter((p) => p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion).length}
-          </p>
-          <p className="text-yellow-400/70 text-xs mt-1">Click para filtrar</p>
-        </button>
-      </div>
+      {(() => {
+        const hayFiltrosActivos = searchNombre || searchId || filterCat !== 'all' || filterStock !== 'all' || filterBajoStock
+        // Con filtros activos los contadores reflejan la selección actual;
+        // sin filtros muestran los totales reales del catálogo completo.
+        const base = hayFiltrosActivos ? productos : allProductos
+        return (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
+              <p className="text-surface-400 text-xs uppercase tracking-widest font-body">
+                {hayFiltrosActivos ? 'Productos filtrados' : 'Total productos'}
+              </p>
+              <p className="font-display text-3xl text-white tracking-widest mt-0.5">{base.length}</p>
+              {hayFiltrosActivos && (
+                <p className="text-surface-500 text-xs font-body mt-1">de {allProductos.length} totales</p>
+              )}
+            </div>
+            <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
+              <p className="text-surface-400 text-xs uppercase tracking-widest font-body">Con stock</p>
+              <p className="font-display text-3xl text-white tracking-widest mt-0.5">
+                {base.filter((p) => p.stockTotal > 0).length}
+              </p>
+            </div>
+            <div className="bg-surface-800 border border-surface-700 rounded-xl p-4">
+              <p className="text-surface-400 text-xs uppercase tracking-widest font-body">Sin stock</p>
+              <p className="font-display text-3xl text-white tracking-widest mt-0.5">
+                {base.filter((p) => p.stockTotal === 0).length}
+              </p>
+            </div>
+            <button onClick={() => setFilterBajoStock((v) => !v)}
+              className={`rounded-xl p-4 border text-left transition-all
+                ${filterBajoStock ? 'bg-yellow-500/20 border-yellow-400/60' : 'bg-yellow-500/10 border-yellow-500/30 hover:bg-yellow-500/15'}`}>
+              <p className="text-yellow-300 text-xs uppercase tracking-widest font-body">Bajo stock</p>
+              <p className="font-display text-3xl text-yellow-200 tracking-widest mt-0.5">
+                {base.filter((p) => p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion).length}
+              </p>
+              <p className="text-yellow-400/70 text-xs mt-1">Click para filtrar</p>
+            </button>
+          </div>
+        )
+      })()}
 
       {/* Filtros */}
       <Card className="p-4">
