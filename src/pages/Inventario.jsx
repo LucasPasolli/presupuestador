@@ -423,15 +423,16 @@ function ActualizarPreciosModal({ open, onClose, onSaved }) {
     if (isNaN(mg)) return
     setLoading(true)
     try {
-      const { data: productos, error } = await supabase.from('producto').select('id_producto, precio_proveedor').gt('precio_proveedor', 0)
+      const { error } = await supabase.rpc('actualizar_precios_por_margen', {
+        margen_porcentaje: mg
+      })
       if (error) throw error
-      for (const p of productos) {
-        const nuevoPrecio = Number(p.precio_proveedor) * (1 + mg / 100)
-        await supabase.from('producto').update({ precio_unitario: parseFloat(nuevoPrecio.toFixed(2)) }).eq('id_producto', p.id_producto)
-      }
       onSaved(); onClose()
-    } catch (err) { console.error('[ActualizarPrecios]', err) }
-    finally { setLoading(false) }
+    } catch (err) {
+      console.error('[ActualizarPrecios]', err)
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
@@ -535,41 +536,44 @@ export default function Inventario() {
     try {
       const [cats, prods] = await Promise.all([obtenerCategorias(), obtenerProductos()])
       setCategorias(cats)
-
       const conStock = prods.map((p) => ({ ...p, categoriaNombre: p.categoria, stockTotal: p.cantidad }))
       setAllProductos(conStock)
-
-      let resultado = conStock
-
-      if (searchId.trim()) resultado = resultado.filter((p) => String(p.idProducto) === searchId.trim())
-      if (searchNombre.trim()) {
-        const needle = normalize(searchNombre.trim())
-        resultado = resultado.filter((p) => normalize(p.nombre).includes(needle))
-      }
-      if (filterCat !== 'all') resultado = resultado.filter((p) => p.idCategoria === parseInt(filterCat))
-      if (filterStock === 'con') resultado = resultado.filter((p) => p.stockTotal > 0)
-      else if (filterStock === 'sin') resultado = resultado.filter((p) => p.stockTotal === 0)
-      if (filterBajoStock) resultado = resultado.filter((p) => p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion)
-
-      resultado = [...resultado].sort((a, b) => {
-        let valA, valB
-        if (sortKey === 'stock')       { valA = a.stockTotal;      valB = b.stockTotal }
-        else if (sortKey === 'precio') { valA = a.precioUnitario;  valB = b.precioUnitario }
-        else                           { valA = a.nombre;           valB = b.nombre }
-        if (typeof valA === 'string') return sortDir === 'asc' ? valA.localeCompare(valB, 'es') : valB.localeCompare(valA, 'es')
-        return sortDir === 'asc' ? valA - valB : valB - valA
-      })
-
-      setProductos(resultado)
       if (resetPage) setPage(1)
     } catch (err) {
       console.error('[Inventario] Error cargando datos:', err)
     }
-  }, [searchNombre, searchId, filterCat, filterStock, filterBajoStock, sortKey, sortDir])
+  }, [])
 
   const loadSinResetPage = useCallback(() => load(false), [load])
 
   useEffect(() => { load() }, [load])
+
+  // Filtrado y ordenamiento en memoria — sin llamadas a Supabase
+  useEffect(() => {
+    let resultado = [...allProductos]
+
+    if (searchId.trim()) resultado = resultado.filter((p) => String(p.idProducto) === searchId.trim())
+    if (searchNombre.trim()) {
+      const needle = normalize(searchNombre.trim())
+      resultado = resultado.filter((p) => normalize(p.nombre).includes(needle))
+    }
+    if (filterCat !== 'all') resultado = resultado.filter((p) => p.idCategoria === parseInt(filterCat))
+    if (filterStock === 'con') resultado = resultado.filter((p) => p.stockTotal > 0)
+    else if (filterStock === 'sin') resultado = resultado.filter((p) => p.stockTotal === 0)
+    if (filterBajoStock) resultado = resultado.filter((p) => p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion)
+
+    resultado = resultado.sort((a, b) => {
+      let valA, valB
+      if (sortKey === 'stock')       { valA = a.stockTotal;     valB = b.stockTotal }
+      else if (sortKey === 'precio') { valA = a.precioUnitario; valB = b.precioUnitario }
+      else                           { valA = a.nombre;          valB = b.nombre }
+      if (typeof valA === 'string') return sortDir === 'asc' ? valA.localeCompare(valB, 'es') : valB.localeCompare(valA, 'es')
+      return sortDir === 'asc' ? valA - valB : valB - valA
+    })
+
+    setProductos(resultado)
+    setPage(1)
+  }, [allProductos, searchNombre, searchId, filterCat, filterStock, filterBajoStock, sortKey, sortDir])
 
   function toggleSort(key) {
     if (sortKey === key) setSortDir((d) => d === 'asc' ? 'desc' : 'asc')

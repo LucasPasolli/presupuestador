@@ -14,9 +14,9 @@ import {
   PRODUCTOS_SEED,
 } from "./seedData.js";
 
-// ⚠️  COMPLETAR con tus credenciales de Supabase
-const SUPABASE_URL = "https://ybejzmwfuugnaltmbqkq.supabase.co";
-const SUPABASE_SERVICE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZWp6bXdmdXVnbmFsdG1icWtxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MDc1MzIyOCwiZXhwIjoyMDk2MzI5MjI4fQ.XneqdWFu2D7RY_BIbbAgxbWVIC3GmZ19DAOKVq8SnWk"; // Usar la service_role key (Settings > API)
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+const supabaseServiceKey = import.meta.env.VITE_SUPABASE_SERVICE_KEY
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 

@@ -43,7 +43,7 @@ const STATE = {
  * }} props
  */
 export default function SpecialAuthGate({ pageKey, label, children }) {
-  const { checkAccess, verifyAccess } = useSpecialAuth()
+  const { checkAccess, verifyAccess, revokeAccess } = useSpecialAuth()
   const navigate = useNavigate()
 
   const [gateState,    setGateState]    = useState(STATE.CHECKING)
@@ -67,8 +67,11 @@ export default function SpecialAuthGate({ pageKey, label, children }) {
     }
 
     check()
-    return () => { cancelled = true }
-  }, [pageKey, checkAccess])
+    return () => {
+      cancelled = true
+      revokeAccess(pageKey)
+    }
+  }, [pageKey, checkAccess, revokeAccess])
 
   // -------------------------------------------------------------------------
   // Focus en el input cuando el gate está en estado LOCKED

@@ -427,7 +427,7 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
       {/* Modales estado */}
       {[
         { key:'aprobar',  title:'Aprobar presupuesto',  body:`Presupuesto #${pres.idPresupuesto} → Aprobado. Se descuenta stock y se genera saldo pendiente de cobro.`, action:()=>cambiarEstado('aprobado'),   label:'Aprobar',        icon:ThumbsUp },
-        { key:'pagar',    title:'Registrar pago',        body:`Presupuesto #${pres.idPresupuesto} → Pagado. El ingreso de ${fmt(pres.monto)} se reflejará en estadísticas.`, action:()=>cambiarEstado('pagado'),     label:'Confirmar pago', icon:CheckCircle2 },
+        { key:'pagar',    title:'Registrar pago',        body:`Presupuesto #${pres.idPresupuesto} → Pagado. El ingreso de ${fmt(pres.monto)} se reflejará en estadísticas y el stock será modificado.`, action:()=>cambiarEstado('pagado'),     label:'Confirmar pago', icon:CheckCircle2 },
         { key:'rechazar', title:'Rechazar presupuesto',  body:`Presupuesto #${pres.idPresupuesto} → Rechazado. No afecta stock.`, action:()=>cambiarEstado('rechazado'), label:'Rechazar',       icon:XCircle, danger:true },
       ].map(m => (
         <Modal key={m.key} open={modal===m.key} onClose={()=>{setModal(null);setErrorModal('')}} title={m.title} width="max-w-sm">

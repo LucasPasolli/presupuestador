@@ -1,12 +1,4 @@
 // src/lib/SpecialAuthContext.jsx
-//
-// Contexto de segunda capa de autorización.
-//
-// Comportamiento de bloqueo:
-//   - Al salir de una página protegida: el token se marca con revokedAt
-//   - Si volvés dentro de GRACE_PERIOD_MS (60s): entrás sin contraseña
-//   - Si pasan más de 60s: el token se considera expirado y pide contraseña
-//   - F5, logout, o expiración de las 2 horas: siempre bloquea
 
 import {
   createContext,
@@ -23,26 +15,25 @@ import {
   cleanupExpiredTokens,
 } from '../services/specialAccessService'
 
-// Período de gracia en milisegundos (60 segundos)
-const GRACE_PERIOD_MS = 60 * 1000
+// Período de gracia en milisegundos
+const GRACE_PERIOD_MS = 15 * 1000 // 
 
 const SpecialAuthContext = createContext(null)
 
 export function SpecialAuthProvider({ children }) {
-  /**
-   * Mapa en memoria: pageKey → {
-   *   token:     string,
-   *   expiresAt: string,    // ISO — expiración del token en servidor (2h)
-   *   grantedAt: number,    // Date.now() cuando se otorgó
-   *   revokedAt: number|null // Date.now() cuando se salió de la página, null si está activo
-   * }
-   */
-  const [tokenMap, setTokenMap] = useState({})
+
+  const tokenMapRef = useRef({})
+  const [, forceRender] = useState(0)
+
   const pendingRef = useRef({})
   const { registerLogoutCallback, authed } = useAuth()
 
+  // -------------------------------------------------------------------------
+  // clearAllTokens — logout o sesión cerrada
+  // -------------------------------------------------------------------------
   const clearAllTokens = useCallback(() => {
-    setTokenMap({})
+    tokenMapRef.current = {}
+    forceRender(n => n + 1)
   }, [])
 
   useEffect(() => {
@@ -50,54 +41,57 @@ export function SpecialAuthProvider({ children }) {
   }, [registerLogoutCallback, clearAllTokens])
 
   useEffect(() => {
-    if (!authed) setTokenMap({})
-  }, [authed])
+    if (!authed) clearAllTokens()
+  }, [authed, clearAllTokens])
 
   useEffect(() => {
     if (authed) cleanupExpiredTokens()
   }, [authed])
 
   // -------------------------------------------------------------------------
-  // checkAccess — verifica si el acceso está vigente (incluyendo gracia)
+  // checkAccess — llamado al montar SpecialAuthGate
   // -------------------------------------------------------------------------
   const checkAccess = useCallback(async (pageKey) => {
-    const entry = tokenMap[pageKey]
+    const entry = tokenMapRef.current[pageKey]
+    console.log('[checkAccess] called at', Date.now(), 'entry:', JSON.stringify(entry))
+    // Sin token: bloquear
     if (!entry) return false
 
     // Token expirado en servidor (2 horas)
     if (Date.now() >= new Date(entry.expiresAt).getTime()) {
-      setTokenMap(prev => { const n = { ...prev }; delete n[pageKey]; return n })
+      delete tokenMapRef.current[pageKey]
+      forceRender(n => n + 1)
       return false
     }
 
-    // Token revocado: verificar si está dentro del período de gracia
+    // Token revocado: verificar período de gracia
     if (entry.revokedAt !== null) {
       const elapsed = Date.now() - entry.revokedAt
+
       if (elapsed > GRACE_PERIOD_MS) {
-        // Pasó el período de gracia → bloquear definitivamente
-        setTokenMap(prev => { const n = { ...prev }; delete n[pageKey]; return n })
+        // Superó el período de gracia → bloquear
+        delete tokenMapRef.current[pageKey]
+        forceRender(n => n + 1)
         return false
       }
-      // Dentro del período de gracia → restaurar token (quitar revokedAt)
-      setTokenMap(prev => ({
-        ...prev,
-        [pageKey]: { ...prev[pageKey], revokedAt: null },
-      }))
+
+
       return true
     }
 
     // Token activo: revalidar contra servidor
     const result = await validateSpecialToken(pageKey, entry.token)
     if (!result.valid) {
-      setTokenMap(prev => { const n = { ...prev }; delete n[pageKey]; return n })
+      delete tokenMapRef.current[pageKey]
+      forceRender(n => n + 1)
       return false
     }
 
     return true
-  }, [tokenMap])
+  }, []) // sin dependencias — lee tokenMapRef.current directamente
 
   // -------------------------------------------------------------------------
-  // verifyAccess — envía contraseña y guarda token
+  // verifyAccess — envía contraseña al servidor
   // -------------------------------------------------------------------------
   const verifyAccess = useCallback(async (pageKey, password) => {
     if (pendingRef.current[pageKey]) {
@@ -109,15 +103,13 @@ export function SpecialAuthProvider({ children }) {
       const result = await verifySpecialAccess(pageKey, password)
 
       if (result.granted) {
-        setTokenMap(prev => ({
-          ...prev,
-          [pageKey]: {
-            token:     result.token,
-            expiresAt: result.expiresAt,
-            grantedAt: Date.now(),
-            revokedAt: null,
-          },
-        }))
+        tokenMapRef.current[pageKey] = {
+          token:     result.token,
+          expiresAt: result.expiresAt,
+          grantedAt: Date.now(),
+          revokedAt: null,
+        }
+        forceRender(n => n + 1)
         return { ok: true, message: 'Acceso concedido.' }
       }
 
@@ -141,32 +133,33 @@ export function SpecialAuthProvider({ children }) {
   }, [])
 
   // -------------------------------------------------------------------------
-  // revokeAccess — marca el token con revokedAt (inicia período de gracia)
+  // revokeAccess — marca revokedAt al salir de la página (desde SpecialAuthGate)
+  // Escribe directo al ref sin forceRender para evitar re-renders que
+  // interfieran con el doble cleanup de React Strict Mode.
   // -------------------------------------------------------------------------
   const revokeAccess = useCallback((pageKey) => {
-    setTokenMap(prev => {
-      // Solo marcar si el token existe y está activo (no ya revocado)
-      if (!prev[pageKey] || prev[pageKey].revokedAt !== null) return prev
-      return {
-        ...prev,
-        [pageKey]: { ...prev[pageKey], revokedAt: Date.now() },
-      }
-    })
+    const entry = tokenMapRef.current[pageKey]
+    console.log('[revokeAccess] called at', Date.now(), 'entry:', JSON.stringify(entry))
+
+    // Solo marcar si hay un token activo (revokedAt === null)
+    if (!entry || entry.revokedAt !== null) return
+    tokenMapRef.current[pageKey] = { ...entry, revokedAt: Date.now() }
+    console.log('[revokeAccess] after set:', JSON.stringify(tokenMapRef.current[pageKey]))
+
   }, [])
 
   // -------------------------------------------------------------------------
-  // hasAccess — helper síncrono para UI
+  // hasAccess — helper síncrono para UI (candado en sidebar)
   // -------------------------------------------------------------------------
   const hasAccess = useCallback((pageKey) => {
-    const entry = tokenMap[pageKey]
+    const entry = tokenMapRef.current[pageKey]
     if (!entry) return false
     if (Date.now() >= new Date(entry.expiresAt).getTime()) return false
-    // Considera "con acceso" si está activo o dentro del período de gracia
     if (entry.revokedAt !== null) {
       return (Date.now() - entry.revokedAt) <= GRACE_PERIOD_MS
     }
     return true
-  }, [tokenMap])
+  }, [])
 
   return (
     <SpecialAuthContext.Provider value={{
