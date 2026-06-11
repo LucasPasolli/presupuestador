@@ -468,33 +468,61 @@ const METODO_LABEL = { efectivo: 'Efectivo', transferencia: 'Transferencia', cc3
 const ES_CC = (m) => m === 'cc30' || m === 'cc15'
 
 function Presupuestos() {
-  const [allRows, setAllRows] = useState([])
+  const [rows, setRows] = useState([])
+  const [total, setTotal] = useState(0)
+  const [loading, setLoading] = useState(false)
   const [modal, setModal] = useState(false)
   const [editRow, setEditRow] = useState(null)
   const [originalEstado, setOriginalEstado] = useState(null)
   const [confirm, setConfirm] = useState(null)
+  const [confirmRow, setConfirmRow] = useState(null)
   const [search, setSearch] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [filtroEstado, setFiltroEstado] = useState('')
   const [page, setPage] = useState(1)
 
-  // El service devuelve nombreCliente + apellidoCliente; construimos clienteNombre localmente.
-  const load = useCallback(async () => {
+  // Usa los filtros del service server-side en lugar de filtrar en el cliente.
+  // Esto corrige el bug principal: obtenerPresupuestos devuelve { data, count },
+  // no un array directo, y los filtros/paginación se delegan al servidor.
+  const load = useCallback(async (currentPage = 1) => {
+    setLoading(true)
     try {
-      const data = await obtenerPresupuestos({ orden: 'desc', limite: 1000 })
-      // Agregar campo clienteNombre para compatibilidad con la tabla
-      setAllRows(data.map(p => ({
+      const offset = (currentPage - 1) * PAGE_SIZE
+      const { data, count } = await obtenerPresupuestos({
+        estado:     filtroEstado || null,
+        fechaDesde: dateFrom    || null,
+        fechaHasta: dateTo      || null,
+        search:     search.trim() || null,
+        sortKey:    'id',
+        orden:      'desc',
+        limite:     PAGE_SIZE,
+        offset,
+      })
+      // Agregar clienteNombre para la tabla
+      setRows(data.map(p => ({
         ...p,
         clienteNombre: [p.nombreCliente, p.apellidoCliente].filter(Boolean).join(' ') || '—',
       })))
+      setTotal(count)
     } catch (e) {
-      console.error(e)
+      console.error('[Presupuestos] load:', e)
+    } finally {
+      setLoading(false)
     }
-  }, [])
+  }, [filtroEstado, dateFrom, dateTo, search])
 
-  useEffect(() => { load() }, [load])
-  useEffect(() => { setPage(1) }, [search, dateFrom, dateTo, filtroEstado])
+  // Recarga al montar y cada vez que cambian los filtros
+  useEffect(() => {
+    setPage(1)
+    load(1)
+  }, [load])
+
+  // Recarga al cambiar de página (sin resetear a 1)
+  useEffect(() => {
+    load(page)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page])
 
   function openEdit(r) {
     setEditRow({ ...r })
@@ -507,17 +535,8 @@ function Presupuestos() {
     const estadoCambia = editRow.estado !== originalEstado
 
     try {
-      // Si es CC y cambia a rechazado → eliminarPresupuesto borra el saldo automáticamente
-      // via eliminarSaldoPorPresupuesto interno. Aquí solo actualizamos metadata.
-      // Nota: si se rechaza un presupuesto CC el saldo se elimina a través de eliminarPresupuesto;
-      // pero en ABMC solo editamos metadata, no eliminamos el presupuesto.
-      // Para replicar el comportamiento original (DELETE FROM Saldo WHERE idPresupuesto=?)
-      // usamos eliminarSaldo desde saldosService. Sin embargo, el service no expone
-      // eliminarSaldoPorPresupuesto en las importaciones del .jsx — lo hacemos vía
-      // actualizarMetadataPresupuesto que ya actualiza estado/metodoPago/esExcepcion,
-      // y eliminamos el saldo por separado.
       if (isCC && estadoCambia && editRow.estado === 'rechazado') {
-        // Importación dinámica para no ensuciar el bloque de imports del módulo
+        // Importación dinámica para no contaminar el scope del módulo
         const { eliminarSaldoPorPresupuesto } = await import('../services/saldosService')
         await eliminarSaldoPorPresupuesto(editRow.idPresupuesto)
       }
@@ -526,34 +545,31 @@ function Presupuestos() {
         metodoPago:  editRow.metodoPago,
         esExcepcion: editRow.esExcepcion,
       })
-      setModal(false); load()
+      setModal(false)
+      load(page)
     } catch (e) {
-      console.error(e)
+      console.error('[Presupuestos] save:', e)
     }
   }
 
   async function del(id) {
     try {
-      // eliminarPresupuesto ya elimina el saldo asociado internamente
+      // eliminarPresupuesto ya borra el saldo asociado internamente
       await eliminarPresupuesto(id)
     } catch (e) {
-      console.error(e)
+      console.error('[Presupuestos] del:', e)
     }
-    setConfirm(null); load()
+    setConfirm(null)
+    setConfirmRow(null)
+    load(page)
   }
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
-    const matchEstado = !filtroEstado || r.estado === filtroEstado
-    const matchFrom = !dateFrom || r.fecha >= dateFrom
-    const matchTo = !dateTo || r.fecha <= dateTo
-    if (!q) return matchEstado && matchFrom && matchTo
-    if (/^\d+$/.test(q)) return String(r.idPresupuesto) === q && matchEstado && matchFrom && matchTo
-    const matchQ = (r.clienteNombre || '').toLowerCase().includes(q)
-    return matchQ && matchEstado && matchFrom && matchTo
-  })
-  const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
-  const confirmRow = allRows.find(r => r.idPresupuesto === confirm)
+  function handleConfirm(r) {
+    setConfirm(r.idPresupuesto)
+    setConfirmRow(r)
+  }
+
+  const paged = rows
 
   const showCCWarning = editRow && ES_CC(editRow.metodoPago)
     && editRow.estado !== originalEstado && editRow.estado !== 'rechazado'
@@ -592,25 +608,32 @@ function Presupuestos() {
 
       <Card>
         <Table headers={['#', 'Fecha', 'Cliente', 'Método', 'Monto', 'Estado', '']}
-          empty={paged.length === 0 ? 'Sin presupuestos' : null}>
-          {paged.map(r => (
-            <Tr key={r.idPresupuesto}>
-              <Td className="text-surface-500 font-mono text-xs">#{r.idPresupuesto}</Td>
-              <Td className="text-surface-400">{r.fecha}</Td>
-              <Td>{r.clienteNombre}</Td>
-              <Td className="text-surface-400">{METODO_LABEL[r.metodoPago] ?? r.metodoPago}</Td>
-              <Td>{fmt(r.monto)}</Td>
-              <Td><Badge color={ESTADO_COLOR[r.estado] ?? 'gray'}>{r.estado.charAt(0).toUpperCase() + r.estado.slice(1)}</Badge></Td>
-              <Td>
-                <div className="flex gap-2 justify-end">
-                  <Button variant="ghost" size="sm" icon={Pencil} onClick={() => openEdit(r)} />
-                  <Button variant="ghost" size="sm" icon={Trash2} className="hover:text-red-400" onClick={() => setConfirm(r.idPresupuesto)} />
-                </div>
-              </Td>
-            </Tr>
-          ))}
+          empty={!loading && paged.length === 0 ? 'Sin presupuestos' : null}>
+          {loading
+            ? (
+              <Tr>
+                <Td colSpan={7} className="text-center text-surface-400 py-6 text-sm">Cargando…</Td>
+              </Tr>
+            )
+            : paged.map(r => (
+              <Tr key={r.idPresupuesto}>
+                <Td className="text-surface-500 font-mono text-xs">#{r.idPresupuesto}</Td>
+                <Td className="text-surface-400">{r.fecha}</Td>
+                <Td>{r.clienteNombre}</Td>
+                <Td className="text-surface-400">{METODO_LABEL[r.metodoPago] ?? r.metodoPago}</Td>
+                <Td>{fmt(r.monto)}</Td>
+                <Td><Badge color={ESTADO_COLOR[r.estado] ?? 'gray'}>{r.estado.charAt(0).toUpperCase() + r.estado.slice(1)}</Badge></Td>
+                <Td>
+                  <div className="flex gap-2 justify-end">
+                    <Button variant="ghost" size="sm" icon={Pencil} onClick={() => openEdit(r)} />
+                    <Button variant="ghost" size="sm" icon={Trash2} className="hover:text-red-400" onClick={() => handleConfirm(r)} />
+                  </div>
+                </Td>
+              </Tr>
+            ))
+          }
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={total} pageSize={PAGE_SIZE} onChange={setPage} />
       </Card>
 
       <Modal open={modal} onClose={() => setModal(false)} title="Editar presupuesto">
@@ -648,7 +671,7 @@ function Presupuestos() {
         )}
       </Modal>
 
-      <ConfirmModal open={!!confirm} onClose={() => setConfirm(null)} onConfirm={() => del(confirm)}
+      <ConfirmModal open={!!confirm} onClose={() => { setConfirm(null); setConfirmRow(null) }} onConfirm={() => del(confirm)}
         details={confirmRow ? [
           ['ID', `#${confirmRow.idPresupuesto}`],
           ['Cliente', confirmRow.clienteNombre],
