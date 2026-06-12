@@ -73,7 +73,7 @@ export default function Login() {
                   type="text"
                   value={username}
                   onChange={(e) => { setUsername(e.target.value); setError('') }}
-                  placeholder="nombre de usuario"
+                  placeholder="Nombre de usuario"
                   autoFocus
                   autoComplete="username"
                   disabled={loading}

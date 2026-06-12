@@ -51,18 +51,18 @@ const SECTIONS = [
     accent:      'from-violet-500 to-violet-600',
   },
   {
-    to:          '/estadisticas',
-    icon:        BarChart2,
-    label:       'Estadísticas',
-    description: 'Ingresos, egresos y métricas clave del negocio.',
-    accent:      'from-yellow-500 to-yellow-600',
-  },
-  {
     to:          '/promociones',
     icon:        Tag,
     label:       'Promociones',
     description: 'Creá y gestioná promociones, descuentos especiales y ofertas activas.',
     accent:      'from-orange-500 to-orange-600',
+  },
+  {
+    to:          '/estadisticas',
+    icon:        BarChart2,
+    label:       'Estadísticas',
+    description: 'Ingresos, egresos y métricas clave del negocio.',
+    accent:      'from-yellow-500 to-yellow-600',
   },
 ]
 

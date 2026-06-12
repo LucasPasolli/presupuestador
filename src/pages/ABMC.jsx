@@ -1828,7 +1828,7 @@ function Categorias() {
           ['Nombre', confirmRow.nombre],
           ['Productos asociados', confirmRow.cantProductos],
         ] : []}
-        message="¿Eliminar esta categoría? Solo es posible si no tiene productos asociados."
+        message="¿Eliminar esta categoría?"
       />
     </div>
   )
