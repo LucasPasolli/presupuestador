@@ -343,6 +343,7 @@ function PromoModal({ open, onClose, onSaved, promoEditar }) {
               className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-white text-sm
                          font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer">
               <option value="porcentaje_producto">% Descuento</option>
+              <option value="precio_fijo">Precio fijo</option>
             </select>
           </div>
           <div>

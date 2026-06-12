@@ -44,18 +44,18 @@ const SECTIONS = [
     accent:      'from-cyan-500 to-cyan-600',
   },
   {
-    to:          '/facturas',
-    icon:        Receipt,
-    label:       'Facturas',
-    description: 'Generá y exportá documentos de factura en PDF por período.',
-    accent:      'from-violet-500 to-violet-600',
-  },
-  {
     to:          '/promociones',
     icon:        Tag,
     label:       'Promociones',
     description: 'Creá y gestioná promociones, descuentos especiales y ofertas activas.',
     accent:      'from-orange-500 to-orange-600',
+  },  
+  {
+    to:          '/facturas',
+    icon:        Receipt,
+    label:       'Facturas',
+    description: 'Generá y exportá documentos de factura en PDF por período.',
+    accent:      'from-violet-500 to-violet-600',
   },
   {
     to:          '/estadisticas',

@@ -101,11 +101,11 @@ export async function generarPDFPresupuesto(idPresupuesto) {
   }
 
   // ── Paleta de grises ─────────────────────────────────────────────────────
-  const GRIS_HEADER    = [200, 200, 200]
+  const GRIS_HEADER    = [235, 235, 235]
   const GRIS_TEXTO     = [50,  50,  50]
   const GRIS_SUAVE     = [100, 100, 100]
-  const GRIS_ALT_ROW   = [245, 245, 245]
-  const GRIS_LINEA     = [220, 220, 220]
+  const GRIS_ALT_ROW   = [250, 250, 250]
+  const GRIS_LINEA     = [235, 235, 235]
   const GRIS_DESCUENTO = [80,  80,  80]
   const GRIS_RECARGO   = [40,  40,  40]
   const GRIS_NOTA      = [130, 130, 130]
