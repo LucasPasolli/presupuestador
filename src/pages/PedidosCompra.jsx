@@ -1126,7 +1126,10 @@ export default function PedidosCompra() {
   const [filterEst,    setFilterEst]    = useState('all')
   const [filterLog,    setFilterLog]    = useState('all')
   const [filterProv,   setFilterProv]   = useState('')
-  const [filterDesde,  setFilterDesde]  = useState('')
+  const [filterDesde,  setFilterDesde]  = useState(() => {
+    const now = new Date()
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+  })
   const [filterHasta,  setFilterHasta]  = useState('')
   const [page,         setPage]         = useState(1)
   const [toast,        setToast]        = useState('')

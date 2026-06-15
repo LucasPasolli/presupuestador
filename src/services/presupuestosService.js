@@ -57,7 +57,7 @@ const CAMPOS_LISTA = `
   apellido_cliente,
   estado,
   es_excepcion,
-  saldo ( estado )
+  saldo ( estado, fecha_vto, fecha_pago )
 `
 
 // Campos completos para la vista detalle de un presupuesto.
@@ -136,11 +136,18 @@ export async function obtenerPresupuestos({
   const { data, error, count } = await q
   if (error) manejarError('obtenerPresupuestos', error)
 
-  // Aplanar el JOIN: saldo[0].estado → saldoEstado al mismo nivel que el presupuesto.
-  const mapped = (data ?? []).map(row => ({
-    ...mapPresupuesto(row),
-    saldoEstado: row.saldo?.[0]?.estado ?? null,
-  }))
+  // Aplanar el JOIN: como saldo tiene UNIQUE constraint sobre id_presupuesto,
+  // PostgREST devuelve el objeto directamente (no como array).
+  // Soportamos ambas formas por compatibilidad: objeto singular o array[0].
+  const mapped = (data ?? []).map(row => {
+    const sal = Array.isArray(row.saldo) ? row.saldo[0] : row.saldo
+    return {
+      ...mapPresupuesto(row),
+      saldoEstado:    sal?.estado     ?? null,
+      saldoFechaVto:  sal?.fecha_vto  ?? null,
+      saldoFechaPago: sal?.fecha_pago ?? null,
+    }
+  })
 
   return { data: mapped, count: count ?? 0 }
 }

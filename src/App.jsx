@@ -72,7 +72,16 @@ export default function App() {
         <Route path="/presupuestador" element={<RequireAuth><Presupuestador /></RequireAuth>} />
         <Route path="/historial"      element={<RequireAuth><Historial /></RequireAuth>} />
         <Route path="/inventario"     element={<RequireAuth><Inventario /></RequireAuth>} />
-        <Route path="/facturas"       element={<RequireAuth><Facturas /></RequireAuth>} />
+        <Route
+          path="/facturas"
+          element={
+            <RequireAuth>
+              <RequireSpecialAuth pageKey="facturas" label="Facturas">
+                <Facturas />
+              </RequireSpecialAuth>
+            </RequireAuth>
+          }
+        />
         <Route path="/pedidos"        element={<RequireAuth><PedidosCompra /></RequireAuth>} />
         <Route path="/saldos"         element={<RequireAuth><Saldos /></RequireAuth>} />
         <Route path="/promociones"    element={<RequireAuth><Promociones /></RequireAuth>} />

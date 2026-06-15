@@ -760,9 +760,27 @@ export default function Historial() {
                         <td className="py-3 px-4"><Badge color={BADGE[e.color]}>{e.label}</Badge></td>
                         <td className="py-3 px-4 text-white font-mono font-medium">{fmt(p.monto)}</td>
                         <td className="py-3 px-4">
-                          {p.saldoEstado === 'pendiente' && <Badge color="yellow">Pendiente</Badge>}
-                          {p.saldoEstado === 'pagado'    && <Badge color="green">Cobrado</Badge>}
-                          {!p.saldoEstado                && <span className="text-surface-600 text-xs">—</span>}
+                          {p.saldoEstado === 'pendiente' && (
+                            <div className="flex flex-col gap-0.5">
+                              <Badge color="yellow">Pendiente</Badge>
+                              {p.saldoFechaVto && (
+                                <span className="text-surface-500 text-[10px] font-mono">
+                                  Vto. {fmtFecha(p.saldoFechaVto)}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          {p.saldoEstado === 'pagado' && (
+                            <div className="flex flex-col gap-0.5">
+                              <Badge color="green">Cobrado</Badge>
+                              {p.saldoFechaPago && (
+                                <span className="text-surface-500 text-[10px] font-mono">
+                                  {fmtFecha(p.saldoFechaPago)}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          {!p.saldoEstado && <span className="text-surface-600 text-xs">—</span>}
                         </td>
                         <td className="py-3 px-4 text-surface-500"><FileText size={15}/></td>
                       </tr>

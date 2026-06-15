@@ -12,7 +12,7 @@
 
 import { supabase } from '../lib/supabase'
 
-export const PROTECTED_PAGES = /** @type {const} */ (['estadisticas', 'abmc'])
+export const PROTECTED_PAGES = /** @type {const} */ (['estadisticas', 'abmc', 'facturas'])
 
 /**
  * Obtiene el user_id de la sesión activa.
@@ -27,7 +27,7 @@ async function getCurrentUserId() {
 /**
  * Verifica la contraseña especial para una página.
  *
- * @param {'estadisticas'|'abmc'} pageKey
+ * @param {'estadisticas'|'abmc'|'facturas'} pageKey
  * @param {string} password
  * @returns {Promise<{
  *   granted: true,  token: string, expiresAt: string, pageKey: string
@@ -80,7 +80,7 @@ export async function verifySpecialAccess(pageKey, password) {
 /**
  * Valida si un token en memoria sigue siendo válido en el servidor.
  *
- * @param {'estadisticas'|'abmc'} pageKey
+ * @param {'estadisticas'|'abmc'|'facturas'} pageKey
  * @param {string} token
  * @returns {Promise<{ valid: boolean, reason?: string }>}
  */

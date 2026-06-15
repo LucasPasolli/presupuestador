@@ -9,7 +9,7 @@ import { useSpecialAuth } from '../../lib/SpecialAuthContext'
 import { useState, useEffect } from 'react'
 
 // Páginas que requieren segunda capa de autorización
-const SPECIAL_AUTH_PAGES = new Set(['/estadisticas', '/abmc'])
+const SPECIAL_AUTH_PAGES = new Set(['/estadisticas', '/abmc', '/facturas'])
 
 const NAV_ITEMS = [
   { to: '/',               icon: LayoutDashboard, label: 'Dashboard'       },
