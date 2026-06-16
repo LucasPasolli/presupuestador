@@ -193,7 +193,7 @@ function Clientes() {
     const apellido       = cap(form.apellido)
     const apodo          = cap(form.apodo)
     const nombreComercio = cap(form.nombreComercio)
-    const domicilio      = form.domicilio.replace(/\b\w/g, c => c.toUpperCase())
+    const domicilio      = (form.domicilio ?? '').replace(/\b\w/g, c => c.toUpperCase())
     try {
       if (editId) {
         await actualizarCliente(editId, { nombre, apellido, apodo, nombreComercio, cuit: form.cuit, domicilio, telefono: form.telefono, mail: form.mail })
