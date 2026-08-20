@@ -11,19 +11,22 @@ function manejarError(operacion, error) {
   throw new Error(error.message)
 }
 
-function mapPedido(row) {
+export function mapPedido(row) {
   if (!row) return null
   return {
-    idPedido:        row.id_pedido,
-    fecha:           row.fecha,
-    monto:           Number(row.monto),
-    estadoPago:      row.estado_pago,
-    estadoLogistico: row.estado_logistico,
-    fechaRecepcion:  row.fecha_recepcion,
-    fechaPago:       row.fecha_pago,
-    metodoPago:      row.metodo_pago,
-    idProveedor:     row.id_proveedor,
-    nombreProveedor: row.nombre_proveedor,
+    idPedido:          row.id_pedido,
+    fecha:             row.fecha,
+    monto:             Number(row.monto),
+    estadoPago:        row.estado_pago,
+    estadoLogistico:   row.estado_logistico,
+    fechaRecepcion:    row.fecha_recepcion,
+    fechaPago:         row.fecha_pago,
+    metodoPago:        row.metodo_pago,
+    idProveedor:       row.id_proveedor,
+    nombreProveedor:   row.nombre_proveedor,
+    // ─── Cuenta Corriente con cuotas ────────────────────────────
+    diasVencimientoCC: row.dias_vencimiento_cc,
+    tieneCuotas:       row.tiene_cuotas,
   }
 }
 
@@ -141,15 +144,21 @@ export async function crearPedido(pedido, detalles) {
   const { data: ped, error: e1 } = await supabase
     .from('pedido_compra')
     .insert({
-      fecha:            pedido.fecha,
-      monto:            pedido.monto           ?? 0,
-      estado_pago:      pedido.estadoPago       ?? 'pendiente',
-      estado_logistico: pedido.estadoLogistico  ?? 'encargado',
-      fecha_recepcion:  pedido.fechaRecepcion   ?? null,
-      fecha_pago:       pedido.fechaPago        ?? null,
-      metodo_pago:      pedido.metodoPago       ?? 'efectivo',
-      id_proveedor:     pedido.idProveedor      ?? null,
-      nombre_proveedor: pedido.nombreProveedor  ?? null,
+      fecha:               pedido.fecha,
+      monto:               pedido.monto           ?? 0,
+      estado_pago:         pedido.estadoPago       ?? 'pendiente',
+      estado_logistico:    pedido.estadoLogistico  ?? 'encargado',
+      fecha_recepcion:     pedido.fechaRecepcion   ?? null,
+      fecha_pago:          pedido.fechaPago        ?? null,
+      metodo_pago:         pedido.metodoPago       ?? 'efectivo',
+      id_proveedor:        pedido.idProveedor      ?? null,
+      nombre_proveedor:    pedido.nombreProveedor  ?? null,
+      // CC simple (sin fraccionar): días de vencimiento único. Los pedidos
+      // con plan de cuotas NO pasan por acá — usan
+      // pedidosCuotasService.crearPedidoConCuotas (RPC atómico), que setea
+      // tiene_cuotas=true del lado del servidor.
+      dias_vencimiento_cc: pedido.diasVencimientoCC ?? null,
+      tiene_cuotas:        false,
     })
     .select()
     .single()
@@ -193,15 +202,19 @@ export async function actualizarPedido(idPedido, pedido, detalles) {
   const { error: e1 } = await supabase
     .from('pedido_compra')
     .update({
-      fecha:            pedido.fecha,
-      monto:            pedido.monto,
-      estado_pago:      pedido.estadoPago,
-      estado_logistico: pedido.estadoLogistico,
-      fecha_recepcion:  pedido.fechaRecepcion  ?? null,
-      fecha_pago:       pedido.fechaPago       ?? null,
-      metodo_pago:      pedido.metodoPago      ?? null,
-      id_proveedor:     pedido.idProveedor     ?? null,
-      nombre_proveedor: pedido.nombreProveedor ?? null,
+      fecha:               pedido.fecha,
+      monto:               pedido.monto,
+      estado_pago:         pedido.estadoPago,
+      estado_logistico:    pedido.estadoLogistico,
+      fecha_recepcion:     pedido.fechaRecepcion  ?? null,
+      fecha_pago:          pedido.fechaPago       ?? null,
+      metodo_pago:         pedido.metodoPago      ?? null,
+      id_proveedor:        pedido.idProveedor     ?? null,
+      nombre_proveedor:    pedido.nombreProveedor ?? null,
+      // NO se toca tiene_cuotas acá: es inmutable una vez creado el pedido.
+      // El plan de cuotas se gestiona cuota por cuota vía
+      // pedidosCuotasService.marcarCuotaPagada, nunca reescribiendo la cabecera.
+      dias_vencimiento_cc: pedido.diasVencimientoCC ?? null,
     })
     .eq('id_pedido', idPedido)
 

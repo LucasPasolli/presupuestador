@@ -6,7 +6,8 @@ import { Card, PageHeader, Button, Badge, Modal, Input } from '../components/ui'
 import {
   Plus, Trash2, Search, CheckCircle2, AlertCircle,
   ArrowLeft, ShoppingCart, Package, Clock, BadgeCheck,
-  Pencil, Truck, RotateCcw, UserPlus, Building2, CalendarCheck
+  Pencil, Truck, RotateCcw, UserPlus, Building2, CalendarCheck,
+  Layers, Landmark, Lock, Printer,
 } from 'lucide-react'
 import {
   obtenerPedidos,
@@ -17,6 +18,18 @@ import {
   marcarPedidoPagado,
   recibirPedido,
 } from '../services/pedidosService'
+import {
+  calcularPlanCuotas,
+  validarPlanCuotas,
+  crearPedidoConCuotas,
+  obtenerCuotasDePedido,
+  obtenerResumenCuotasPorPedidos,
+  marcarCuotaPagada,
+  actualizarPlanCuotas,
+  validarEdicionPlanCuotas,
+} from '../services/pedidosCuotasService'
+import PlanCuotasCC, { CUOTA_EMPTY } from '../components/pedidos/PlanCuotasCC'
+import { generarPDFPedidoCompra } from '../lib/pdfPedidoCompra'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -35,12 +48,26 @@ function today() { return new Date().toISOString().slice(0, 10) }
 // Capitaliza la primera letra de un string (igual que ABMC)
 const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
 
-// Calcula la fecha de vencimiento del echeck: 30 días corridos desde la fecha de emisión
-function fechaVencimientoEcheck(fechaIso) {
+// Suma N días corridos a una fecha ISO (o a hoy si no se pasa) y devuelve dd/mm/yyyy
+function sumarDiasFmt(fechaIso, dias) {
   const base = fechaIso ? new Date(fechaIso + 'T00:00:00') : new Date()
-  base.setDate(base.getDate() + 30)
+  base.setDate(base.getDate() + (parseInt(dias, 10) || 0))
   const [y, m, d] = base.toISOString().slice(0, 10).split('-')
   return `${d}/${m}/${y}`
+}
+
+// Calcula la fecha de vencimiento del echeck: 30 días corridos desde la fecha de emisión
+function fechaVencimientoEcheck(fechaIso) {
+  return sumarDiasFmt(fechaIso, 30)
+}
+
+// Label legible del método de pago. Único punto de verdad para no repetir
+// el mismo condicional en el listado y en el detalle — 'cuenta_corriente'
+// crudo de la DB nunca se muestra tal cual (quedaría "Cuenta_corriente").
+function metodoPagoLabel(pedido) {
+  if (pedido.metodoPago === 'echeck') return 'E-Check (CC30)'
+  if (pedido.metodoPago === 'cuenta_corriente') return pedido.tieneCuotas ? 'CC Cuotas' : 'CC'
+  return pedido.metodoPago ? cap(pedido.metodoPago) : '—'
 }
 
 // Estado visual del pedido (logístico)
@@ -309,7 +336,7 @@ function norm(s) {
 
 // ─── Fila de ítem del pedido ────────────────────────────────────────────────
 
-function ItemRow({ item, index, onUpdate, onRemove }) {
+function ItemRow({ item, index, onUpdate, onRemove, disabled = false }) {
   const [nombreSearch,   setNombreSearch]   = useState(item.nombreProducto || '')
   const [nombreResults,  setNombreResults]  = useState([])
   const [showDrop,       setShowDrop]       = useState(false)
@@ -454,8 +481,10 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
       {/* Cantidad */}
       <td className="py-2 px-2 w-20">
         <input type="text" inputMode="numeric" value={item.cantidad}
-          onChange={e => onUpdate(index, 'cantidad', e.target.value.replace(/\D/g, '') || '1')}
-          className={cell + ' w-full text-center'} />
+          onChange={e => onUpdate(index, 'cantidad', e.target.value.replace(/\D/g, ''))}
+          onBlur={e => { if (!e.target.value) onUpdate(index, 'cantidad', '1') }}
+          disabled={disabled}
+          className={cell + ' w-full text-center disabled:opacity-40 disabled:cursor-not-allowed'} />
       </td>
 
       {/* Nombre con dropdown */}
@@ -463,7 +492,8 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
         <input ref={inputRef} value={nombreSearch}
           onChange={e => buscarPorNombre(e.target.value)}
           placeholder="Nombre del producto..."
-          className={cell + ' w-full'} />
+          disabled={disabled}
+          className={cell + ' w-full disabled:opacity-40 disabled:cursor-not-allowed'} />
         {showDrop && createPortal(
           <div
             ref={dropRef}
@@ -497,7 +527,8 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
         <input type="text" inputMode="numeric" value={item.idProducto || ''}
           onChange={e => handleIdChange(e.target.value)}
           placeholder="ID"
-          className={cell + ' w-full text-center'} />
+          disabled={disabled}
+          className={cell + ' w-full text-center disabled:opacity-40 disabled:cursor-not-allowed'} />
       </td>
 
       {/* Medida */}
@@ -505,8 +536,10 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
         {medidas.length > 0 ? (
           <select value={item.medida || ''}
             onChange={e => onUpdate(index, 'medida', e.target.value)}
+            disabled={disabled}
             className="w-full bg-surface-700 border border-surface-600 rounded-lg px-2 py-1.5
-                       text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer">
+                       text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer
+                       disabled:opacity-40 disabled:cursor-not-allowed">
             <option value="">— medida —</option>
             {medidas.map(m => <option key={m} value={m}>{m}</option>)}
           </select>
@@ -530,7 +563,8 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
             onUpdate(index, 'precioUnitario', parsed === 0 ? '' : parsed)
           }}
           placeholder="0.00"
-          className={cell + ' w-full'}
+          disabled={disabled}
+          className={cell + ' w-full disabled:opacity-40 disabled:cursor-not-allowed'}
         />
       </td>
 
@@ -542,7 +576,9 @@ function ItemRow({ item, index, onUpdate, onRemove }) {
       {/* Borrar */}
       <td className="py-2 px-2 w-10">
         <button onClick={() => onRemove(index)}
-          className="text-surface-500 hover:text-red-400 transition-colors p-1 rounded">
+          disabled={disabled}
+          className="text-surface-500 hover:text-red-400 transition-colors p-1 rounded
+                     disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-surface-500">
           <Trash2 size={15} />
         </button>
       </td>
@@ -559,11 +595,21 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
   const [confirmEstado, setConfirmEstado] = useState(null) // 'recibido'
   const [proveedor,     setProveedor]     = useState(null)
   const [loading,       setLoading]       = useState(false)
+  const [cuotas,        setCuotas]        = useState([])
+  const [confirmCuota,  setConfirmCuota]  = useState(null) // idCuota a confirmar pago
+  const [loadingCuota,  setLoadingCuota]  = useState(false)
+  const [generandoPDF,  setGenerandoPDF]  = useState(false)
+  const [pdfError,      setPdfError]      = useState('')
 
   const reload = useCallback(async () => {
     // Pedido actualizado
     const p = await obtenerPedidoPorId(pedidoInit.idPedido)
     if (p) setPedido(p)
+
+    // Plan de cuotas (sólo si el pedido es CC fraccionada)
+    if (p?.tieneCuotas || pedidoInit.tieneCuotas) {
+      setCuotas(await obtenerCuotasDePedido(pedidoInit.idPedido))
+    }
 
     // Detalles
     const rows = await obtenerDetallesDePedido(pedidoInit.idPedido)
@@ -610,6 +656,33 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
       console.error(err)
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function pagarCuota(idCuota) {
+    setLoadingCuota(true)
+    try {
+      await marcarCuotaPagada(idCuota, today())
+      setConfirmCuota(null)
+      await reload()
+      onUpdated()
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setLoadingCuota(false)
+    }
+  }
+
+  async function descargarHojaRecepcion() {
+    setPdfError('')
+    setGenerandoPDF(true)
+    try {
+      await generarPDFPedidoCompra(pedido.idPedido)
+    } catch (err) {
+      console.error(err)
+      setPdfError('No se pudo generar el PDF. Intentá nuevamente.')
+    } finally {
+      setGenerandoPDF(false)
     }
   }
 
@@ -683,6 +756,14 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
             </p>
           </div>
         )}
+        {pedido.metodoPago === 'cuenta_corriente' && !pedido.tieneCuotas && pedido.diasVencimientoCC != null && (
+          <div className="mt-4 bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3 flex items-start gap-3">
+            <CalendarCheck size={16} className="text-amber-400 mt-0.5 flex-shrink-0" />
+            <p className="text-amber-300 text-sm font-body">
+              <strong>Cuenta Corriente:</strong> Vence el <strong>{sumarDiasFmt(pedido.fecha, pedido.diasVencimientoCC)}</strong>.
+            </p>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
           <div className="bg-surface-700 rounded-xl p-4">
@@ -703,8 +784,8 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
           )}
           <div className="bg-surface-700 rounded-xl p-4">
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Método de pago</p>
-            <p className="text-white text-sm font-body capitalize">
-              {pedido.metodoPago === 'echeck' ? 'E-Check (CC30)' : (pedido.metodoPago || '—')}
+            <p className="text-white text-sm font-body">
+              {metodoPagoLabel(pedido)}
             </p>
           </div>
           {proveedor && (
@@ -719,7 +800,7 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
           </div>
         </div>
         {/* Acciones de estado */}
-        {(estadoLog === 'encargado' || esPendientePago) && (
+        {(estadoLog === 'encargado' || (esPendientePago && !pedido.tieneCuotas)) && (
           <div className="mt-6 pt-5 border-t border-surface-700">
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-3">Cambiar estado</p>
             <div className="flex flex-wrap gap-2">
@@ -729,7 +810,7 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
                   Marcar Recibido
                 </Button>
               )}
-              {esPendientePago && (
+              {esPendientePago && !pedido.tieneCuotas && (
                 <Button size="sm" icon={BadgeCheck} onClick={() => setConfirmPagar(true)}
                   className="bg-emerald-600 hover:bg-emerald-500 border-emerald-500 text-white">
                   Marcar Pagado
@@ -738,14 +819,87 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
             </div>
           </div>
         )}
+        {/* CC con cuotas: el pago único no aplica — se paga cuota por cuota más abajo */}
+        {esPendientePago && pedido.tieneCuotas && (
+          <div className="mt-6 pt-5 border-t border-surface-700">
+            <p className="text-surface-500 text-xs font-body flex items-center gap-2">
+              <Layers size={13} className="text-brand-400 flex-shrink-0" />
+              Este pedido se paga por cuotas — confirmá cada pago individualmente en el plan de cuotas de abajo.
+            </p>
+          </div>
+        )}
       </Card>
+
+      {/* Plan de cuotas (CC fraccionada) */}
+      {pedido.tieneCuotas && (
+        <Card className="overflow-hidden">
+          <div className="px-6 py-4 border-b border-surface-700 flex items-center justify-between">
+            <h3 className="flex items-center gap-2 font-body font-semibold text-white text-sm">
+              <Layers size={14} className="text-brand-400" /> Plan de cuotas
+            </h3>
+            <span className="text-surface-400 text-xs font-mono">
+              {cuotas.filter(c => c.estado === 'pagada').length} / {cuotas.length} pagadas
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm font-body">
+              <thead>
+                <tr className="border-b border-surface-700">
+                  {['Cuota', '%', 'Vencimiento', 'Monto', 'Estado', ''].map(h => (
+                    <th key={h} className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {cuotas.map(c => (
+                  <tr key={c.idCuota} className="border-b border-surface-700/50">
+                    <td className="py-3 px-4 text-white font-mono text-sm">#{c.numeroCuota}</td>
+                    <td className="py-3 px-4 text-surface-300 font-mono text-xs">{c.porcentaje}%</td>
+                    <td className="py-3 px-4 text-surface-300 font-mono text-xs">{fmtFecha(c.fechaVencimiento)}</td>
+                    <td className="py-3 px-4 text-surface-200 font-mono font-medium">{fmt(c.monto)}</td>
+                    <td className="py-3 px-4">
+                      {c.estado === 'pagada'
+                        ? <Badge color="green"><CheckCircle2 size={11} className="inline mr-1" />Pagada{c.fechaPago ? ` · ${fmtFecha(c.fechaPago)}` : ''}</Badge>
+                        : <Badge color="yellow"><Clock size={11} className="inline mr-1" />Pendiente</Badge>}
+                    </td>
+                    <td className="py-3 px-4">
+                      {c.estado !== 'pagada' && (
+                        <Button size="sm" variant="secondary" icon={BadgeCheck} onClick={() => setConfirmCuota(c.idCuota)}>
+                          Pagar
+                        </Button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       {/* Tabla de ítems */}
       <Card className="overflow-hidden">
-        <div className="px-6 py-4 border-b border-surface-700 flex items-center justify-between">
-          <h3 className="font-body font-semibold text-white text-sm">Productos</h3>
-          <span className="text-surface-400 text-xs font-mono">{detalles.length} ítem{detalles.length !== 1 ? 's' : ''}</span>
+        <div className="px-6 py-4 border-b border-surface-700 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <h3 className="font-body font-semibold text-white text-sm">Productos</h3>
+            <span className="text-surface-400 text-xs font-mono">{detalles.length} ítem{detalles.length !== 1 ? 's' : ''}</span>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={Printer}
+            disabled={generandoPDF || detalles.length === 0}
+            onClick={descargarHojaRecepcion}
+          >
+            {generandoPDF ? 'Generando…' : 'Hoja de recepción (PDF)'}
+          </Button>
         </div>
+        {pdfError && (
+          <div className="mx-6 mt-4 flex items-center gap-2 text-red-400 text-sm bg-red-500/10 border border-red-500/20
+                          rounded-xl px-4 py-2.5 font-body">
+            <AlertCircle size={15} className="flex-shrink-0" />{pdfError}
+          </div>
+        )}
         <div className="overflow-x-auto">
           <table className="w-full text-sm font-body">
             <thead>
@@ -782,10 +936,24 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
       {/* Total */}
       <Card className="p-6">
         <div className="flex justify-end">
-          <div className="space-y-2 text-sm font-body">
+          <div className="space-y-2 text-sm font-body text-right">
+            {pedido.tieneCuotas && (
+              <div className="flex justify-between gap-16 text-surface-400">
+                <span>Pagado hasta ahora:</span>
+                <span className="font-mono text-emerald-400">
+                  {fmt(cuotas.reduce((a, c) => a + (c.estado === 'pagada' ? c.monto : 0), 0))}
+                </span>
+              </div>
+            )}
             <div className="border-t border-surface-700 pt-2 flex justify-between gap-16">
-              <span className="text-white font-semibold">Total del pedido:</span>
-              <span className="text-brand-400 font-mono font-bold text-lg">{fmt(pedido.monto)}</span>
+              <span className="text-white font-semibold">
+                {pedido.tieneCuotas ? 'Saldo pendiente:' : 'Total del pedido:'}
+              </span>
+              <span className="text-brand-400 font-mono font-bold text-lg">
+                {fmt(pedido.tieneCuotas
+                  ? cuotas.reduce((a, c) => a + (c.estado !== 'pagada' ? c.monto : 0), 0)
+                  : pedido.monto)}
+              </span>
             </div>
           </div>
         </div>
@@ -840,6 +1008,31 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
           </Button>
         </div>
       </Modal>
+
+      {/* Modal confirmar pago de cuota individual */}
+      <Modal open={!!confirmCuota} onClose={() => setConfirmCuota(null)} title="Confirmar pago de cuota" width="max-w-sm">
+        {(() => {
+          const c = cuotas.find(c => c.idCuota === confirmCuota)
+          if (!c) return null
+          return (
+            <>
+              <p className="text-surface-300 text-sm font-body mb-2">
+                ¿Marcar la <span className="text-white font-mono">cuota #{c.numeroCuota}</span> como pagada?
+              </p>
+              <p className="text-surface-500 text-xs font-body mb-6">
+                Se registrará el pago de <span className="text-brand-400 font-mono">{fmt(c.monto)}</span>.
+                Si es la última cuota pendiente, el pedido completo pasará a estado "Pagado".
+              </p>
+              <div className="flex gap-2">
+                <Button variant="secondary" className="flex-1" onClick={() => setConfirmCuota(null)}>Cancelar</Button>
+                <Button className="flex-1" icon={BadgeCheck} onClick={() => pagarCuota(c.idCuota)} disabled={loadingCuota}>
+                  {loadingCuota ? 'Guardando...' : 'Confirmar pago'}
+                </Button>
+              </div>
+            </>
+          )
+        })()}
+      </Modal>
     </div>
   )
 }
@@ -849,10 +1042,14 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
 const ITEM_EMPTY = () => ({ idProducto: '', nombreProducto: '', cantidad: 1, precioUnitario: '', medida: null })
 
 const METODOS_PAGO = [
-  { value: 'efectivo',      label: 'Efectivo' },
-  { value: 'transferencia', label: 'Transferencia' },
-  { value: 'echeck',        label: 'E-Check (CC30)' },
+  { value: 'efectivo',         label: 'Efectivo' },
+  { value: 'transferencia',    label: 'Transferencia' },
+  { value: 'echeck',           label: 'E-Check (CC30)' },
+  { value: 'cuenta_corriente', label: 'Cuenta Corriente' },
 ]
+
+// Cuenta Corriente simple (sin fraccionar): días de vencimiento por defecto
+const DIAS_CC_DEFAULT = 30
 
 function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
   const esEdicion = !!pedidoEditando
@@ -865,6 +1062,34 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
   const [saving,     setSaving]     = useState(false)
   const savingRef                   = useRef(false)   // guardia síncrona contra doble-click
   const [loadingInit, setLoadingInit] = useState(esEdicion)
+
+  // ── Cuenta Corriente: fraccionamiento en cuotas ──────────────────────────
+  // conFraccion=false  → CC simple, pago único a `diasVencimientoCC` días.
+  // conFraccion=true   → se arma un plan de N cuotas (PlanCuotasCC).
+  //
+  // La MODALIDAD (pago único ⇄ cuotas) es inmutable una vez creado el
+  // pedido: no se puede convertir un CC simple en CC fraccionada ni
+  // viceversa (cambia la forma en que se registra el pago). Lo que SÍ se
+  // puede editar es el PLAN dentro de una modalidad de cuotas ya elegida:
+  // las cuotas 'pendiente' son reformulables (%, días, agregar/quitar); las
+  // 'pagada' son inmutables porque representan dinero ya entregado — ver
+  // cuotasPagadas / hayCuotaPagada más abajo y actualizarPlanCuotas() en
+  // guardar().
+  const [conFraccion,       setConFraccion]       = useState(
+    esEdicion ? !!pedidoEditando.tieneCuotas : false
+  )
+  const [diasVencimientoCC, setDiasVencimientoCC] = useState(
+    esEdicion ? (pedidoEditando.diasVencimientoCC ?? DIAS_CC_DEFAULT) : DIAS_CC_DEFAULT
+  )
+  const [cuotas,        setCuotas]        = useState([CUOTA_EMPTY(), CUOTA_EMPTY()]) // borrador de PENDIENTES
+  const [cuotasPagadas, setCuotasPagadas] = useState([])                             // bloqueadas, sólo lectura
+
+  // Si ya hay al menos una cuota pagada, el monto total del pedido (y por
+  // ende los ítems) se congela: permitir cambiarlo rompería la aritmética
+  // entre la plata que ya entró y lo que el nuevo total diría que debería
+  // haber entrado. Si ninguna cuota fue pagada aún, el total sigue
+  // editable libremente, igual que antes.
+  const hayCuotaPagada = esEdicion && cuotasPagadas.length > 0
 
   // En edición: cargar detalles y proveedor desde el service
   useEffect(() => {
@@ -897,6 +1122,16 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
             })
           }
         }
+        // Plan de cuotas: separar pagadas (bloqueadas, sólo lectura) de
+        // pendientes (borrador editable que se manda a actualizarPlanCuotas).
+        if (pedidoEditando.tieneCuotas) {
+          const todas = await obtenerCuotasDePedido(pedidoEditando.idPedido)
+          setCuotasPagadas(todas.filter(c => c.estado === 'pagada'))
+          const pendientes = todas.filter(c => c.estado !== 'pagada')
+          setCuotas(pendientes.length
+            ? pendientes.map(c => ({ porcentaje: String(c.porcentaje), diasVencimiento: String(c.diasVencimiento) }))
+            : [CUOTA_EMPTY()])
+        }
       } finally {
         setLoadingInit(false)
       }
@@ -904,8 +1139,14 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
     init()
   }, [esEdicion])
 
-  const total = items.reduce((acc, it) =>
+  const totalItems = items.reduce((acc, it) =>
     acc + (parseInt(it.cantidad) || 0) * (parseFloat(String(it.precioUnitario).replace(',', '.')) || 0), 0)
+
+  // Si ya hay plata cobrada (hayCuotaPagada), los ítems están deshabilitados
+  // en la UI y el total NO se recalcula desde ahí — se usa el monto real
+  // del pedido, que es la base contra la que el RPC recalcula las cuotas
+  // pendientes.
+  const total = hayCuotaPagada ? pedidoEditando.monto : totalItems
 
   const dia30 = fechaVencimientoEcheck()
 
@@ -926,6 +1167,21 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
       if (!proveedor) { setError('Seleccioná un proveedor antes de guardar el pedido.'); return }
       const validItems = items.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
       if (!validItems.length) { setError('Agregá al menos un producto con ID válido.'); return }
+
+      // Validación del plan de cuotas: en creación, el borrador completo
+      // debe sumar 100%; en edición, sólo las PENDIENTES son editables y
+      // deben sumar 100% menos lo ya bloqueado por cuotas pagadas.
+      const esCCFraccionada = metodoPago === 'cuenta_corriente' && conFraccion
+      if (esCCFraccionada) {
+        const cuotasErr = esEdicion
+          ? validarEdicionPlanCuotas(cuotasPagadas, cuotas)
+          : validarPlanCuotas(cuotas)
+        if (cuotasErr) { setError(cuotasErr); return }
+      }
+      if (metodoPago === 'cuenta_corriente' && !conFraccion && (diasVencimientoCC === '' || Number(diasVencimientoCC) < 0)) {
+        setError('Ingresá los días de vencimiento de la Cuenta Corriente.')
+        return
+      }
 
       // Validaciones previas: precio, existencia, medida
       for (const it of validItems) {
@@ -951,31 +1207,62 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
       }))
 
       if (esEdicion) {
-        // Actualizar — preserva estado logístico y de pago actuales
+        // Actualizar — preserva estado logístico y de pago actuales.
+        // Si el pedido tiene plan de cuotas, `monto` ya viene congelado en
+        // `total` cuando hayCuotaPagada (ver cálculo de `total` más arriba).
         const pedidoPayload = {
-          fecha:           pedidoEditando.fecha,
-          monto:           total,
-          estadoPago:      pedidoEditando.estadoPago,
-          estadoLogistico: pedidoEditando.estadoLogistico,
-          fechaRecepcion:  pedidoEditando.fechaRecepcion ?? null,
-          fechaPago:       pedidoEditando.fechaPago      ?? null,
-          metodoPago:      metodoPago,
-          idProveedor:     proveedor?.idProveedor ?? null,
-          nombreProveedor: proveedor?.nombreComercial || proveedor?.nombreFiscal || null,
+          fecha:              pedidoEditando.fecha,
+          monto:              total,
+          estadoPago:         pedidoEditando.estadoPago,
+          estadoLogistico:    pedidoEditando.estadoLogistico,
+          fechaRecepcion:     pedidoEditando.fechaRecepcion ?? null,
+          fechaPago:          pedidoEditando.fechaPago      ?? null,
+          metodoPago:         metodoPago,
+          idProveedor:        proveedor?.idProveedor ?? null,
+          nombreProveedor:    proveedor?.nombreComercial || proveedor?.nombreFiscal || null,
+          diasVencimientoCC:  metodoPago === 'cuenta_corriente' && !pedidoEditando.tieneCuotas
+                                 ? (parseInt(diasVencimientoCC, 10) || null)
+                                 : pedidoEditando.diasVencimientoCC ?? null,
         }
         await actualizarPedido(pedidoEditando.idPedido, pedidoPayload, detallesPayload)
+
+        // Plan de cuotas: se edita en un paso aparte vía el RPC atómico
+        // editar_plan_cuotas_pedido, que revalida Σ% == 100% del lado del
+        // servidor y protege las cuotas ya pagadas sin importar lo que
+        // haya validado (o no) el cliente. Es idempotente — si falla acá,
+        // la cabecera ya quedó guardada y se puede reintentar sólo esta
+        // parte sin duplicar nada.
+        if (pedidoEditando.tieneCuotas) {
+          await actualizarPlanCuotas(pedidoEditando.idPedido, cuotas)
+        }
+
         onGuardado(pedidoEditando.idPedido)
       } else {
         const pedidoPayload = {
-          fecha:           today(),
-          monto:           total,
-          estadoPago:      'pendiente',
-          estadoLogistico: 'encargado',
-          metodoPago:      metodoPago,
-          idProveedor:     proveedor?.idProveedor ?? null,
-          nombreProveedor: proveedor?.nombreComercial || proveedor?.nombreFiscal || null,
+          fecha:              today(),
+          monto:              total,
+          estadoPago:         'pendiente',
+          estadoLogistico:    'encargado',
+          metodoPago:         metodoPago,
+          idProveedor:        proveedor?.idProveedor ?? null,
+          nombreProveedor:    proveedor?.nombreComercial || proveedor?.nombreFiscal || null,
+          diasVencimientoCC:  metodoPago === 'cuenta_corriente' && !esCCFraccionada
+                                 ? (parseInt(diasVencimientoCC, 10) || null)
+                                 : null,
         }
-        const creado = await crearPedido(pedidoPayload, detallesPayload)
+
+        let creado
+        if (esCCFraccionada) {
+          // Plan de N cuotas → creación atómica vía RPC (pedido + detalle + cuotas)
+          const planCuotas = calcularPlanCuotas(
+            total,
+            cuotas.map(c => ({ porcentaje: Number(c.porcentaje), diasVencimiento: Number(c.diasVencimiento) }))
+          )
+          creado = await crearPedidoConCuotas(pedidoPayload, detallesPayload, planCuotas)
+        } else {
+          // Resto de métodos (incluida CC simple) → flujo existente, sin cambios
+          creado = await crearPedido(pedidoPayload, detallesPayload)
+        }
         onGuardado(creado.idPedido)
       }
     } catch (err) {
@@ -1047,6 +1334,88 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
               </p>
             </div>
           )}
+
+          {metodoPago === 'cuenta_corriente' && (
+            <div className="mt-4 space-y-4">
+              <div>
+                <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-2">Modalidad</p>
+                <div className="inline-flex bg-surface-900/50 border border-surface-600 rounded-xl p-1 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setConFraccion(false)}
+                    disabled={esEdicion}
+                    aria-pressed={!conFraccion}
+                    className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-body font-medium
+                               transition-all disabled:cursor-not-allowed
+                               ${!conFraccion
+                                 ? 'bg-brand-600 text-white shadow-md shadow-brand-900/40'
+                                 : 'text-surface-400 hover:text-surface-200 disabled:hover:text-surface-400'}`}>
+                    <Landmark size={14} /> Pago único
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConFraccion(true)}
+                    disabled={esEdicion}
+                    aria-pressed={conFraccion}
+                    className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-body font-medium
+                               transition-all disabled:cursor-not-allowed
+                               ${conFraccion
+                                 ? 'bg-brand-600 text-white shadow-md shadow-brand-900/40'
+                                 : 'text-surface-400 hover:text-surface-200 disabled:hover:text-surface-400'}`}>
+                    <Layers size={14} /> Con fracción / Cuotas
+                  </button>
+                </div>
+              </div>
+              {esEdicion && (
+                <p className="text-surface-500 text-xs font-body">
+                  La modalidad (pago único / cuotas) no puede cambiarse una vez creado el pedido.
+                  {pedidoEditando.tieneCuotas && ' Podés editar el % y los días de las cuotas pendientes; las ya pagadas quedan bloqueadas.'}
+                </p>
+              )}
+
+              {hayCuotaPagada && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3 flex items-start gap-3">
+                  <Lock size={16} className="text-amber-400 mt-0.5 flex-shrink-0" />
+                  <p className="text-amber-300 text-sm font-body">
+                    Este pedido ya tiene cuotas pagadas: el monto total y los ítems quedan
+                    congelados para no alterar dinero ya entregado. Sólo se puede ajustar
+                    el plan de las cuotas pendientes.
+                  </p>
+                </div>
+              )}
+
+              {!conFraccion ? (
+                <div className="max-w-xs">
+                  <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1">
+                    Días de vencimiento
+                  </label>
+                  <div className="relative">
+                    <Landmark size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-500 pointer-events-none" />
+                    <input
+                      type="text" inputMode="numeric"
+                      value={diasVencimientoCC}
+                      onChange={e => setDiasVencimientoCC(e.target.value.replace(/\D/g, ''))}
+                      disabled={esEdicion}
+                      placeholder="30"
+                      className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2.5 text-white
+                                 text-sm font-mono focus:outline-none focus:border-brand-500 transition-all disabled:opacity-40"
+                    />
+                  </div>
+                  <p className="text-surface-500 text-xs font-body mt-1">
+                    Vence el {sumarDiasFmt(esEdicion ? pedidoEditando.fecha : today(), diasVencimientoCC)}
+                    {' '}({diasVencimientoCC || 0} días desde la fecha del pedido).
+                  </p>
+                </div>
+              ) : (
+                <PlanCuotasCC
+                  total={total}
+                  cuotas={cuotas}
+                  onChange={setCuotas}
+                  bloqueadas={cuotasPagadas}
+                />
+              )}
+            </div>
+          )}
         </div>
       </Card>
 
@@ -1054,7 +1423,7 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
       <Card className="overflow-visible">
         <div className="px-6 py-4 border-b border-surface-700 flex items-center justify-between">
           <h2 className="font-body font-semibold text-white text-sm">Productos</h2>
-          <Button size="sm" icon={Plus} onClick={addItem}>Agregar ítem</Button>
+          <Button size="sm" icon={Plus} onClick={addItem} disabled={hayCuotaPagada}>Agregar ítem</Button>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -1067,7 +1436,7 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
             </thead>
             <tbody>
               {items.map((item, idx) => (
-                <ItemRow key={idx} item={item} index={idx} onUpdate={updateItem} onRemove={removeItem} />
+                <ItemRow key={idx} item={item} index={idx} onUpdate={updateItem} onRemove={removeItem} disabled={hayCuotaPagada} />
               ))}
             </tbody>
           </table>
@@ -1076,7 +1445,9 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
           <div className="px-4 py-3 border-t border-surface-700/50">
             <button
               onClick={addItem}
-              className="flex items-center gap-2 text-brand-400 hover:text-brand-300 text-sm font-body transition-colors">
+              disabled={hayCuotaPagada}
+              className="flex items-center gap-2 text-brand-400 hover:text-brand-300 text-sm font-body transition-colors
+                         disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-brand-400">
               <Plus size={15} />
               Agregar ítem
             </button>
@@ -1121,15 +1492,13 @@ const PAGE_SIZE = 20
 
 export default function PedidosCompra() {
   const [pedidos,      setPedidos]      = useState([])
+  const [cuotasResumen, setCuotasResumen] = useState({}) // { [idPedido]: { cuotasPendientes, montoPendiente, ... } }
   const [vista,        setVista]        = useState('lista') // 'lista' | 'nuevo' | 'detalle' | 'editar'
   const [selected,     setSelected]     = useState(null)
   const [filterEst,    setFilterEst]    = useState('all')
   const [filterLog,    setFilterLog]    = useState('all')
   const [filterProv,   setFilterProv]   = useState('')
-  const [filterDesde,  setFilterDesde]  = useState(() => {
-    const now = new Date()
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
-  })
+  const [filterDesde,  setFilterDesde]  = useState('')
   const [filterHasta,  setFilterHasta]  = useState('')
   const [page,         setPage]         = useState(1)
   const [toast,        setToast]        = useState('')
@@ -1144,12 +1513,34 @@ export default function PedidosCompra() {
     })
     setPedidos(data)
     setPage(1)
+
+    // Resumen de cuotas para los pedidos CC fraccionada del listado actual —
+    // 1 sola query batched (in()), no una por pedido.
+    const idsConCuotas = data.filter(p => p.tieneCuotas).map(p => p.idPedido)
+    setCuotasResumen(await obtenerResumenCuotasPorPedidos(idsConCuotas))
   }, [filterEst, filterLog, filterDesde, filterHasta])
 
   useEffect(() => { load() }, [load])
 
-  const totalPendiente = pedidos.filter(p => p.estadoPago === 'pendiente').reduce((a, p) => a + p.monto, 0)
-  const totalPagado    = pedidos.filter(p => p.estadoPago === 'pagado').reduce((a, p) => a + p.monto, 0)
+  // Deuda pendiente real: para pedidos CC fraccionada, sólo lo que falta
+  // cobrar (sum de cuotas no pagadas) — no el monto total del pedido, que
+  // no se mueve aunque ya se haya pagado una cuota. Para el resto de los
+  // métodos, sigue siendo todo-o-nada según estadoPago (como antes).
+  const totalPendiente = pedidos.reduce((acc, p) => {
+    if (p.tieneCuotas) {
+      const r = cuotasResumen[p.idPedido]
+      return acc + (r ? r.montoPendiente : p.monto) // fallback mientras carga el resumen
+    }
+    return p.estadoPago === 'pendiente' ? acc + p.monto : acc
+  }, 0)
+
+  const totalPagado = pedidos.reduce((acc, p) => {
+    if (p.tieneCuotas) {
+      const r = cuotasResumen[p.idPedido]
+      return acc + (r ? r.montoPagado : 0)
+    }
+    return p.estadoPago === 'pagado' ? acc + p.monto : acc
+  }, 0)
 
   // Filtro de proveedor/ID se hace en cliente (no pasa al service) igual que antes
   const filteredPedidos = filterProv.trim()
@@ -1318,8 +1709,8 @@ export default function PedidosCompra() {
                       )}
                     </td>
                     <td className="py-3 px-4 text-white font-mono font-medium">{fmt(p.monto)}</td>
-                    <td className="py-3 px-4 text-surface-300 text-xs font-body capitalize">
-                      {p.metodoPago === 'echeck' ? 'E-Check' : (p.metodoPago || '—')}
+                    <td className="py-3 px-4 text-surface-300 text-xs font-body">
+                      {metodoPagoLabel(p)}
                     </td>
                     <td className="py-3 px-4">
                       <Badge color={cfg.color}>
@@ -1327,10 +1718,30 @@ export default function PedidosCompra() {
                       </Badge>
                     </td>
                     <td className="py-3 px-4">
-                      {p.estadoPago === 'pendiente'
-                        ? <Badge color="yellow"><Clock size={11} className="inline mr-1" />Pendiente</Badge>
-                        : <Badge color="green"><CheckCircle2 size={11} className="inline mr-1" />Pagado</Badge>
-                      }
+                      {p.tieneCuotas ? (
+                        (() => {
+                          const r = cuotasResumen[p.idPedido]
+                          if (!r) {
+                            // Resumen todavía cargando: usar estadoPago como fallback
+                            // seguro (nunca mostrar "Pagado" a ciegas mientras se resuelve).
+                            return p.estadoPago === 'pagado'
+                              ? <Badge color="green"><CheckCircle2 size={11} className="inline mr-1" />Pagado</Badge>
+                              : <Badge color="yellow"><Clock size={11} className="inline mr-1" />Pendiente</Badge>
+                          }
+                          return r.cuotasPendientes > 0 ? (
+                            <Badge color="blue">
+                              <Layers size={11} className="inline mr-1" />
+                              {r.cuotasPendientes} cuota{r.cuotasPendientes !== 1 ? 's' : ''} pendiente{r.cuotasPendientes !== 1 ? 's' : ''}
+                            </Badge>
+                          ) : (
+                            <Badge color="green"><CheckCircle2 size={11} className="inline mr-1" />Pagado</Badge>
+                          )
+                        })()
+                      ) : (
+                        p.estadoPago === 'pendiente'
+                          ? <Badge color="yellow"><Clock size={11} className="inline mr-1" />Pendiente</Badge>
+                          : <Badge color="green"><CheckCircle2 size={11} className="inline mr-1" />Pagado</Badge>
+                      )}
                     </td>
                     <td className="py-3 px-4 text-surface-500"><ShoppingCart size={15} /></td>
                   </tr>

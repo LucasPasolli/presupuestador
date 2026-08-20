@@ -350,21 +350,57 @@ async function _obtenerEgresosExtra(desde, hasta) {
 }
 
 /**
- * Bloque 9c: Pedidos pendientes de pago del período — deuda con proveedores.
+ * Bloque 9c: Pedidos pendientes de pago del período — deuda real con proveedores.
+ *
+ * Para pedidos "todo o nada" (efectivo/transferencia/echeck/CC simple),
+ * la deuda es el monto completo mientras estado_pago sea 'pendiente'
+ * (sin cambios respecto al comportamiento original).
+ *
+ * Para pedidos CC con plan de cuotas (tiene_cuotas = true), un pago parcial
+ * de una cuota NO cierra el pedido (sigue en estado_pago='pendiente' hasta
+ * que se paga la última cuota — ver marcar_cuota_pagada() en la DB), así
+ * que sumar pedido.monto sobreestimaría la deuda real. En su lugar, se
+ * suman únicamente las cuotas de pedido_compra_cuota con estado <> 'pagada'.
+ *
  * Equivale a:
  *   SELECT COALESCE(SUM(monto),0) FROM PedidoCompra
- *   WHERE fecha BETWEEN ? AND ? AND estadoPago = 'pendiente'
+ *   WHERE fecha BETWEEN ? AND ? AND estadoPago = 'pendiente' AND NOT tieneCuotas
+ *   +
+ *   SELECT COALESCE(SUM(c.monto),0) FROM PedidoCompraCuota c
+ *   JOIN PedidoCompra p ON p.idPedido = c.idPedido
+ *   WHERE p.fecha BETWEEN ? AND ? AND p.estadoPago = 'pendiente'
+ *     AND p.tieneCuotas AND c.estado <> 'pagada'
  */
 async function _obtenerPedidosPendientesMonto(desde, hasta) {
   const { data, error } = await supabase
     .from('pedido_compra')
-    .select('monto')
+    .select('id_pedido, monto, tiene_cuotas')
     .gte('fecha', desde)
     .lte('fecha', hasta)
     .eq('estado_pago', 'pendiente')
 
   if (error) manejarError('_obtenerPedidosPendientesMonto', error)
-  return data.reduce((a, r) => a + Number(r.monto), 0)
+
+  const sinCuotas = data.filter(r => !r.tiene_cuotas)
+  const conCuotas  = data.filter(r => r.tiene_cuotas)
+
+  // Pedidos sin plan de cuotas: deuda = monto completo (igual que antes)
+  let total = sinCuotas.reduce((a, r) => a + Number(r.monto), 0)
+
+  // Pedidos CC fraccionada: deuda = sólo lo que falta cobrar de cada plan
+  if (conCuotas.length) {
+    const ids = conCuotas.map(r => r.id_pedido)
+    const { data: cuotasPendientes, error: e2 } = await supabase
+      .from('pedido_compra_cuota')
+      .select('monto')
+      .in('id_pedido', ids)
+      .neq('estado', 'pagada')
+
+    if (e2) manejarError('_obtenerPedidosPendientesMonto(cuotas)', e2)
+    total += cuotasPendientes.reduce((a, c) => a + Number(c.monto), 0)
+  }
+
+  return total
 }
 
 /**
