@@ -1,5 +1,11 @@
 // src/services/saldosService.js
 // Todas las operaciones de Saldo pasan por aquí.
+//
+// CORRECCIÓN #8: soporte de Pago Parcial.
+//   `monto`           → deuda ORIGINAL del saldo, inmutable.
+//   `monto_pendiente` → remanente real, se reduce con cada imputación
+//                       (ver pagosService.js / fn_aplicar_pago_cliente).
+//   `estado`          → 'pendiente' | 'parcial' | 'pagado'.
 
 import { supabase } from '../lib/supabase'
 import { actualizarEstadoPresupuesto } from './presupuestosService'
@@ -21,6 +27,10 @@ function mapSaldo(row) {
     // CORRECCIÓN #1: expuesto como fechaVto (consistente con el nombre del campo)
     fechaVto:         row.fecha_vto,
     monto:            Number(row.monto),
+    // CORRECCIÓN #8: monto realmente adeudado hoy. Si la fila todavía no tiene
+    // la columna migrada (entornos viejos), cae de vuelta a `monto` para que
+    // el resto de la UI no explote mientras se aplica la migración.
+    montoPendiente:   row.monto_pendiente != null ? Number(row.monto_pendiente) : Number(row.monto),
     estado:           row.estado,
     fechaPago:        row.fecha_pago,
     // CORRECCIÓN #2: alineado con los nombres que usa Saldos.jsx en la tabla
@@ -42,18 +52,18 @@ function mapSaldo(row) {
  * Devuelve saldos con datos del cliente y presupuesto asociado.
  *
  * Parámetros de filtro/orden:
- *   estado     – 'pendiente' | 'pagado' | null (todos)
+ *   estado     – 'pendiente' | 'parcial' | 'pagado' | null (todos)
  *   idCliente  – filtra por cliente exacto
  *   fechaDesde / fechaHasta – rango por fecha_inicio
- *   vencidos   – true → solo pendientes con fechaVto < hoy
- *   orden      – 'asc' | 'desc' sobre fecha_vto (pendientes) o id_saldo (pagados)
+ *   vencidos   – true → solo con deuda activa y fechaVto < hoy
+ *   orden      – 'asc' | 'desc' sobre fecha_vto (con deuda) o id_saldo (pagados)
  *   limite     – máximo de filas devueltas
  *   search     – texto libre: busca en nombre, apellido, nombre completo,
  *                idSaldo exacto e idPresupuesto exacto.
  *
  * CORRECCIÓN #5: búsqueda por texto delegada al servidor mediante el parámetro
  * `search`. Reemplaza el filtrado JS que hacía Saldos.jsx con LIKE en JS.
- * CORRECCIÓN #6: orden diferenciado — pendientes/todos por fecha_vto,
+ * CORRECCIÓN #6: orden diferenciado — con deuda por fecha_vto,
  * pagados por id_saldo DESC.
  */
 export async function obtenerSaldos({
@@ -66,11 +76,6 @@ export async function obtenerSaldos({
   limite     = 500,
   search     = '',
 } = {}) {
-  // Para la búsqueda por texto necesitamos hacer el JOIN explícito en la query
-  // porque Supabase no permite filtrar sobre columnas de tablas relacionadas
-  // directamente en .or(). Usamos PostgREST embedded filters para nombre/apellido
-  // y filtramos idSaldo / idPresupuesto como números exactos.
-
   let q = supabase
     .from('saldo')
     .select(`
@@ -87,14 +92,9 @@ export async function obtenerSaldos({
 
   if (vencidos) {
     const hoy = new Date().toISOString().split('T')[0]
-    q = q.lt('fecha_vto', hoy).eq('estado', 'pendiente')
+    q = q.lt('fecha_vto', hoy).in('estado', ['pendiente', 'parcial'])
   }
 
-  // CORRECCIÓN #5: filtrado por texto en servidor
-  // PostgREST soporta filtros en columnas de relaciones con la sintaxis
-  // cliente.nombre=ilike.*texto* pero no concatenación de columnas.
-  // Para el caso del nombre completo y búsqueda por ID se aplica post-fetch
-  // solo sobre el resultado ya reducido por los otros filtros (muy eficiente).
   const { data, error } = await q
   if (error) manejarError('obtenerSaldos', error)
 
@@ -127,7 +127,7 @@ export async function obtenerSaldos({
       // pagados: más reciente primero por idSaldo DESC
       return b.idSaldo - a.idSaldo
     }
-    // pendientes o todos: por fechaVto
+    // pendientes, parciales o todos: por fechaVto
     const fa = a.fechaVto ?? ''
     const fb = b.fechaVto ?? ''
     return orden === 'asc'
@@ -171,14 +171,17 @@ export async function obtenerSaldoPorPresupuesto(idPresupuesto) {
 }
 
 /**
- * Devuelve todos los saldos pendientes de un cliente específico.
+ * Devuelve todos los saldos con deuda activa (pendiente o parcial) de un
+ * cliente específico, ordenados cronológicamente por vencimiento — este es
+ * el mismo orden que usa el motor de imputación en el servidor, por eso
+ * pagosService.js reutiliza esta función para la previsualización.
  */
 export async function obtenerSaldosPendientesDeCliente(idCliente) {
   const { data, error } = await supabase
     .from('saldo')
     .select('*')
     .eq('id_cliente', idCliente)
-    .eq('estado', 'pendiente')
+    .in('estado', ['pendiente', 'parcial'])
     .order('fecha_vto', { ascending: true })
 
   if (error) manejarError('obtenerSaldosPendientesDeCliente', error)
@@ -186,46 +189,45 @@ export async function obtenerSaldosPendientesDeCliente(idCliente) {
 }
 
 /**
- * Devuelve el total de saldos pendientes (suma de montos).
+ * Devuelve el total de saldos pendientes (suma de montos remanentes).
  */
 export async function obtenerTotalSaldosPendientes() {
   const { data, error } = await supabase
     .from('saldo')
-    .select('monto')
-    .eq('estado', 'pendiente')
+    .select('monto_pendiente, estado')
+    .in('estado', ['pendiente', 'parcial'])
 
   if (error) manejarError('obtenerTotalSaldosPendientes', error)
-  return data.reduce((acc, row) => acc + Number(row.monto), 0)
+  return data.reduce((acc, row) => acc + Number(row.monto_pendiente), 0)
 }
 
 /**
- * CORRECCIÓN #3: función nueva para calcular los KPIs del dashboard de Saldos.
- * Reemplaza la query inline que Saldos.jsx hacía directamente.
- *
- * Devuelve:
- *   totalPendiente – suma de montos pendientes
- *   cantPendientes – cantidad de saldos pendientes
- *   vencidos       – suma de montos pendientes vencidos (fechaVto < hoy)
- *   cantVencidos   – cantidad de saldos vencidos
- *   totalCobrado   – suma de montos en estado 'pagado'
+ * CORRECCIÓN #3 + #8: KPIs del dashboard de Saldos, ahora contemplando
+ * pagos parciales. `totalCobrado` ya no asume "todo o nada": suma lo
+ * efectivamente cobrado en CADA saldo (monto - monto_pendiente), así un
+ * saldo con pago parcial aporta al total cobrado aunque siga figurando
+ * como deuda pendiente por su remanente.
  */
 export async function obtenerKPIsSaldos() {
   const { data, error } = await supabase
     .from('saldo')
-    .select('monto, estado, fecha_vto')
+    .select('monto, monto_pendiente, estado, fecha_vto')
 
   if (error) manejarError('obtenerKPIsSaldos', error)
 
-  const hoy        = new Date().toISOString().split('T')[0]
-  const pendientes = data.filter(s => s.estado === 'pendiente')
-  const vencidos   = pendientes.filter(s => (s.fecha_vto ?? '') < hoy)
+  const hoy       = new Date().toISOString().split('T')[0]
+  const conDeuda  = data.filter(s => s.estado === 'pendiente' || s.estado === 'parcial')
+  const vencidos  = conDeuda.filter(s => (s.fecha_vto ?? '') < hoy)
+  const parciales = data.filter(s => s.estado === 'parcial')
 
   return {
-    totalPendiente: pendientes.reduce((a, s) => a + Number(s.monto), 0),
-    cantPendientes: pendientes.length,
-    vencidos:       vencidos.reduce((a, s) => a + Number(s.monto), 0),
+    totalPendiente: conDeuda.reduce((a, s) => a + Number(s.monto_pendiente), 0),
+    cantPendientes: conDeuda.length,
+    vencidos:       vencidos.reduce((a, s) => a + Number(s.monto_pendiente), 0),
     cantVencidos:   vencidos.length,
-    totalCobrado:   data.filter(s => s.estado === 'pagado').reduce((a, s) => a + Number(s.monto), 0),
+    totalCobrado:   data.reduce((a, s) => a + (Number(s.monto) - Number(s.monto_pendiente)), 0),
+    cantParciales:  parciales.length,
+    totalEnParcial: parciales.reduce((a, s) => a + Number(s.monto_pendiente), 0),
   }
 }
 
@@ -233,18 +235,20 @@ export async function obtenerKPIsSaldos() {
 
 /**
  * Crea un nuevo saldo (cuenta corriente) asociado a un presupuesto.
+ * CORRECCIÓN #8: inicializa monto_pendiente = monto (deuda completa al crear).
  */
 export async function crearSaldo(saldo) {
   const { data, error } = await supabase
     .from('saldo')
     .insert({
-      id_presupuesto: saldo.idPresupuesto,
-      id_cliente:     saldo.idCliente,
-      fecha_inicio:   saldo.fechaInicio,
-      fecha_vto:      saldo.fechaVto   ?? null,
-      monto:          saldo.monto,
-      estado:         saldo.estado     ?? 'pendiente',
-      fecha_pago:     saldo.fechaPago  ?? null,
+      id_presupuesto:  saldo.idPresupuesto,
+      id_cliente:      saldo.idCliente,
+      fecha_inicio:    saldo.fechaInicio,
+      fecha_vto:       saldo.fechaVto   ?? null,
+      monto:           saldo.monto,
+      monto_pendiente: saldo.monto,
+      estado:          saldo.estado     ?? 'pendiente',
+      fecha_pago:      saldo.fechaPago  ?? null,
     })
     .select()
     .single()
@@ -254,16 +258,23 @@ export async function crearSaldo(saldo) {
 }
 
 /**
- * Marca un saldo como pagado con la fecha de pago indicada.
- * CORRECCIÓN #4: también actualiza el estado del Presupuesto asociado a 'pagado',
- * replicando la doble operación que hacía Saldos.jsx directamente.
+ * Marca un saldo como pagado en su totalidad (cancela cualquier remanente),
+ * con la fecha de pago indicada. Útil para saldar de una sola vez un saldo
+ * pendiente o cancelar el remanente de uno que ya tenía un pago parcial.
+ *
+ * Para imputar un pago que puede no cubrir el total (y potencialmente
+ * repartirse entre varios saldos del cliente), usar
+ * `pagosService.registrarPagoParcial` en su lugar — esa es la vía atómica.
+ *
+ * CORRECCIÓN #4: también actualiza el estado del Presupuesto asociado a 'pagado'.
  */
 export async function marcarSaldoPagado(idSaldo, idPresupuesto, fechaPago) {
   const { error } = await supabase
     .from('saldo')
     .update({
-      estado:     'pagado',
-      fecha_pago: fechaPago,
+      estado:          'pagado',
+      monto_pendiente: 0,
+      fecha_pago:      fechaPago,
     })
     .eq('id_saldo', idSaldo)
 
@@ -275,11 +286,31 @@ export async function marcarSaldoPagado(idSaldo, idPresupuesto, fechaPago) {
 
 /**
  * Actualiza el monto y/o la fecha de vencimiento de un saldo.
+ * CORRECCIÓN #8: si cambia `monto`, el remanente (`monto_pendiente`) se
+ * recalcula preservando lo que ya se cobró, en vez de resetearse — evita que
+ * editar el monto de un saldo con pago parcial "borre" el cobro ya recibido.
  */
 export async function actualizarSaldo(idSaldo, { monto, fechaVto }) {
   const campos = {}
-  if (monto    !== undefined) campos.monto     = monto
   if (fechaVto !== undefined) campos.fecha_vto = fechaVto ?? null
+
+  if (monto !== undefined) {
+    const { data: actual, error: errFetch } = await supabase
+      .from('saldo')
+      .select('monto, monto_pendiente')
+      .eq('id_saldo', idSaldo)
+      .single()
+    if (errFetch) manejarError('actualizarSaldo:fetch', errFetch)
+
+    const yaCobrado     = Number(actual.monto) - Number(actual.monto_pendiente)
+    const nuevoPendiente = Math.max(0, Number(monto) - yaCobrado)
+
+    campos.monto           = monto
+    campos.monto_pendiente = nuevoPendiente
+    campos.estado          = nuevoPendiente <= 0
+      ? 'pagado'
+      : (nuevoPendiente < Number(monto) ? 'parcial' : 'pendiente')
+  }
 
   const { error } = await supabase
     .from('saldo')
@@ -290,14 +321,28 @@ export async function actualizarSaldo(idSaldo, { monto, fechaVto }) {
 }
 
 /**
- * Revierte un saldo a estado pendiente.
+ * Revierte un saldo a estado pendiente por su monto original completo.
+ *
+ * ⚠️ Este es un revert "de golpe": pierde la granularidad de qué pagos
+ * parciales se habían aplicado (el ledger en `pago`/`pago_aplicacion`
+ * permanece, pero el saldo vuelve a deber el 100%). Para deshacer un pago
+ * puntual de forma auditable, lo correcto a futuro es una función de
+ * reversión de pago (ver sección de Escalabilidad).
  */
 export async function revertirPagoSaldo(idSaldo) {
+  const { data: actual, error: errFetch } = await supabase
+    .from('saldo')
+    .select('monto')
+    .eq('id_saldo', idSaldo)
+    .single()
+  if (errFetch) manejarError('revertirPagoSaldo:fetch', errFetch)
+
   const { error } = await supabase
     .from('saldo')
     .update({
-      estado:     'pendiente',
-      fecha_pago: null,
+      estado:          'pendiente',
+      fecha_pago:      null,
+      monto_pendiente: actual.monto,
     })
     .eq('id_saldo', idSaldo)
 
