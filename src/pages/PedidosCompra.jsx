@@ -824,7 +824,7 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
           <div className="mt-6 pt-5 border-t border-surface-700">
             <p className="text-surface-500 text-xs font-body flex items-center gap-2">
               <Layers size={13} className="text-brand-400 flex-shrink-0" />
-              Este pedido se paga por cuotas — confirmá cada pago individualmente en el plan de cuotas de abajo.
+              Este pedido se paga por cuotas: se debe confirmar cada pago individualmente en el plan de cuotas de abajo.
             </p>
           </div>
         )}

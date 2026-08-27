@@ -126,7 +126,7 @@ export async function generarPDFPedidoCompra(idPedido) {
   autoTable(doc, {
     startY: TOP_CONTENT,
     margin: { top: TOP_CONTENT, left: ML, right: MR, bottom: 20 },
-    head: [['#', 'Producto', 'Medida', 'Cant.\nPedida', 'Registro de recepción  (anotar por bulto / caja)', 'Total\nRecibido', 'OK']],
+    head: [['#', 'Producto', 'Medida', 'Cant.\nPedida', 'Registro de recepción', 'Total\nRecibido', 'OK']],
     body: detalles.map((d, idx) => [
       String(idx + 1),
       d.nombreProducto ?? `#${d.idProducto}`,
