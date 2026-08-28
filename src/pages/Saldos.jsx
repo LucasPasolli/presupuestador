@@ -367,6 +367,9 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
   const [detalles,    setDetalles]      = useState([])
   const [aplicaciones, setAplicaciones] = useState([])
   const [confirmPago, setConfirmPago]   = useState(false)
+  // CORRECCIÓN (cierre de remanente): método usado para el cobro final,
+  // solo relevante cuando esParcial — se persiste en el ledger de pagos.
+  const [metodoCierre, setMetodoCierre] = useState('efectivo')
 
   useEffect(() => {
     async function cargar() {
@@ -389,7 +392,7 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
     // Cancela el remanente completo (sirve tanto para un saldo pendiente
     // como para saldar de una vez lo que quedaba de un pago parcial)
     const hoy = new Date().toISOString().slice(0, 10)
-    await marcarSaldoPagado(saldo.idSaldo, saldo.idPresupuesto, hoy)
+    await marcarSaldoPagado(saldo.idSaldo, saldo.idPresupuesto, hoy, metodoCierre)
     setConfirmPago(false)
     onUpdated('Saldo marcado como pagado')
     onBack()
@@ -635,11 +638,31 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
         <p className="text-surface-300 text-sm font-body mb-2">
           ¿Marcar el saldo <span className="text-white font-mono">#{saldo.idSaldo}</span> como cobrado en su totalidad?
         </p>
-        <p className="text-surface-500 text-xs font-body mb-6">
+        <p className="text-surface-500 text-xs font-body mb-4">
           Se registrará el ingreso del remanente de{' '}
           <span className="text-brand-400 font-mono font-bold">{fmt(saldo.montoPendiente)}</span>{' '}
           en el sistema de estadísticas. Esta acción no se puede deshacer.
         </p>
+
+        {/* CORRECCIÓN (cierre de remanente): solo tiene sentido pedir método
+            de pago cuando efectivamente se va a dejar un registro en el
+            ledger — o sea, cuando había un pago parcial en curso. */}
+        {esParcial && (
+          <div className="mb-6">
+            <label className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1 block">
+              Método de cobro del remanente
+            </label>
+            <select value={metodoCierre} onChange={e => setMetodoCierre(e.target.value)}
+              className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-white
+                         text-sm font-body focus:outline-none focus:border-brand-500 transition-all">
+              <option value="efectivo">Efectivo</option>
+              <option value="transferencia">Transferencia</option>
+              <option value="cheque">Cheque</option>
+              <option value="otro">Otro</option>
+            </select>
+          </div>
+        )}
+
         <div className="flex gap-2">
           <Button variant="secondary" className="flex-1" onClick={() => setConfirmPago(false)}>Cancelar</Button>
           <Button className="flex-1" icon={BadgeCheck} onClick={marcarPagado}>Confirmar cobro</Button>

@@ -268,7 +268,94 @@ export async function crearSaldo(saldo) {
  *
  * CORRECCIÓN #4: también actualiza el estado del Presupuesto asociado a 'pagado'.
  */
-export async function marcarSaldoPagado(idSaldo, idPresupuesto, fechaPago) {
+/**
+ * Marca un saldo como pagado en su totalidad (cancela cualquier remanente),
+ * con la fecha de pago indicada. Útil para saldar de una sola vez un saldo
+ * pendiente o cancelar el remanente de uno que ya tenía un pago parcial.
+ *
+ * CORRECCIÓN (cierre de remanente): antes esto era un UPDATE directo sobre
+ * `saldo`, sin dejar rastro en `pago` / `pago_aplicacion`. Si el saldo ya
+ * venía de un pago parcial (estado 'parcial'), eso rompía dos cosas río
+ * abajo que SÍ dependen de ese ledger:
+ *   1. El "Historial de pagos aplicados" del detalle del Saldo no mostraba
+ *      cuándo se había cobrado ese último tramo — parecía que nunca se
+ *      hubiera registrado.
+ *   2. El PDF de Facturas (que agrupa cobros vía `pago_aplicacion`) no veía
+ *      el cierre: el presupuesto volvía a listarse como venta completa por
+ *      el monto ORIGINAL en el período de cierre, duplicando lo que ya se
+ *      había facturado en períodos anteriores como pagos parciales.
+ *
+ * Ahora, si el saldo estaba en 'parcial', se inserta un `pago` +
+ * `pago_aplicacion` representando el cobro del remanente, exactamente con
+ * la misma forma que deja `fn_aplicar_pago_cliente` — así ambos consumidores
+ * (detalle de Saldo y reporte de Facturas) lo ven de forma consistente.
+ *
+ * Un saldo que se paga de una sola vez desde 'pendiente' (nunca pasó por
+ * 'parcial') sigue exactamente igual que antes: sin fila en
+ * `pago_aplicacion`, tal como espera la RPC `obtener_presupuestos_facturables`
+ * para tratarlo como una venta normal (sin esto se duplicaría al revés).
+ *
+ * ⚠️ Nota de atomicidad: a diferencia de `fn_aplicar_pago_cliente` (que corre
+ * en una transacción de Postgres con FOR UPDATE), esto son 3 llamadas
+ * separadas desde el cliente. Para este flujo — cerrar UN saldo puntual que
+ * ya se está mirando en el detalle — el riesgo de carrera es bajo, pero si
+ * en el futuro se vuelve un flujo de alto tráfico concurrente, conviene
+ * moverlo a una RPC dedicada para que quede atómico.
+ *
+ * Para imputar un pago que puede no cubrir el total (y potencialmente
+ * repartirse entre varios saldos del cliente), usar
+ * `pagosService.registrarPagoParcial` en su lugar — esa es la vía atómica.
+ *
+ * @param {number} idSaldo
+ * @param {number} idPresupuesto
+ * @param {string} fechaPago
+ * @param {string} [metodoPago='otro'] Método usado para cobrar el remanente.
+ *   Solo se usa (y solo se persiste en el ledger) cuando el saldo venía de
+ *   estado 'parcial'; se ignora para el cierre directo de un 'pendiente'.
+ */
+export async function marcarSaldoPagado(idSaldo, idPresupuesto, fechaPago, metodoPago = 'otro') {
+  const { data: actual, error: errFetch } = await supabase
+    .from('saldo')
+    .select('estado, monto_pendiente, id_cliente')
+    .eq('id_saldo', idSaldo)
+    .single()
+
+  if (errFetch) manejarError('marcarSaldoPagado:fetch', errFetch)
+
+  const remanente = Number(actual.monto_pendiente)
+
+  // Solo dejamos rastro en el ledger si había un pago parcial en curso.
+  if (actual.estado === 'parcial' && remanente > 0) {
+    const { data: userData } = await supabase.auth.getUser()
+
+    const { data: pago, error: errPago } = await supabase
+      .from('pago')
+      .insert({
+        id_cliente:  actual.id_cliente,
+        monto:       remanente,
+        fecha:       fechaPago,
+        metodo_pago: metodoPago,
+        descripcion: `Cancelación de remanente — Saldo #${idSaldo}`,
+        creado_por:  userData?.user?.id ?? null,
+      })
+      .select()
+      .single()
+
+    if (errPago) manejarError('marcarSaldoPagado:pago', errPago)
+
+    const { error: errAplicacion } = await supabase
+      .from('pago_aplicacion')
+      .insert({
+        id_pago:          pago.id_pago,
+        id_saldo:         idSaldo,
+        monto_aplicado:   remanente,
+        saldo_anterior:   remanente,
+        saldo_resultante: 0,
+      })
+
+    if (errAplicacion) manejarError('marcarSaldoPagado:aplicacion', errAplicacion)
+  }
+
   const { error } = await supabase
     .from('saldo')
     .update({
