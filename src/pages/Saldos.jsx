@@ -787,7 +787,7 @@ export default function Saldos() {
         )}
 
         <div className="bg-blue-500/8 border border-blue-500/25 rounded-xl p-5">
-          <p className="text-blue-400 text-xs uppercase tracking-widest font-body">Pagos parciales</p>
+          <p className="text-blue-400 text-xs uppercase tracking-widest font-body">Pagos parciales pendientes</p>
           <p className="font-display text-3xl text-blue-400 tracking-widest mt-1">
             {new Intl.NumberFormat('es-AR', { notation: 'compact', style: 'currency', currency: 'ARS' }).format(kpis.totalEnParcial)}
           </p>
