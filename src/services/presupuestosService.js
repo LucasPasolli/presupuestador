@@ -290,54 +290,155 @@ export async function obtenerPresupuestosConDetalles({
 }
 
 /**
+ * Aplicaciones de Pago Parcial (`pago_aplicacion`) cuyo pago cayó dentro del
+ * período — con los datos de cliente/presupuesto ya resueltos para poder:
+ *   1. Listarlas como líneas individuales en el reporte de Facturas
+ *      (monto aplicado + fecha de ESE pago puntual).
+ *   2. Identificar qué presupuestos hay que excluir del listado "normal"
+ *      (ver obtenerFacturasConDetalles) para no duplicar el monto.
+ *
+ * Se resuelve acá con supabase directo (no vía pagosService) para evitar un
+ * ciclo de imports: pagosService → saldosService → presupuestosService.
+ *
+ * Nota: se filtra por `pago.fecha` (fecha de negocio del cobro, editable),
+ * no por `created_at`, para ser consistente con el resto de los reportes
+ * de este archivo que rangean por columnas `fecha`.
+ */
+async function _obtenerPagosParcialesFacturables(desde, hasta) {
+  // 1. Pagos cuya fecha cae en el período
+  const { data: pagos, error: e1 } = await supabase
+    .from('pago')
+    .select('id_pago, fecha')
+    .gte('fecha', desde)
+    .lte('fecha', hasta)
+
+  if (e1) manejarError('_obtenerPagosParcialesFacturables(pagos)', e1)
+  if (!pagos?.length) return []
+
+  const idsPago      = pagos.map(p => p.id_pago)
+  const fechaPorPago = new Map(pagos.map(p => [p.id_pago, p.fecha]))
+
+  // 2. Aplicaciones de esos pagos, con el saldo → presupuesto/cliente asociado
+  const { data: aplicaciones, error: e2 } = await supabase
+    .from('pago_aplicacion')
+    .select(`
+      id_aplicacion,
+      id_pago,
+      id_saldo,
+      monto_aplicado,
+      saldo (
+        id_presupuesto,
+        id_cliente,
+        presupuesto ( metodo_pago, nombre_cliente, apellido_cliente ),
+        cliente ( nombre, apellido, cuit )
+      )
+    `)
+    .in('id_pago', idsPago)
+
+  if (e2) manejarError('_obtenerPagosParcialesFacturables(aplicaciones)', e2)
+
+  return (aplicaciones ?? [])
+    .filter(a => a.saldo?.id_presupuesto != null)
+    .map(a => {
+      const sal  = a.saldo
+      const pres = sal.presupuesto
+      const cli  = sal.cliente
+      return {
+        idAplicacion:    a.id_aplicacion,
+        idSaldo:         a.id_saldo,
+        idPresupuesto:   sal.id_presupuesto,
+        idCliente:       sal.id_cliente,
+        montoAplicado:   Number(a.monto_aplicado),
+        fecha:           fechaPorPago.get(a.id_pago) ?? null,
+        metodoPago:      pres?.metodo_pago         ?? null,
+        nombreCliente:   pres?.nombre_cliente       ?? cli?.nombre   ?? null,
+        apellidoCliente: pres?.apellido_cliente     ?? cli?.apellido ?? null,
+        cuit:            cli?.cuit ?? null,
+      }
+    })
+}
+
+/**
  * Devuelve los presupuestos facturables en un rango de fechas, con detalles incluidos.
- * Sin cambios funcionales — ya usaba RPC + batch query, patrón correcto.
+ *
+ * CORRECCIÓN (Pago Parcial): la RPC `obtener_presupuestos_facturables` decide
+ * qué presupuestos entran al reporte, y para Cuenta Corriente eso depende de
+ * que el saldo llegue a estado 'pagado' — por eso un saldo que se viene
+ * cobrando de a partes (vía `fn_aplicar_pago_cliente` / pagosService) quedaba
+ * afuera del reporte hasta liquidarse al 100%, y el dinero ya cobrado no se
+ * veía reflejado en ningún lado.
+ *
+ * Ahora:
+ *   1. Cada pago parcial (fila de `pago_aplicacion`) se lista como línea
+ *      individual, con su propio monto y fecha — se vea o no todavía
+ *      liquidado el saldo al 100%.
+ *   2. Todo presupuesto cuyo saldo tenga AL MENOS una aplicación de pago
+ *      parcial se EXCLUYE del listado normal que devuelve la RPC, para que
+ *      no aparezca duplicado (una vez como línea de venta completa y otra
+ *      vez como línea(s) de pago parcial).
+ *   3. Un saldo saldado de una sola vez (`marcarSaldoPagado`, que no genera
+ *      filas en `pago_aplicacion`) no se ve afectado por este cambio: sigue
+ *      apareciendo como línea normal, igual que antes.
+ *
+ * Cada línea devuelta trae `tipo: 'venta' | 'pago_parcial'` para que el
+ * consumidor (Facturas.jsx) sepa cómo renderizarla.
  */
 export async function obtenerFacturasConDetalles(desde, hasta) {
-  const { data: presupuestos, error: e1 } = await supabase
-    .rpc('obtener_presupuestos_facturables', {
+  const [rpcResult, pagosParciales] = await Promise.all([
+    supabase.rpc('obtener_presupuestos_facturables', {
       fecha_desde: desde,
       fecha_hasta: hasta,
-    })
+    }),
+    _obtenerPagosParcialesFacturables(desde, hasta),
+  ])
 
+  const { data: presupuestos, error: e1 } = rpcResult
   if (e1) manejarError('obtenerFacturasConDetalles(rpc)', e1)
-  if (!presupuestos?.length) return []
 
-  const ids = presupuestos.map(p => p.id_presupuesto)
+  const idsConPagoParcial = new Set(pagosParciales.map(pp => pp.idPresupuesto))
+  const presupuestosFiltrados = (presupuestos ?? [])
+    .filter(p => !idsConPagoParcial.has(p.id_presupuesto))
 
-  const { data: detallesRaw, error: e2 } = await supabase
-    .from('detalle_presupuesto')
-    .select(`
-      id_detalle,
-      id_presupuesto,
-      id_producto,
-      nombre_producto,
-      medida,
-      cantidad,
-      precio_unitario,
-      precio_con_promo,
-      id_promocion,
-      subtotal,
-      producto ( nombre )
-    `)
-    .in('id_presupuesto', ids)
-    .order('id_detalle', { ascending: true })
+  if (!presupuestosFiltrados.length && !pagosParciales.length) return []
 
-  if (e2) manejarError('obtenerFacturasConDetalles(detalles)', e2)
+  let detallesPor = {}
+  if (presupuestosFiltrados.length) {
+    const ids = presupuestosFiltrados.map(p => p.id_presupuesto)
 
-  const detallesPor = {}
-  for (const row of detallesRaw ?? []) {
-    const id = row.id_presupuesto
-    if (!detallesPor[id]) detallesPor[id] = []
-    const det = mapDetalle(row)
-    det.nombreProducto =
-      row.nombre_producto
-      ?? row.producto?.nombre
-      ?? `(producto eliminado #${row.id_producto})`
-    detallesPor[id].push(det)
+    const { data: detallesRaw, error: e2 } = await supabase
+      .from('detalle_presupuesto')
+      .select(`
+        id_detalle,
+        id_presupuesto,
+        id_producto,
+        nombre_producto,
+        medida,
+        cantidad,
+        precio_unitario,
+        precio_con_promo,
+        id_promocion,
+        subtotal,
+        producto ( nombre )
+      `)
+      .in('id_presupuesto', ids)
+      .order('id_detalle', { ascending: true })
+
+    if (e2) manejarError('obtenerFacturasConDetalles(detalles)', e2)
+
+    for (const row of detallesRaw ?? []) {
+      const id = row.id_presupuesto
+      if (!detallesPor[id]) detallesPor[id] = []
+      const det = mapDetalle(row)
+      det.nombreProducto =
+        row.nombre_producto
+        ?? row.producto?.nombre
+        ?? `(producto eliminado #${row.id_producto})`
+      detallesPor[id].push(det)
+    }
   }
 
-  return presupuestos.map(p => ({
+  const lineasVenta = presupuestosFiltrados.map(p => ({
+    tipo:             'venta',
     idPresupuesto:    p.id_presupuesto,
     idCliente:        p.id_cliente,
     fecha:            p.fecha,
@@ -351,6 +452,27 @@ export async function obtenerFacturasConDetalles(desde, hasta) {
     fechaFacturacion: p.fecha_facturacion,
     detalles:         detallesPor[p.id_presupuesto] ?? [],
   }))
+
+  // Orden cronológico: dentro de un mismo cliente/presupuesto, que los pagos
+  // parciales se lean en el orden real en que se cobraron.
+  const lineasPagoParcial = pagosParciales
+    .slice()
+    .sort((a, b) => (a.fecha ?? '').localeCompare(b.fecha ?? ''))
+    .map(pp => ({
+      tipo:            'pago_parcial',
+      idPresupuesto:   pp.idPresupuesto,
+      idAplicacion:    pp.idAplicacion,
+      idCliente:       pp.idCliente,
+      fecha:           pp.fecha,
+      metodoPago:      pp.metodoPago,
+      monto:           pp.montoAplicado,
+      nombreCliente:   pp.nombreCliente,
+      apellidoCliente: pp.apellidoCliente,
+      cuit:            pp.cuit,
+      detalles:        [],
+    }))
+
+  return [...lineasVenta, ...lineasPagoParcial]
 }
 
 // ─── Mutaciones ───────────────────────────────────────────────────────────────

@@ -41,6 +41,18 @@ function fmt(n) {
 }
 
 /**
+ * Formatea el id_producto (PK interna) como código de catálogo visible al cliente.
+ * Ej: 7 → "#0007". Zero-padding a 4 dígitos; si el id supera 9999 no se trunca.
+ * NOTA: hoy el "código" es el id_producto. Si en el futuro se agrega un campo
+ * SKU real y editable en la tabla `producto`, reemplazar esta función por el
+ * valor de ese campo (ver detalle.codigoProducto una vez exista esa columna).
+ */
+function formatearCodigoProducto(idProducto) {
+  if (idProducto == null) return '—'
+  return `#${String(idProducto).padStart(4, '0')}`
+}
+
+/**
  * Genera y descarga el PDF de un presupuesto dado su ID.
  * - PDF completamente en escala de grises.
  * - Muestra precio con promo marcado con asterisco en la tabla de productos.
@@ -144,9 +156,10 @@ export async function generarPDFPresupuesto(idPresupuesto) {
   autoTable(doc, {
     startY: 55,
     margin: { left: ML, right: ML },
-    head: [['Producto', 'Medida', 'Cant.', 'Precio Unit.', 'Subtotal']],
+    head: [['Código', 'Producto', 'Medida', 'Cant.', 'Precio Unit.', 'Subtotal']],
     body: detalles.map(d => [
-      d.nombreProducto ?? `#${d.idProducto}`,
+      formatearCodigoProducto(d.idProducto),
+      d.nombreProducto ?? `(producto eliminado #${d.idProducto})`,
       d.medida ?? '—',
       d.cantidad,
       d.precioConPromo != null
@@ -158,11 +171,12 @@ export async function generarPDFPresupuesto(idPresupuesto) {
     headStyles: { fillColor: GRIS_HEADER, textColor: [60, 60, 60], fontStyle: 'bold' },
     alternateRowStyles: { fillColor: GRIS_ALT_ROW },
     columnStyles: {
-      0: { cellWidth: 'auto' },
-      1: { cellWidth: 22, halign: 'center' },
-      2: { cellWidth: 16, halign: 'center' },
-      3: { cellWidth: 34, halign: 'right' },
-      4: { cellWidth: 34, halign: 'right' },
+      0: { cellWidth: 20, halign: 'center' },
+      1: { cellWidth: 'auto' },
+      2: { cellWidth: 20, halign: 'center' },
+      3: { cellWidth: 14, halign: 'center' },
+      4: { cellWidth: 30, halign: 'right' },
+      5: { cellWidth: 30, halign: 'right' },
     },
   })
 

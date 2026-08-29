@@ -634,7 +634,7 @@ export default function Estadisticas() {
                 {m.proxSaldos.map((s, i) => (
                   <div key={i} className="flex justify-between text-xs font-body">
                     <span className="text-surface-400 truncate">{s.nombre} {s.apellido}</span>
-                    <span className="text-white font-mono ml-2">{fmt(s.monto)}</span>
+                    <span className="text-white font-mono ml-2">{fmt(s.montoPendiente)}</span>
                   </div>
                 ))}
               </div>

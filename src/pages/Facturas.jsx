@@ -53,6 +53,15 @@ function agruparPresupuestos(presupuestos, metodos) {
       }
     }
 
+    // CORRECCIÓN (Pago Parcial): una línea de pago parcial es un cobro puntual,
+    // no una venta con ítems — se agrega tal cual viene del service, sin pasar
+    // por el armado de ítems/factorAjuste (que requiere `detalles`, inexistente acá).
+    if (p.tipo === 'pago_parcial') {
+      porCliente[key].presupuestos.push(p)
+      porCliente[key].totalCliente += p.monto
+      continue
+    }
+
     // Agrupar detalles por producto (sumar cantidad y subtotal)
     const agrupados = {}
     for (const d of p.detalles ?? []) {
@@ -172,10 +181,36 @@ async function generarPDF(grupos, titulo, desde, hasta) {
     for (const pres of cliente.presupuestos) {
       checkPage(20)
 
+      const metodoLabel = { efectivo: 'Efectivo', transferencia: 'Transferencia', cc15: 'CC 15d', cc30: 'CC 30d' }
+
+      // CORRECCIÓN (Pago Parcial): línea de cobro puntual — no tiene ítems
+      // propios (esos ya se facturaron en el presupuesto original, que puede
+      // haberse listado en otro período). Se muestra el monto efectivamente
+      // cobrado y la fecha de ESE pago, resaltado para diferenciarlo de una
+      // venta completa.
+      if (pres.tipo === 'pago_parcial') {
+        doc.setFillColor(255, 248, 235)
+        doc.roundedRect(ML + 2, y - 4, CW - 4, 9, 1.5, 1.5, 'F')
+
+        doc.setFontSize(8)
+        doc.setFont('helvetica', 'italic')
+        doc.setTextColor(120, 120, 120)
+        doc.text(
+          `Pago parcial recibido — Presupuesto #${pres.idPresupuesto} — ${fmtFecha(pres.fecha)} — ${metodoLabel[pres.metodoPago] ?? pres.metodoPago}`,
+          ML + 4, y + 1.5
+        )
+
+        doc.setFont('helvetica', 'bold')
+        doc.setTextColor(...NARANJA)
+        doc.text(fmt(pres.monto), PW - MR - 4, y + 1.5, { align: 'right' })
+
+        y += 11
+        continue
+      }
+
       doc.setFontSize(8)
       doc.setFont('helvetica', 'italic')
       doc.setTextColor(120, 120, 120)
-      const metodoLabel = { efectivo: 'Efectivo', transferencia: 'Transferencia', cc15: 'CC 15d', cc30: 'CC 30d' }
       doc.text(
         `Presupuesto #${pres.idPresupuesto} — ${fmtFecha(pres.fechaFacturacion)} — ${metodoLabel[pres.metodoPago] ?? pres.metodoPago}`,
         ML + 4, y
@@ -277,49 +312,73 @@ function VistaPrevia({ grupos, titulo }) {
           </div>
 
           {/* Presupuestos */}
-          {cliente.presupuestos.map((pres) => (
-            <div key={pres.idPresupuesto} className="border-b border-surface-700/50 last:border-0">
-              <div className="px-4 py-2 bg-surface-800/60 flex items-center gap-3">
-                <span className="text-surface-400 text-xs font-mono">#{pres.idPresupuesto}</span>
-                <span className="text-surface-400 text-xs font-body">{fmtFecha(pres.fechaFacturacion)}</span>
-                <Badge color={
-                  pres.metodoPago === 'efectivo'      ? 'green' :
-                  pres.metodoPago === 'transferencia' ? 'blue'  : 'yellow'
-                }>
-                  {{ efectivo: 'Efectivo', transferencia: 'Transferencia', cc15: 'CC 15d', cc30: 'CC 30d' }[pres.metodoPago]}
-                </Badge>
-              </div>
+          {cliente.presupuestos.map((pres) => {
+            // CORRECCIÓN (Pago Parcial): key propia por aplicación — un mismo
+            // presupuesto puede tener varias líneas de pago parcial en el
+            // período (una por cada cobro), así que idPresupuesto solo no
+            // alcanza para una key única.
+            const key = pres.tipo === 'pago_parcial'
+              ? `pp-${pres.idAplicacion}`
+              : `v-${pres.idPresupuesto}`
 
-              {pres.items && pres.items.length > 0 && (
-                <table className="w-full text-xs font-body">
-                  <thead>
-                    <tr className="border-b border-surface-700/30">
-                      <th className="text-left text-surface-500 py-1.5 px-4 font-body">Producto</th>
-                      <th className="text-center text-surface-500 py-1.5 px-2 font-body">Cant.</th>
-                      <th className="text-right text-surface-500 py-1.5 px-2 font-body">P.Unit s/IVA</th>
-                      <th className="text-right text-surface-500 py-1.5 px-4 font-body">Subtotal s/IVA</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pres.items.map((it, i) => (
-                      <tr key={i} className="border-b border-surface-700/20 last:border-0">
-                        <td className="py-1.5 px-4 text-surface-200">{it.nombreProducto ?? `#${it.idProducto}`}</td>
-                        <td className="py-1.5 px-2 text-center text-surface-200 font-mono">{it.cantidad}</td>
-                        <td className="py-1.5 px-2 text-right text-surface-200 font-mono">{fmt(it.precioNeto)}</td>
-                        <td className="py-1.5 px-4 text-right text-surface-200 font-mono">{fmt(it.subtotalNeto)}</td>
+            if (pres.tipo === 'pago_parcial') {
+              return (
+                <div key={key} className="border-b border-surface-700/50 last:border-0 px-4 py-2.5
+                                           bg-yellow-500/5 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="text-surface-400 text-xs font-mono flex-shrink-0">#{pres.idPresupuesto}</span>
+                    <span className="text-surface-400 text-xs font-body flex-shrink-0">{fmtFecha(pres.fecha)}</span>
+                    <Badge color="yellow">Pago parcial</Badge>
+                  </div>
+                  <span className="text-brand-400 font-mono text-sm font-bold flex-shrink-0">{fmt(pres.monto)}</span>
+                </div>
+              )
+            }
+
+            return (
+              <div key={key} className="border-b border-surface-700/50 last:border-0">
+                <div className="px-4 py-2 bg-surface-800/60 flex items-center gap-3">
+                  <span className="text-surface-400 text-xs font-mono">#{pres.idPresupuesto}</span>
+                  <span className="text-surface-400 text-xs font-body">{fmtFecha(pres.fechaFacturacion)}</span>
+                  <Badge color={
+                    pres.metodoPago === 'efectivo'      ? 'green' :
+                    pres.metodoPago === 'transferencia' ? 'blue'  : 'yellow'
+                  }>
+                    {{ efectivo: 'Efectivo', transferencia: 'Transferencia', cc15: 'CC 15d', cc30: 'CC 30d' }[pres.metodoPago]}
+                  </Badge>
+                </div>
+
+                {pres.items && pres.items.length > 0 && (
+                  <table className="w-full text-xs font-body">
+                    <thead>
+                      <tr className="border-b border-surface-700/30">
+                        <th className="text-left text-surface-500 py-1.5 px-4 font-body">Producto</th>
+                        <th className="text-center text-surface-500 py-1.5 px-2 font-body">Cant.</th>
+                        <th className="text-right text-surface-500 py-1.5 px-2 font-body">P.Unit s/IVA</th>
+                        <th className="text-right text-surface-500 py-1.5 px-4 font-body">Subtotal s/IVA</th>
                       </tr>
-                    ))}
-                  </tbody>
-                  <tfoot>
-                    <tr className="bg-surface-700/20">
-                      <td colSpan={3} className="py-1.5 px-4 text-right text-surface-400 text-xs">Total c/IVA:</td>
-                      <td className="py-1.5 px-4 text-right text-brand-400 font-mono font-bold">{fmt(pres.monto)}</td>
-                    </tr>
-                  </tfoot>
-                </table>
-              )}
-            </div>
-          ))}
+                    </thead>
+                    <tbody>
+                      {pres.items.map((it, i) => (
+                        <tr key={i} className="border-b border-surface-700/20 last:border-0">
+                          <td className="py-1.5 px-4 text-surface-200">{it.nombreProducto ?? `#${it.idProducto}`}</td>
+                          <td className="py-1.5 px-2 text-center text-surface-200 font-mono">{it.cantidad}</td>
+                          <td className="py-1.5 px-2 text-right text-surface-200 font-mono">{fmt(it.precioNeto)}</td>
+                          <td className="py-1.5 px-4 text-right text-surface-200 font-mono">{fmt(it.subtotalNeto)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="bg-surface-700/20">
+                        <td colSpan={3} className="py-1.5 px-4 text-right text-surface-400 text-xs">Total c/IVA:</td>
+                        <td className="py-1.5 px-4 text-right text-brand-400 font-mono font-bold">{fmt(pres.monto)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                )}
+              </div>
+            )
+          })}
         </div>
       ))}
 

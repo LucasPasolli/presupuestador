@@ -84,9 +84,14 @@ async function _obtenerPresupuestosPeriodo(desde, hasta) {
 /**
  * Bloque 2: Saldos CC generados por presupuestos del período.
  * Equivale a:
- *   SELECT s.monto, s.estado FROM Saldo s
+ *   SELECT s.monto, s.monto_pendiente, s.estado FROM Saldo s
  *   JOIN Presupuesto p ON p.idPresupuesto = s.idPresupuesto
  *   WHERE p.fecha BETWEEN ? AND ?
+ *
+ * CORRECCIÓN (Pago Parcial): se agrega `monto_pendiente` al select. Sin este
+ * campo era imposible distinguir "cuánto se cobró realmente" de "cuánto
+ * debía originalmente" en saldos con pagos parciales — ver uso en
+ * obtenerMetricas() para el cálculo de cobradoReal / pendienteCC.
  */
 async function _obtenerSaldosDelPeriodo(desde, hasta) {
   // Supabase no soporta JOIN cross-table en .select() sin relación directa;
@@ -103,11 +108,18 @@ async function _obtenerSaldosDelPeriodo(desde, hasta) {
   const ids = pres.map(p => p.id_presupuesto)
   const { data, error: e2 } = await supabase
     .from('saldo')
-    .select('monto, estado, id_presupuesto')
+    .select('monto, monto_pendiente, estado, id_presupuesto')
     .in('id_presupuesto', ids)
 
   if (e2) manejarError('_obtenerSaldosDelPeriodo(saldos)', e2)
-  return data.map(r => ({ monto: Number(r.monto), estado: r.estado }))
+  return data.map(r => ({
+    monto:          Number(r.monto),
+    // Fallback a `monto` para entornos donde la migración de pago parcial
+    // todavía no corrió (columna null) — mismo criterio que mapSaldo() en
+    // saldosService.js, así ambos servicios quedan consistentes.
+    montoPendiente: r.monto_pendiente != null ? Number(r.monto_pendiente) : Number(r.monto),
+    estado:         r.estado,
+  }))
 }
 
 /**
@@ -143,37 +155,47 @@ async function _obtenerInversionesGlobal() {
  * (para vencidos / por vencer / próximos vencimientos).
  *
  * Equivale a:
- *   SELECT s.monto, s.fechaFin,
+ *   SELECT s.monto_pendiente, s.fechaFin,
  *          COALESCE(p.nombreCliente, c.nombre, '')   AS nombre,
  *          COALESCE(p.apellidoCliente, c.apellido,'') AS apellido
  *   FROM Saldo s
  *   JOIN Presupuesto p ON p.idPresupuesto = s.idPresupuesto
  *   LEFT JOIN Cliente c ON c.idCliente = s.idCliente
- *   WHERE s.estado = 'pendiente'
+ *   WHERE s.estado IN ('pendiente', 'parcial')
  *   ORDER BY s.fechaFin ASC
  *
  * Nota: se usa fecha_vto (campo en BD PostgreSQL). La columna SQLite era fechaFin,
  * pero en el schema Supabase el campo se llama fecha_vto (ver saldosService.js).
+ *
+ * CORRECCIÓN (Pago Parcial): antes filtraba solo `estado = 'pendiente'` y
+ * usaba `monto` (deuda ORIGINAL). Esto tenía dos problemas:
+ *   1. Un saldo con pago parcial pasa a estado 'parcial', así que quedaba
+ *      totalmente afuera de vencidos/por-vencer/próximos vencimientos —
+ *      desaparecía del radar aunque siguiera debiendo dinero.
+ *   2. Aun si se lo incluyera, `monto` no refleja lo ya cobrado.
+ * Ahora se incluyen ambos estados con deuda activa y se expone
+ * `montoPendiente` (remanente real) en vez de `monto`.
  */
 async function _obtenerSaldosPendientesGlobal() {
   const { data, error } = await supabase
     .from('saldo')
     .select(`
       monto,
+      monto_pendiente,
       fecha_vto,
       presupuesto ( nombre_cliente, apellido_cliente ),
       cliente     ( nombre, apellido )
     `)
-    .eq('estado', 'pendiente')
+    .in('estado', ['pendiente', 'parcial'])
     .order('fecha_vto', { ascending: true })
 
   if (error) manejarError('_obtenerSaldosPendientesGlobal', error)
 
   return data.map(row => ({
-    monto:    Number(row.monto),
-    fechaFin: row.fecha_vto,
-    nombre:   row.presupuesto?.nombre_cliente  ?? row.cliente?.nombre  ?? '',
-    apellido: row.presupuesto?.apellido_cliente ?? row.cliente?.apellido ?? '',
+    montoPendiente: row.monto_pendiente != null ? Number(row.monto_pendiente) : Number(row.monto),
+    fechaFin:       row.fecha_vto,
+    nombre:         row.presupuesto?.nombre_cliente  ?? row.cliente?.nombre  ?? '',
+    apellido:       row.presupuesto?.apellido_cliente ?? row.cliente?.apellido ?? '',
   }))
 }
 
@@ -350,21 +372,57 @@ async function _obtenerEgresosExtra(desde, hasta) {
 }
 
 /**
- * Bloque 9c: Pedidos pendientes de pago del período — deuda con proveedores.
+ * Bloque 9c: Pedidos pendientes de pago del período — deuda real con proveedores.
+ *
+ * Para pedidos "todo o nada" (efectivo/transferencia/echeck/CC simple),
+ * la deuda es el monto completo mientras estado_pago sea 'pendiente'
+ * (sin cambios respecto al comportamiento original).
+ *
+ * Para pedidos CC con plan de cuotas (tiene_cuotas = true), un pago parcial
+ * de una cuota NO cierra el pedido (sigue en estado_pago='pendiente' hasta
+ * que se paga la última cuota — ver marcar_cuota_pagada() en la DB), así
+ * que sumar pedido.monto sobreestimaría la deuda real. En su lugar, se
+ * suman únicamente las cuotas de pedido_compra_cuota con estado <> 'pagada'.
+ *
  * Equivale a:
  *   SELECT COALESCE(SUM(monto),0) FROM PedidoCompra
- *   WHERE fecha BETWEEN ? AND ? AND estadoPago = 'pendiente'
+ *   WHERE fecha BETWEEN ? AND ? AND estadoPago = 'pendiente' AND NOT tieneCuotas
+ *   +
+ *   SELECT COALESCE(SUM(c.monto),0) FROM PedidoCompraCuota c
+ *   JOIN PedidoCompra p ON p.idPedido = c.idPedido
+ *   WHERE p.fecha BETWEEN ? AND ? AND p.estadoPago = 'pendiente'
+ *     AND p.tieneCuotas AND c.estado <> 'pagada'
  */
 async function _obtenerPedidosPendientesMonto(desde, hasta) {
   const { data, error } = await supabase
     .from('pedido_compra')
-    .select('monto')
+    .select('id_pedido, monto, tiene_cuotas')
     .gte('fecha', desde)
     .lte('fecha', hasta)
     .eq('estado_pago', 'pendiente')
 
   if (error) manejarError('_obtenerPedidosPendientesMonto', error)
-  return data.reduce((a, r) => a + Number(r.monto), 0)
+
+  const sinCuotas = data.filter(r => !r.tiene_cuotas)
+  const conCuotas  = data.filter(r => r.tiene_cuotas)
+
+  // Pedidos sin plan de cuotas: deuda = monto completo (igual que antes)
+  let total = sinCuotas.reduce((a, r) => a + Number(r.monto), 0)
+
+  // Pedidos CC fraccionada: deuda = sólo lo que falta cobrar de cada plan
+  if (conCuotas.length) {
+    const ids = conCuotas.map(r => r.id_pedido)
+    const { data: cuotasPendientes, error: e2 } = await supabase
+      .from('pedido_compra_cuota')
+      .select('monto')
+      .in('id_pedido', ids)
+      .neq('estado', 'pagada')
+
+    if (e2) manejarError('_obtenerPedidosPendientesMonto(cuotas)', e2)
+    total += cuotasPendientes.reduce((a, c) => a + Number(c.monto), 0)
+  }
+
+  return total
 }
 
 /**
@@ -716,8 +774,26 @@ export async function obtenerMetricas(desde, hasta) {
   }, 0)
 
   // 3. Cobrado real vs. pendiente CC
-  const montoCCPagado    = saldosDelPeriodo.filter(s => s.estado === 'pagado').reduce((a, s) => a + s.monto, 0)
-  const montoCCPendiente = saldosDelPeriodo.filter(s => s.estado === 'pendiente').reduce((a, s) => a + s.monto, 0)
+  //
+  // CORRECCIÓN (Pago Parcial): antes se ignoraba por completo el estado
+  // 'parcial'. Un saldo con pago parcial no sumaba nada a "cobrado" (aunque
+  // ya se hubiera cobrado una parte) ni a "pendiente" (aunque siguiera
+  // debiendo el resto) — el dinero literalmente desaparecía del KPI.
+  //
+  // Regla de negocio (aplica igual con 0% pagado que con pago parcial en curso):
+  //   Saldo Pendiente Total = Σ (Monto Total Factura − Pagos Parciales Realizados)
+  //                         = Σ montoPendiente de saldos con deuda activa
+  //   Cobrado (CC)          = Σ (Monto Total Factura − montoPendiente)
+  //                         = lo efectivamente percibido en CADA saldo,
+  //                           sea 'pagado' (100%) o 'parcial' (lo que se cobró hasta ahora)
+  const montoCCPagado = saldosDelPeriodo
+    .filter(s => s.estado === 'pagado' || s.estado === 'parcial')
+    .reduce((a, s) => a + (s.monto - s.montoPendiente), 0)
+
+  const montoCCPendiente = saldosDelPeriodo
+    .filter(s => s.estado === 'pendiente' || s.estado === 'parcial')
+    .reduce((a, s) => a + s.montoPendiente, 0)
+
   const montoContado     = presupuestos
     .filter(p => (p.metodoPago === 'efectivo' || p.metodoPago === 'transferencia') && p.estado === 'pagado')
     .reduce((a, p) => a + p.monto, 0)
@@ -739,13 +815,13 @@ export async function obtenerMetricas(desde, hasta) {
 
   m.saldosVencidos    = saldosPendientesGlobal
     .filter(s => s.fechaFin && s.fechaFin < hoy)
-    .reduce((a, s) => a + s.monto, 0)
+    .reduce((a, s) => a + s.montoPendiente, 0)
   m.saldosPorVencer15 = saldosPendientesGlobal
     .filter(s => s.fechaFin && s.fechaFin >= hoy && s.fechaFin <= en15Str)
-    .reduce((a, s) => a + s.monto, 0)
+    .reduce((a, s) => a + s.montoPendiente, 0)
   m.saldosPorVencer30 = saldosPendientesGlobal
     .filter(s => s.fechaFin && s.fechaFin > en15Str && s.fechaFin <= en30Str)
-    .reduce((a, s) => a + s.monto, 0)
+    .reduce((a, s) => a + s.montoPendiente, 0)
   m.proxSaldos = saldosPendientesGlobal
     .filter(s => s.fechaFin && s.fechaFin >= hoy)
     .slice(0, 5)
