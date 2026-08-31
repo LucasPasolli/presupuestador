@@ -16,6 +16,12 @@ function mapPresupuesto(row) {
     idPresupuesto:   row.id_presupuesto,
     idCliente:       row.id_cliente,
     fecha:           row.fecha,
+    // CORRECCIÓN (desacople fecha de pago): `fechaPago` es el Día Y real en
+    // que se efectivizó el cobro para ventas Efectivo/Transferencia SIN
+    // financiamiento (sin fila en `saldo`). Es NULL hasta que el presupuesto
+    // pasa a estado 'pagado'. Para Cuenta Corriente (cc15/cc30) la fecha de
+    // cobro real vive en `saldo.fecha_pago`, no acá — no confundir ambas.
+    fechaPago:       row.fecha_pago ?? null,
     metodoPago:      row.metodo_pago,
     montoOriginal:   Number(row.monto_original),
     monto:           Number(row.monto),
@@ -51,6 +57,7 @@ const CAMPOS_LISTA = `
   id_presupuesto,
   id_cliente,
   fecha,
+  fecha_pago,
   metodo_pago,
   monto,
   nombre_cliente,
@@ -65,6 +72,7 @@ const CAMPOS_DETALLE = `
   id_presupuesto,
   id_cliente,
   fecha,
+  fecha_pago,
   metodo_pago,
   monto_original,
   monto,
@@ -449,6 +457,10 @@ export async function obtenerFacturasConDetalles(desde, hasta) {
     apellidoCliente:  p.apellido_cliente,
     cuit:             p.cuit,
     fechaPagoSaldo:   p.fecha_pago_saldo,
+    // Día Y real para Efectivo/Transferencia. `fechaFacturacion` ya viene
+    // resuelta por la RPC (COALESCE fecha_pago_saldo → fecha_pago → fecha),
+    // así que en la práctica Facturas.jsx solo necesita usar esa; se expone
+    // igual por transparencia/depuración.
     fechaFacturacion: p.fecha_facturacion,
     detalles:         detallesPor[p.id_presupuesto] ?? [],
   }))
@@ -566,10 +578,31 @@ export async function actualizarPresupuesto(idPresupuesto, presupuesto, detalles
   }
 }
 
-export async function actualizarEstadoPresupuesto(idPresupuesto, estado) {
+/**
+ * Cambia el estado de un presupuesto.
+ *
+ * CORRECCIÓN (desacople Día X / Día Y): al pasar a 'pagado' un presupuesto
+ * en Efectivo o Transferencia (sin financiamiento, sin fila en `saldo`), la
+ * fecha de cobro real (Día Y) debe registrarse explícitamente — ya NO se
+ * infiere de `presupuesto.fecha` (Día X, fecha de emisión/aceptación).
+ *
+ * @param {number} idPresupuesto
+ * @param {string} estado
+ * @param {{ fechaPago?: string }} [opts]
+ *   fechaPago — 'YYYY-MM-DD'. Requerido (a nivel de UI) cuando `estado` es
+ *   'pagado' y el método de pago es Efectivo/Transferencia. Se ignora para
+ *   Cuenta Corriente: ahí la fecha de cobro se registra en `saldo.fecha_pago`
+ *   vía `saldosService.marcarSaldoPagado` / `pagosService`, no acá.
+ */
+export async function actualizarEstadoPresupuesto(idPresupuesto, estado, { fechaPago = null } = {}) {
+  const campos = { estado }
+  if (estado === 'pagado' && fechaPago) {
+    campos.fecha_pago = fechaPago
+  }
+
   const { error } = await supabase
     .from('presupuesto')
-    .update({ estado })
+    .update(campos)
     .eq('id_presupuesto', idPresupuesto)
 
   if (error) manejarError('actualizarEstadoPresupuesto', error)

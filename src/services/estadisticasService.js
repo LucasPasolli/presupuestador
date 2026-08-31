@@ -82,44 +82,95 @@ async function _obtenerPresupuestosPeriodo(desde, hasta) {
 }
 
 /**
- * Bloque 2: Saldos CC generados por presupuestos del período.
- * Equivale a:
- *   SELECT s.monto, s.monto_pendiente, s.estado FROM Saldo s
- *   JOIN Presupuesto p ON p.idPresupuesto = s.idPresupuesto
- *   WHERE p.fecha BETWEEN ? AND ?
+ * Bloque 2: Dinero REALMENTE cobrado en el período (base caja), tanto de
+ * contado (Efectivo/Transferencia) como de Cuenta Corriente.
  *
- * CORRECCIÓN (Pago Parcial): se agrega `monto_pendiente` al select. Sin este
- * campo era imposible distinguir "cuánto se cobró realmente" de "cuánto
- * debía originalmente" en saldos con pagos parciales — ver uso en
- * obtenerMetricas() para el cálculo de cobradoReal / pendienteCC.
+ * CORRECCIÓN (Estadísticas mostraba mal Saldos Pendientes / Cobrado):
+ * la versión anterior (`_obtenerSaldosDelPeriodo`) buscaba los saldos de CC
+ * a partir de los IDs de `presupuesto` cuya `fecha` (creación/emisión, Día X)
+ * caía en el rango — es decir, un saldo se contaba en el período en que se
+ * CREÓ el presupuesto, no en el que se COBRÓ. Encima, el "contado"
+ * (Efectivo/Transferencia) se sumaba por separado usando ese mismo criterio
+ * de `presupuesto.fecha`. Con eso:
+ *   - Una venta emitida en enero y cobrada en febrero aparecía como cobrada
+ *     en enero (o ni aparecía en el período de febrero, que es cuando el
+ *     dinero realmente entró).
+ *   - Daba igual el método de pago: todo se ataba a la fecha de creación,
+ *     tal cual lo detectaste.
+ *
+ * Ahora se reutiliza exactamente la misma fuente de verdad que ya usa
+ * Facturas.jsx para "qué se cobró en este rango" — la RPC
+ * `obtener_presupuestos_facturables` (que ya resuelve Día Y real: 
+ * `presupuesto.fecha_pago` para contado, `saldo.fecha_pago` para CC pagado
+ * de una vez) + las aplicaciones de pago parcial (`pago_aplicacion`, vía
+ * `pago.fecha`) para CC cobrado de a partes. Es la misma lógica de
+ * deduplicación (un saldo con pago parcial no se cuenta dos veces) que ya
+ * está probada en `presupuestosService.obtenerFacturasConDetalles`.
  */
-async function _obtenerSaldosDelPeriodo(desde, hasta) {
-  // Supabase no soporta JOIN cross-table en .select() sin relación directa;
-  // usamos una RPC o hacemos dos queries. Optamos por dos queries (simple y sin RPC extra).
-  const { data: pres, error: e1 } = await supabase
-    .from('presupuesto')
-    .select('id_presupuesto')
+async function _obtenerPagosParcialesEnPeriodo(desde, hasta) {
+  const { data: pagos, error: e1 } = await supabase
+    .from('pago')
+    .select('id_pago, fecha')
     .gte('fecha', desde)
     .lte('fecha', hasta)
 
-  if (e1) manejarError('_obtenerSaldosDelPeriodo(presupuestos)', e1)
-  if (!pres.length) return []
+  if (e1) manejarError('_obtenerPagosParcialesEnPeriodo(pagos)', e1)
+  if (!pagos?.length) return []
 
-  const ids = pres.map(p => p.id_presupuesto)
-  const { data, error: e2 } = await supabase
-    .from('saldo')
-    .select('monto, monto_pendiente, estado, id_presupuesto')
-    .in('id_presupuesto', ids)
+  const idsPago = pagos.map(p => p.id_pago)
 
-  if (e2) manejarError('_obtenerSaldosDelPeriodo(saldos)', e2)
-  return data.map(r => ({
-    monto:          Number(r.monto),
-    // Fallback a `monto` para entornos donde la migración de pago parcial
-    // todavía no corrió (columna null) — mismo criterio que mapSaldo() en
-    // saldosService.js, así ambos servicios quedan consistentes.
-    montoPendiente: r.monto_pendiente != null ? Number(r.monto_pendiente) : Number(r.monto),
-    estado:         r.estado,
-  }))
+  const { data: aplicaciones, error: e2 } = await supabase
+    .from('pago_aplicacion')
+    .select(`
+      id_aplicacion,
+      id_pago,
+      monto_aplicado,
+      saldo ( id_presupuesto )
+    `)
+    .in('id_pago', idsPago)
+
+  if (e2) manejarError('_obtenerPagosParcialesEnPeriodo(aplicaciones)', e2)
+
+  return (aplicaciones ?? [])
+    .filter(a => a.saldo?.id_presupuesto != null)
+    .map(a => ({
+      idPresupuesto: a.saldo.id_presupuesto,
+      montoAplicado: Number(a.monto_aplicado),
+    }))
+}
+
+async function _obtenerCobradoEnPeriodo(desde, hasta) {
+  const [rpcResult, pagosParciales] = await Promise.all([
+    supabase.rpc('obtener_presupuestos_facturables', {
+      fecha_desde: desde,
+      fecha_hasta: hasta,
+    }),
+    _obtenerPagosParcialesEnPeriodo(desde, hasta),
+  ])
+
+  const { data: presupuestos, error } = rpcResult
+  if (error) manejarError('_obtenerCobradoEnPeriodo(rpc)', error)
+
+  // Igual que en Facturas: un presupuesto con AL MENOS un pago parcial no se
+  // cuenta también como "venta completa" — evita duplicar lo cobrado.
+  const idsConPagoParcial = new Set(pagosParciales.map(pp => pp.idPresupuesto))
+  const ventas = (presupuestos ?? []).filter(p => !idsConPagoParcial.has(p.id_presupuesto))
+
+  const montoContado = ventas
+    .filter(p => p.metodo_pago === 'efectivo' || p.metodo_pago === 'transferencia')
+    .reduce((a, p) => a + Number(p.monto), 0)
+
+  const montoCCDirecto = ventas
+    .filter(p => p.metodo_pago === 'cc15' || p.metodo_pago === 'cc30')
+    .reduce((a, p) => a + Number(p.monto), 0)
+
+  const montoCCParcial = pagosParciales.reduce((a, pp) => a + pp.montoAplicado, 0)
+
+  return {
+    contado: montoContado,
+    cc:      montoCCDirecto + montoCCParcial,
+    total:   montoContado + montoCCDirecto + montoCCParcial,
+  }
 }
 
 /**
@@ -714,7 +765,7 @@ export async function obtenerMetricas(desde, hasta) {
     topProveedores,
     { clientesRecurrentes, clientesNuevos },
     { margenBrutoMonto, margenBrutoPct },
-    saldosDelPeriodo,
+    cobradoEnPeriodo,
   ] = await Promise.all([
     // Globales
     _obtenerStockCritico(),
@@ -736,7 +787,7 @@ export async function obtenerMetricas(desde, hasta) {
     _obtenerTopProveedores(desde, hasta),
     _obtenerClientesRecurrentesVsNuevos(desde, hasta),
     _obtenerMargenBruto(desde, hasta),
-    _obtenerSaldosDelPeriodo(desde, hasta),
+    _obtenerCobradoEnPeriodo(desde, hasta),
   ])
 
   // ── Cálculos derivados (pura lógica JS, sin más queries) ──────────────────
@@ -773,32 +824,29 @@ export async function obtenerMetricas(desde, hasta) {
     return a + (diff > 0 ? diff : 0)
   }, 0)
 
-  // 3. Cobrado real vs. pendiente CC
+  // 3. Cobrado real (base caja) vs. deuda pendiente CC
   //
-  // CORRECCIÓN (Pago Parcial): antes se ignoraba por completo el estado
-  // 'parcial'. Un saldo con pago parcial no sumaba nada a "cobrado" (aunque
-  // ya se hubiera cobrado una parte) ni a "pendiente" (aunque siguiera
-  // debiendo el resto) — el dinero literalmente desaparecía del KPI.
+  // CORRECCIÓN (montos mal mostrados en Saldos Pendientes / Ingresos):
+  // antes ambas cosas se calculaban filtrando por `presupuesto.fecha`
+  // (fecha de CREACIÓN), sin importar el método de pago — exactamente el
+  // síntoma reportado. Ahora:
   //
-  // Regla de negocio (aplica igual con 0% pagado que con pago parcial en curso):
-  //   Saldo Pendiente Total = Σ (Monto Total Factura − Pagos Parciales Realizados)
-  //                         = Σ montoPendiente de saldos con deuda activa
-  //   Cobrado (CC)          = Σ (Monto Total Factura − montoPendiente)
-  //                         = lo efectivamente percibido en CADA saldo,
-  //                           sea 'pagado' (100%) o 'parcial' (lo que se cobró hasta ahora)
-  const montoCCPagado = saldosDelPeriodo
-    .filter(s => s.estado === 'pagado' || s.estado === 'parcial')
-    .reduce((a, s) => a + (s.monto - s.montoPendiente), 0)
-
-  const montoCCPendiente = saldosDelPeriodo
-    .filter(s => s.estado === 'pendiente' || s.estado === 'parcial')
-    .reduce((a, s) => a + s.montoPendiente, 0)
-
-  const montoContado     = presupuestos
-    .filter(p => (p.metodoPago === 'efectivo' || p.metodoPago === 'transferencia') && p.estado === 'pagado')
-    .reduce((a, p) => a + p.monto, 0)
-  m.cobradoReal = montoContado + montoCCPagado
-  m.pendienteCC = montoCCPendiente
+  //   - `cobradoReal` sale de `_obtenerCobradoEnPeriodo`, que mide dinero
+  //     efectivamente cobrado DENTRO del rango [desde, hasta] según la
+  //     fecha real de cada cobro (`presupuesto.fecha_pago` para contado,
+  //     `saldo.fecha_pago` para CC saldado de una vez, `pago.fecha` para
+  //     cada aplicación parcial de CC) — no la fecha de emisión.
+  //
+  //   - `pendienteCC` deja de estar recortado por período. La deuda
+  //     pendiente no "pertenece" a un rango de fechas — es una foto del
+  //     estado actual, sea cual sea el período que se esté mirando en
+  //     pantalla. Por eso ahora reusa el mismo total que ya calcula
+  //     `_obtenerSaldosPendientesGlobal` para la sección "Saldos pendientes
+  //     globales" de más abajo: antes ambos números podían no coincidir
+  //     (se calculaban con criterios distintos) y eso también hacía parecer
+  //     "mal mostrados" los saldos pendientes.
+  m.cobradoReal = cobradoEnPeriodo.total
+  m.pendienteCC = saldosPendientesGlobal.reduce((a, s) => a + s.montoPendiente, 0)
 
   // 4. Ingresos extra y dinero invertido
   m.ingresosExtra  = ingresosExtra
