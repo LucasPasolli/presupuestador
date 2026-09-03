@@ -251,6 +251,76 @@ async function _obtenerSaldosPendientesGlobal() {
 }
 
 /**
+ * Bloque 4b (global): Demora promedio de pago por cliente — Cuenta Corriente.
+ *
+ * Historia de usuario: "Como encargado de cobranzas quiero visualizar el
+ * tiempo promedio de demora en el pago de cada cliente para identificar
+ * morosos, evaluar riesgo crediticio y priorizar acciones de cobranza."
+ *
+ * Alcance de datos: solo las ventas en Cuenta Corriente generan una fila en
+ * `saldo` con `fecha_vto` (fecha de vencimiento pactada). Las ventas de
+ * contado (efectivo/transferencia) se cobran en el acto y no tienen
+ * vencimiento que pueda demorarse, así que esta métrica vive sobre `saldo`
+ * y no sobre `presupuesto`.
+ *
+ *   demora (días) = fecha_pago − fecha_vto
+ *     > 0  → el cliente pagó tarde
+ *     = 0  → pagó justo al vencimiento
+ *     < 0  → pagó antes de vencer
+ *
+ * Escenario 3 (AC): un saldo sin `fecha_pago` (estado 'pendiente' o
+ * 'parcial', deuda todavía abierta) no tiene una demora "cerrada" — se
+ * excluye filtrando `estado = 'pagado'`, nunca se promedia sobre deuda viva.
+ * También se excluyen saldos sin `fecha_vto` (no hay contra qué medir).
+ *
+ * Es una métrica GLOBAL, no se recorta por el [desde, hasta] del selector
+ * de período de la pantalla: el objetivo es evaluar el riesgo crediticio
+ * histórico completo de cada cliente (Escenario 1: "promediada entre TODAS
+ * las transacciones del cliente"), igual que ya hace
+ * `_obtenerSaldosPendientesGlobal` para la deuda viva.
+ *
+ * CORRECCIÓN (agregación movida al servidor): las versiones anteriores
+ * traían los saldos pagados al navegador (primero sin límite — truncaba en
+ * silencio pasadas 1000 filas — y después paginando con `.range()`) para
+ * agrupar por cliente en JS. Con `saldo` creciendo a decenas de miles de
+ * filas, eso significa transferir todo ese histórico por red en cada carga
+ * de Estadísticas solo para tirar la mayoría de los campos después de
+ * agregar. Ahora el GROUP BY corre en Postgres vía la RPC
+ * `fn_demora_pago_por_cliente` (ver migration_demora_pago_cliente.sql) —
+ * mismo enfoque que ya usa `pagosService.registrarPagoParcial` con
+ * `fn_aplicar_pago_cliente` — y el cliente solo recibe una fila por cliente
+ * con los 3 números ya calculados.
+ *
+ * Equivale a (ahora ejecutado server-side, ver la función SQL):
+ *   SELECT s.id_cliente,
+ *          AVG(s.fecha_pago - s.fecha_vto) AS demora_promedio,
+ *          MAX(s.fecha_pago - s.fecha_vto) AS demora_maxima,
+ *          COUNT(*)                        AS cant_pagos
+ *   FROM saldo s
+ *   LEFT JOIN cliente c ON c.id_cliente = s.id_cliente
+ *   WHERE s.estado = 'pagado' AND s.fecha_vto IS NOT NULL AND s.fecha_pago IS NOT NULL
+ *   GROUP BY s.id_cliente, c.nombre, c.apellido, c.apodo
+ *   ORDER BY demora_promedio DESC
+ */
+async function _obtenerDemoraPagoPorCliente() {
+  const { data, error } = await supabase.rpc('fn_demora_pago_por_cliente')
+
+  if (error) manejarError('_obtenerDemoraPagoPorCliente', error)
+
+  // La RPC ya devuelve una fila agregada por cliente y ordenada de mayor a
+  // menor demora (Escenario 2 del AC) — acá solo se mapea snake_case → camelCase,
+  // igual que en el resto del service.
+  return (data ?? []).map(row => ({
+    idCliente:          row.id_cliente,
+    nombre:             `${row.nombre ?? ''} ${row.apellido ?? ''}`.trim() || `Cliente #${row.id_cliente}`,
+    apodo:              row.apodo,
+    cantPagos:          Number(row.cant_pagos),
+    demoraPromedioDias: Number(row.demora_promedio_dias),
+    demoraMaximaDias:   Number(row.demora_maxima_dias),
+  }))
+}
+
+/**
  * Bloque 5: Mix de métodos de pago — calculado desde los presupuestos del período
  * (ya disponibles, no requiere query extra).
  */
@@ -749,6 +819,7 @@ export async function obtenerMetricas(desde, hasta) {
     { stockCritico, cantidadStockCritico },
     inversionesGlobal,
     saldosPendientesGlobal,
+    demoraPagoPorCliente,
 
     // Grupo B: del período
     { presupuestos, mapaSubtotal },
@@ -771,6 +842,7 @@ export async function obtenerMetricas(desde, hasta) {
     _obtenerStockCritico(),
     _obtenerInversionesGlobal(),
     _obtenerSaldosPendientesGlobal(),
+    _obtenerDemoraPagoPorCliente(),
 
     // Del período
     _obtenerPresupuestosPeriodo(desde, hasta),
@@ -926,6 +998,9 @@ export async function obtenerMetricas(desde, hasta) {
   // 18. Margen bruto
   m.margenBrutoMonto = margenBrutoMonto
   m.margenBrutoPct   = margenBrutoPct
+
+  // 19. Demora de pago por cliente (Cuenta Corriente, histórico global)
+  m.demoraPagoPorCliente = demoraPagoPorCliente
 
   return m
 }

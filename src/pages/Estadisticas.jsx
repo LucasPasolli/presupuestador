@@ -27,6 +27,18 @@ function pct(a, b) {
 
 function today() { return new Date().toISOString().slice(0, 10) }
 
+// Paleta según qué tan grave es la demora de pago de un cliente:
+// rojo = alerta de cobranza, amarillo = tarde pero leve, verde = a tiempo o antes.
+function colorDemora(dias) {
+  if (dias > 15) return 'text-red-400 bg-red-500/10 border-red-500/30'
+  if (dias > 0)  return 'text-yellow-400 bg-yellow-500/10 border-yellow-500/30'
+  return 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30'
+}
+
+function fmtDemora(dias) {
+  return `${dias > 0 ? '+' : ''}${dias} d`
+}
+
 function nMesesAtras(n) {
   const d = new Date()
   d.setMonth(d.getMonth() - n + 1)
@@ -256,6 +268,191 @@ function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
   )
 }
 
+// ─── Modal: listado completo de demora de pago por cliente ────────────────
+// Escenario 2 (AC "Demora de Pago por Cliente"): permite ordenar de mayor a
+// menor demora (o por cualquier otra columna) cliqueando el encabezado.
+
+function ModalDemoraClientes({ open, onClose, clientes }) {
+  const [pagina, setPagina]   = useState(1)
+  const [sortKey, setSortKey] = useState('demoraPromedioDias')
+  const [sortDir, setSortDir] = useState('desc') // 'asc' | 'desc'
+
+  useEffect(() => { if (open) setPagina(1) }, [open])
+
+  if (!open) return null
+
+  function toggleSort(key) {
+    setPagina(1)
+    if (key === sortKey) {
+      setSortDir(d => (d === 'desc' ? 'asc' : 'desc'))
+    } else {
+      setSortKey(key)
+      // Para nombre tiene más sentido arrancar A→Z; para las columnas
+      // numéricas arrancamos mostrando la más alta primero.
+      setSortDir(key === 'nombre' ? 'asc' : 'desc')
+    }
+  }
+
+  const ordenados = [...clientes].sort((a, b) => {
+    const va = a[sortKey]
+    const vb = b[sortKey]
+    if (typeof va === 'string') {
+      return sortDir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va)
+    }
+    return sortDir === 'asc' ? va - vb : vb - va
+  })
+
+  const totalPaginas = Math.max(1, Math.ceil(ordenados.length / PAGE_SIZE))
+  const inicio       = (pagina - 1) * PAGE_SIZE
+  const pagItems     = ordenados.slice(inicio, inicio + PAGE_SIZE)
+
+  const columnas = [
+    { key: 'nombre',             label: 'Cliente',      align: 'left'  },
+    { key: 'cantPagos',          label: 'Pagos CC',     align: 'right' },
+    { key: 'demoraPromedioDias', label: 'Demora prom.', align: 'right' },
+    { key: 'demoraMaximaDias',   label: 'Demora máx.',  align: 'right' },
+  ]
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/75" onClick={onClose} />
+      <div className="relative bg-surface-800 border border-surface-700 rounded-2xl shadow-2xl
+                      w-full max-w-3xl animate-slide-up flex flex-col max-h-[90vh]">
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-5 border-b border-surface-700 flex-shrink-0">
+          <div>
+            <h2 className="font-body font-semibold text-white flex items-center gap-2">
+              <Clock size={16} className="text-yellow-500" />
+              Demora de pago por cliente
+            </h2>
+            <p className="text-surface-500 text-xs font-body mt-0.5">
+              {clientes.length} cliente{clientes.length !== 1 ? 's' : ''} con Cuenta Corriente cobrada
+            </p>
+          </div>
+          <button onClick={onClose}
+            className="text-surface-400 hover:text-white transition-colors text-2xl leading-none w-8 h-8
+                       flex items-center justify-center rounded-lg hover:bg-surface-700">
+            ×
+          </button>
+        </div>
+
+        {/* Tabla */}
+        <div className="overflow-y-auto flex-1">
+          {clientes.length === 0 ? (
+            <div className="text-center py-16 text-surface-500 font-body text-sm px-6">
+              Todavía no hay saldos de Cuenta Corriente cobrados con fecha de vencimiento
+              registrada — la demora de pago se calcula solo sobre deuda ya saldada.
+            </div>
+          ) : (
+            <table className="w-full text-sm font-body">
+              <thead className="sticky top-0 bg-surface-800 z-10">
+                <tr className="border-b border-surface-700">
+                  <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-10">#</th>
+                  {columnas.map(col => (
+                    <th key={col.key}
+                      onClick={() => toggleSort(col.key)}
+                      className={`${col.align === 'right' ? 'text-right' : 'text-left'}
+                                  text-surface-400 text-xs tracking-widest uppercase py-3 px-4
+                                  cursor-pointer select-none hover:text-white transition-colors whitespace-nowrap`}>
+                      {col.label}
+                      {sortKey === col.key && (
+                        <span className="text-brand-400 ml-1">{sortDir === 'desc' ? '▼' : '▲'}</span>
+                      )}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {pagItems.map((c, i) => {
+                  const rank = inicio + i + 1
+                  return (
+                    <tr key={c.idCliente}
+                      className="border-b border-surface-700/40 last:border-0 hover:bg-surface-700/30 transition-colors">
+                      <td className="py-3 px-4">
+                        <span className="font-mono text-xs font-bold text-surface-600">{rank}</span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="text-surface-200 truncate block max-w-xs" title={c.nombre}>
+                          {c.nombre}{c.apodo ? ` (${c.apodo})` : ''}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <span className="text-surface-300 font-mono">{c.cantPagos}</span>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <span className={`font-mono font-bold px-2 py-0.5 rounded-lg border text-xs ${colorDemora(c.demoraPromedioDias)}`}>
+                          {fmtDemora(c.demoraPromedioDias)}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <span className="text-surface-400 font-mono text-xs">{fmtDemora(c.demoraMaximaDias)}</span>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Paginación */}
+        {totalPaginas > 1 && (
+          <div className="flex items-center justify-between px-6 py-4 border-t border-surface-700 flex-shrink-0">
+            <span className="text-surface-500 text-xs font-body">
+              Página {pagina} de {totalPaginas} · {ordenados.length} clientes
+            </span>
+            <div className="flex items-center gap-1">
+              <button onClick={() => setPagina(1)} disabled={pagina === 1}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                «
+              </button>
+              <button onClick={() => setPagina(v => Math.max(1, v - 1))} disabled={pagina === 1}
+                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                ‹ Ant.
+              </button>
+
+              {Array.from({ length: totalPaginas }, (_, i) => i + 1)
+                .filter(p => p === 1 || p === totalPaginas || Math.abs(p - pagina) <= 2)
+                .reduce((acc, p, idx, arr) => {
+                  if (idx > 0 && p - arr[idx - 1] > 1) acc.push('…')
+                  acc.push(p)
+                  return acc
+                }, [])
+                .map((item, idx) =>
+                  item === '…' ? (
+                    <span key={`sep-${idx}`} className="px-2 text-surface-600 text-xs">…</span>
+                  ) : (
+                    <button key={item} onClick={() => setPagina(item)}
+                      className={`w-8 h-8 rounded-lg text-xs font-body font-medium transition-all
+                        ${item === pagina
+                          ? 'bg-brand-500 text-white'
+                          : 'text-surface-400 hover:bg-surface-700 hover:text-white'}`}>
+                      {item}
+                    </button>
+                  )
+                )}
+
+              <button onClick={() => setPagina(v => Math.min(totalPaginas, v + 1))} disabled={pagina === totalPaginas}
+                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                Sig. ›
+              </button>
+              <button onClick={() => setPagina(totalPaginas)} disabled={pagina === totalPaginas}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                »
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ─── Gráfico de dona genérico (reemplaza GraficoMensual) ──────────────────
 
 function GraficoDonaGenerico({ datos, colores }) {
@@ -378,6 +575,7 @@ export default function Estadisticas() {
   const [metricas,       setMetricas]       = useState(null)
   const [cargando,       setCargando]       = useState(false)
   const [modalProductos, setModalProductos] = useState(false)
+  const [modalDemora,    setModalDemora]    = useState(false)
 
   const desde = rangoIdx < 4 ? RANGOS[rangoIdx].desde() : desdeCustom
   const hasta = rangoIdx < 4 ? RANGOS[rangoIdx].hasta() : hastaCustom
@@ -545,6 +743,13 @@ export default function Estadisticas() {
         productos={m.todosProductosVendidos ?? []}
         desde={desde}
         hasta={hasta}
+      />
+
+      {/* ── Modal demora de pago por cliente ── */}
+      <ModalDemoraClientes
+        open={modalDemora}
+        onClose={() => setModalDemora(false)}
+        clientes={m.demoraPagoPorCliente ?? []}
       />
 
       {/* ── 2. Top artículos más vendidos + Top clientes ── */}
@@ -719,6 +924,54 @@ export default function Estadisticas() {
           )}
         </Card>
       </div>
+
+      {/* ── 4b. Demora de pago por cliente (full width, cobranza) ── */}
+      <Card className="p-6 overflow-hidden">
+        <div
+          className="cursor-pointer -m-6 p-6 hover:bg-brand-500/5 transition-all duration-200 group"
+          onClick={() => setModalDemora(true)}
+        >
+          <h3 className="font-body font-semibold text-white text-sm mb-1 flex items-center gap-2">
+            <Clock size={15} className="text-yellow-500" />
+            Demora de pago por cliente
+            <span className="ml-auto text-brand-500/70 text-xs font-body font-normal
+                             group-hover:text-brand-400 transition-colors flex items-center gap-1">
+              Ver todos →
+            </span>
+          </h3>
+          <p className="text-surface-500 text-xs font-body mb-4">
+            Promedio de días entre vencimiento y pago real en Cuenta Corriente · histórico completo del cliente
+            {' '}({m.demoraPagoPorCliente?.length ?? 0} con pagos registrados) · mayor a menor demora
+          </p>
+          {(!m.demoraPagoPorCliente || m.demoraPagoPorCliente.length === 0) ? (
+            <p className="text-surface-500 text-sm font-body">
+              Todavía no hay saldos de Cuenta Corriente cobrados con fecha de vencimiento registrada.
+            </p>
+          ) : (
+            <div className="space-y-1">
+              {m.demoraPagoPorCliente.slice(0, 8).map((c, i) => (
+                <div key={c.idCliente}
+                  className="flex items-center justify-between gap-3 py-2 border-b border-surface-700/50 last:border-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-surface-600 font-mono text-xs w-5 flex-shrink-0">{i + 1}.</span>
+                    <span className="text-surface-200 text-sm font-body truncate" title={c.nombre}>
+                      {c.nombre}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3 flex-shrink-0">
+                    <span className="text-surface-500 text-xs font-body whitespace-nowrap">
+                      {c.cantPagos} pago{c.cantPagos !== 1 ? 's' : ''}
+                    </span>
+                    <span className={`font-mono font-bold text-xs px-2 py-0.5 rounded-lg border whitespace-nowrap ${colorDemora(c.demoraPromedioDias)}`}>
+                      {fmtDemora(c.demoraPromedioDias)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </Card>
 
       {/* ── 5. Impacto de descuentos y recargos (full width) ── */}
       <Card className="p-6">
