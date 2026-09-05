@@ -11,7 +11,7 @@ import {
 } from '../services/productosService'
 import { supabase } from '../lib/supabase'
 import { Button, Card, PageHeader, Modal, Input, Select, Badge, Table, Tr, Td } from '../components/ui'
-import { Plus, Search, Pencil, Trash2, ChevronDown, ChevronUp, PackagePlus, X, CheckCircle2, TrendingUp, FileSpreadsheet } from 'lucide-react'
+import { Plus, Search, Pencil, Trash2, ChevronDown, ChevronUp, PackagePlus, X, CheckCircle2, TrendingUp, FileSpreadsheet, AlertTriangle } from 'lucide-react'
 import * as XLSX from 'xlsx'
 
 // ─── Constantes ───────────────────────────────────────────────────────────
@@ -28,19 +28,25 @@ function fmt(n) {
 
 // ─── Toast ────────────────────────────────────────────────────────────────
 
-function Toast({ message, visible, onDone }) {
+function Toast({ message, visible, onDone, type = 'success' }) {
   useEffect(() => {
     if (!visible) return
-    const t = setTimeout(onDone, 3000)
+    const t = setTimeout(onDone, 3800)
     return () => clearTimeout(t)
   }, [visible, onDone])
+
+  const styles = {
+    success: { wrap: 'bg-emerald-900/95 border-emerald-500/50', text: 'text-emerald-100', icon: 'text-emerald-400', Icon: CheckCircle2 },
+    info:    { wrap: 'bg-amber-900/95 border-amber-500/50',     text: 'text-amber-100',   icon: 'text-amber-400',   Icon: AlertTriangle },
+    error:   { wrap: 'bg-red-900/95 border-red-500/50',         text: 'text-red-100',     icon: 'text-red-400',     Icon: AlertTriangle },
+  }[type]
 
   return (
     <div className={`fixed top-5 right-5 z-[9999] transition-all duration-300 pointer-events-none
       ${visible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2'}`}>
-      <div className="flex items-center gap-3 bg-emerald-900/95 border border-emerald-500/50 rounded-2xl px-5 py-3 shadow-2xl backdrop-blur-sm">
-        <CheckCircle2 size={18} className="text-emerald-400 flex-shrink-0" />
-        <span className="text-emerald-100 text-sm font-body">{message}</span>
+      <div className={`flex items-center gap-3 border rounded-2xl px-5 py-3 shadow-2xl backdrop-blur-sm max-w-md ${styles.wrap}`}>
+        <styles.Icon size={18} className={`flex-shrink-0 ${styles.icon}`} />
+        <span className={`text-sm font-body ${styles.text}`}>{message}</span>
       </div>
     </div>
   )
@@ -530,11 +536,15 @@ export default function Inventario() {
   const [modalActualizarPrecios, setModalActualizarPrecios] = useState(false)
   const [selected,      setSelected]      = useState(null)
   const [deleteConfirm, setDeleteConfirm] = useState(null)
-  const [toast,         setToast]         = useState('')
+  const [toast,         setToast]         = useState(null)
+
+  const showToast = useCallback((message, type = 'success') => setToast({ message, type }), [])
 
   const load = useCallback(async (resetPage = true) => {
     try {
-      const [cats, prods] = await Promise.all([obtenerCategorias(), obtenerProductos()])
+      // incluirInactivos: false → los productos dados de baja lógica nunca
+      // vuelven a listarse en el catálogo, sin necesidad de filtro visual.
+      const [cats, prods] = await Promise.all([obtenerCategorias(), obtenerProductos({ incluirInactivos: false })])
       setCategorias(cats)
       const conStock = prods.map((p) => ({ ...p, categoriaNombre: p.categoria, stockTotal: p.cantidad }))
       setAllProductos(conStock)
@@ -587,11 +597,21 @@ export default function Inventario() {
 
   async function eliminar(p) {
     try {
+      // eliminarProducto resuelve en el servidor, de forma atómica, si el
+      // producto se puede borrar físicamente o si -por tener historial en
+      // presupuestos/facturas- debe darse de baja lógica en su lugar. En
+      // cualquier caso, para quien usa Inventario el resultado visible es
+      // el mismo: el producto deja de listarse.
       await eliminarProducto(p.idProducto)
       setDeleteConfirm(null)
       loadSinResetPage()
-      setToast(`"${p.nombre.slice(0, 30)}..." eliminado`)
-    } catch (err) { console.error('[Inventario] Error eliminando:', err) }
+      showToast(`"${p.nombre.slice(0, 30)}" eliminado`)
+    } catch (err) {
+      console.error('[Inventario] Error eliminando:', err)
+      // No se expone el mensaje técnico del backend: solo un aviso genérico.
+      showToast('No se pudo eliminar el producto. Intentá nuevamente.', 'error')
+      setDeleteConfirm(null)
+    }
   }
 
   function exportarExcel() {
@@ -622,7 +642,7 @@ export default function Inventario() {
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
-      <Toast message={toast} visible={!!toast} onDone={() => setToast('')} />
+      <Toast message={toast?.message} type={toast?.type} visible={!!toast} onDone={() => setToast(null)} />
 
       <PageHeader title="Inventario" subtitle="Gestión de productos"
         actions={
@@ -821,20 +841,20 @@ export default function Inventario() {
 
       {/* ── Modales ── */}
       <NuevoProductoModal open={modalNuevo} onClose={() => setModalNuevo(false)} categorias={categorias}
-        onSaved={() => { loadSinResetPage(); setToast('Producto creado correctamente ✓') }} />
+        onSaved={() => { loadSinResetPage(); showToast('Producto creado correctamente ✓') }} />
       <EditarProductoModal open={modalEditar} onClose={() => setModalEditar(false)} producto={selected} categorias={categorias}
-        onSaved={() => { loadSinResetPage(); setToast('Producto actualizado ✓') }} />
+        onSaved={() => { loadSinResetPage(); showToast('Producto actualizado ✓') }} />
       <StockModal open={modalStock} onClose={() => setModalStock(false)} producto={selected}
-        onSaved={() => { loadSinResetPage(); setToast('Stock actualizado ✓') }} />
+        onSaved={() => { loadSinResetPage(); showToast('Stock actualizado ✓') }} />
       <CatModal open={modalCat} onClose={() => setModalCat(false)} categorias={categorias}
-        onSaved={() => { loadSinResetPage(); setToast('Categoría creada ✓') }} />
+        onSaved={() => { loadSinResetPage(); showToast('Categoría creada ✓') }} />
       <ActualizarPreciosModal open={modalActualizarPrecios} onClose={() => setModalActualizarPrecios(false)}
-        onSaved={() => { loadSinResetPage(); setToast('Precios actualizados correctamente ✓') }} />
+        onSaved={() => { loadSinResetPage(); showToast('Precios actualizados correctamente ✓') }} />
 
       <Modal open={!!deleteConfirm} onClose={() => setDeleteConfirm(null)} title="Confirmar eliminación" width="max-w-sm">
         <p className="text-surface-300 text-sm font-body mb-4">
           ¿Eliminar <span className="text-white font-medium">"{deleteConfirm?.nombre?.slice(0, 50)}"</span>?
-          Esta acción no se puede deshacer.
+          Esta acción no se puede deshacer y el producto dejará de aparecer en el catálogo.
         </p>
         <div className="flex gap-2">
           <Button variant="secondary" className="flex-1" onClick={() => setDeleteConfirm(null)}>Cancelar</Button>

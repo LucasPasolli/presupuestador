@@ -34,6 +34,20 @@ function mapPresupuesto(row) {
 
 function mapDetalle(row) {
   if (!row) return null
+
+  // Trazabilidad de productos que ya no están en el catálogo activo: puede
+  // ser porque el producto fue dado de baja lógica (tiene historial y no se
+  // pudo borrar físicamente) o, en datos muy antiguos, porque la fila de
+  // producto ya no existe. Solo se puede determinar cuando la consulta
+  // incluyó el JOIN a `producto` (columna presente en `row`, aunque sea
+  // null); si no lo incluyó, queda en false por defecto — no afecta nada
+  // porque nombreProducto/precioUnitario ya están a salvo como snapshot.
+  const tieneJoinProducto = Object.prototype.hasOwnProperty.call(row, 'producto')
+  const productoEliminado = tieneJoinProducto && row.id_producto != null && (
+    row.producto === null ||        // la fila de producto ya no existe físicamente
+    row.producto.activo === false   // o fue dada de baja lógica
+  )
+
   return {
     idDetalle:       row.id_detalle,
     idPresupuesto:   row.id_presupuesto,
@@ -45,6 +59,7 @@ function mapDetalle(row) {
     precioConPromo:  row.precio_con_promo != null ? Number(row.precio_con_promo) : null,
     idPromocion:     row.id_promocion,
     subtotal:        Number(row.subtotal),
+    productoEliminado,
   }
 }
 
@@ -177,7 +192,11 @@ export async function obtenerPresupuestoPorId(idPresupuesto) {
 
 /**
  * Devuelve los detalles (ítems) de un presupuesto.
- * Selección explícita de campos — omite columnas internas no usadas en la UI.
+ * Incluye el JOIN a `producto (activo)` -liviano, solo un booleano- para que
+ * el consumidor pueda marcar en la UI los ítems cuyo producto ya no está en
+ * el catálogo (fue eliminado o dado de baja lógica). Ver `mapDetalle` /
+ * `productoEliminado`. El nombre y precio históricos no dependen de este
+ * JOIN: siguen viniendo del snapshot en nombre_producto/precio_unitario.
  */
 export async function obtenerDetallesDePresupuesto(idPresupuesto) {
   const { data, error } = await supabase
@@ -192,7 +211,8 @@ export async function obtenerDetallesDePresupuesto(idPresupuesto) {
       precio_unitario,
       precio_con_promo,
       id_promocion,
-      subtotal
+      subtotal,
+      producto ( activo )
     `)
     .eq('id_presupuesto', idPresupuesto)
     .order('id_detalle', { ascending: true })
@@ -222,7 +242,7 @@ export async function obtenerDetallesConNombreDePresupuesto(idPresupuesto) {
       precio_con_promo,
       id_promocion,
       subtotal,
-      producto ( nombre )
+      producto ( nombre, activo )
     `)
     .eq('id_presupuesto', idPresupuesto)
     .order('id_detalle', { ascending: true })
@@ -274,7 +294,8 @@ export async function obtenerPresupuestosConDetalles({
         precio_unitario,
         precio_con_promo,
         id_promocion,
-        subtotal
+        subtotal,
+        producto ( activo )
       )
     `, { count: 'exact' })
     .order('fecha', { ascending: false })
@@ -426,7 +447,7 @@ export async function obtenerFacturasConDetalles(desde, hasta) {
         precio_con_promo,
         id_promocion,
         subtotal,
-        producto ( nombre )
+        producto ( nombre, activo )
       `)
       .in('id_presupuesto', ids)
       .order('id_detalle', { ascending: true })

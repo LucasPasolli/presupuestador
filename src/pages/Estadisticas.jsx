@@ -1,6 +1,7 @@
 // src/pages/Estadisticas.jsx
 import { useState, useEffect, useCallback } from 'react'
-import { obtenerMetricas } from '../services/estadisticasService'
+import { obtenerMetricas, obtenerTicketPromedioPorCliente } from '../services/estadisticasService'
+import { useDebounce } from '../hooks/useDebounce'
 import { Card, PageHeader, Button } from '../components/ui'
 import {
   TrendingUp, TrendingDown, Wallet, Clock, Users, Package,
@@ -48,7 +49,12 @@ function nMesesAtras(n) {
 
 // ─── KPI Card ──────────────────────────────────────────────────────────────
 
-function KpiCard({ icon: Icon, label, value, sub, color = 'brand', trend }) {
+// Acepta un `onClick` opcional para KPIs con drill-down (ej. Ticket promedio
+// → detalle por cliente). Cuando se provee, la card se renderiza como un
+// <button> real (no un <div onClick>) para que sea accesible por teclado
+// (foco, Enter/Space) y anunciada por lectores de pantalla como elemento
+// interactivo — WCAG 2.1 AA (2.1.1 Teclado, 4.1.2 Nombre/Rol/Valor).
+function KpiCard({ icon: Icon, label, value, sub, color = 'brand', trend, onClick, drillDownLabel }) {
   const colors = {
     brand:   'text-brand-400  bg-brand-500/10  border-brand-500/20',
     green:   'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
@@ -57,16 +63,26 @@ function KpiCard({ icon: Icon, label, value, sub, color = 'brand', trend }) {
     blue:    'text-blue-400    bg-blue-500/10    border-blue-500/20',
     violet:  'text-violet-400  bg-violet-500/10  border-violet-500/20',
   }
+  const esClickeable = typeof onClick === 'function'
+  const Wrapper = esClickeable ? 'button' : 'div'
+
   return (
-    <div className={`
-      rounded-2xl p-5 flex flex-col gap-3 border transition-all
-      ${label === 'Resultado operativo'
-        ? value.includes('-')
-          ? 'bg-red-500/10 border-red-500/40 shadow-[0_0_25px_rgba(239,68,68,0.15)]'
-          : 'bg-emerald-500/10 border-emerald-500/40 shadow-[0_0_25px_rgba(16,185,129,0.18)]'
-        : 'bg-surface-800 border-surface-700'
-      }
-    `}>
+    <Wrapper
+      {...(esClickeable ? { type: 'button', onClick } : {})}
+      aria-label={esClickeable ? `${label}: ${value}. ${drillDownLabel ?? 'Ver detalle'}.` : undefined}
+      className={`
+        w-full text-left rounded-2xl p-5 flex flex-col gap-3 border transition-all
+        ${esClickeable
+          ? 'cursor-pointer hover:border-brand-500/40 hover:bg-surface-700/50 ' +
+            'focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60 active:scale-[0.98]'
+          : ''}
+        ${label === 'Resultado operativo'
+          ? value.includes('-')
+            ? 'bg-red-500/10 border-red-500/40 shadow-[0_0_25px_rgba(239,68,68,0.15)]'
+            : 'bg-emerald-500/10 border-emerald-500/40 shadow-[0_0_25px_rgba(16,185,129,0.18)]'
+          : 'bg-surface-800 border-surface-700'
+        }
+      `}>
       <div className="flex items-center justify-between">
         <div className={`w-9 h-9 rounded-xl flex items-center justify-center border ${colors[color]}`}>
           <Icon size={17} />
@@ -81,8 +97,13 @@ function KpiCard({ icon: Icon, label, value, sub, color = 'brand', trend }) {
         <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">{label}</p>
         <p className={`font-display text-3xl tracking-widest ${colors[color].split(' ')[0]}`}>{value}</p>
         {sub && <p className="text-surface-500 text-xs font-body mt-1">{sub}</p>}
+        {esClickeable && (
+          <p className="text-brand-400/80 text-[11px] font-body mt-2 flex items-center gap-1" aria-hidden="true">
+            {drillDownLabel ?? 'Ver detalle'} <span>→</span>
+          </p>
+        )}
       </div>
-    </div>
+    </Wrapper>
   )
 }
 
@@ -453,6 +474,295 @@ function ModalDemoraClientes({ open, onClose, clientes }) {
   )
 }
 
+// ─── Modal: drill-down del KPI global "Ticket promedio" por cliente ───────
+// Historia: clic en el indicador global "Ticket Promedio" del dashboard →
+// listado con el ticket promedio individual de cada cliente.
+//
+// Escenario 1 (AC): se dispara desde `onClick` del KpiCard correspondiente.
+// Escenario 3 (AC): ordenamiento por columna (como ModalDemoraClientes) +
+//                    búsqueda por nombre/apodo. La búsqueda se resuelve del
+//                    lado del servidor (ver `obtenerTicketPromedioPorCliente`
+//                    → RPC `fn_ticket_promedio_por_cliente`), debounceada acá
+//                    con el hook compartido `useDebounce` para no disparar
+//                    una consulta por cada tecla.
+// Escenario 4 (AC): un cliente sin compras se ve con "$0" — lo resuelve la
+//                    propia RPC, acá solo se muestra tal cual llega.
+//
+// Carga bajo demanda: a diferencia de ModalTopProductos/ModalDemoraClientes
+// (que reciben datos ya calculados en `obtenerMetricas`), este modal trae
+// TODOS los clientes activos — una consulta más pesada que no tiene sentido
+// pagar en cada carga del dashboard si el usuario nunca hace drill-down
+// (YAGNI). Por eso dispara su propio fetch al abrirse.
+//
+// NOTA sobre el reset de estado al reabrir: este componente, como el resto
+// de los modales de esta pantalla, queda montado todo el tiempo (solo
+// retorna `null` cuando `open` es false) — así que su estado interno
+// (búsqueda, orden, página) sobrevive entre una apertura y la siguiente si
+// no se hace nada. En vez de escribir un efecto "al abrir, resetear todo"
+// (que además dejaría a `useDebounce` sirviendo por 400ms el término viejo
+// de la sesión anterior, mientras el input ya muestra vacío), el padre le
+// pasa una `key` que cambia en cada apertura — React destruye la instancia
+// vieja y monta una completamente nueva, con estado limpio de fábrica sin
+// ningún efecto de reseteo manual.
+
+function ModalTicketPromedioClientes({ open, onClose, desde, hasta, formatoMonto }) {
+  const [datos, setDatos]       = useState([])
+  const [cargando, setCargando] = useState(false)
+  const [error, setError]       = useState(null)
+
+  // `busqueda`: valor crudo del input, se actualiza en cada tecla para que
+  // el campo se sienta responsive. `busquedaEfectiva`: lo que realmente se
+  // manda al servidor, recién cuando el usuario deja de tipear (hook
+  // compartido `useDebounce` — mismo patrón que ya usa el resto de la app
+  // para inputs de búsqueda).
+  const [busqueda, setBusqueda] = useState('')
+  const busquedaEfectiva        = useDebounce(busqueda.trim(), 400)
+
+  const [pagina, setPagina]   = useState(1)
+  const [sortKey, setSortKey] = useState('ticketPromedio')
+  const [sortDir, setSortDir] = useState('desc') // 'asc' | 'desc'
+
+  const cargarDatos = useCallback((termino) => {
+    if (!desde || !hasta) return
+    setCargando(true)
+    setError(null)
+    obtenerTicketPromedioPorCliente(desde, hasta, termino)
+      .then(setDatos)
+      .catch(e => {
+        console.error('[ModalTicketPromedioClientes]', e)
+        setError('No se pudo cargar el detalle por cliente. Intentá de nuevo.')
+      })
+      .finally(() => setCargando(false))
+  }, [desde, hasta])
+
+  // Dispara la consulta: al montar (primera apertura, gracias a la `key`
+  // del padre), si cambia el período vigente, o cuando el término
+  // debounced efectivamente cambió.
+  useEffect(() => {
+    if (!open) return
+    setPagina(1)
+    cargarDatos(busquedaEfectiva)
+  }, [open, desde, hasta, busquedaEfectiva, cargarDatos])
+
+  if (!open) return null
+
+  function toggleSort(key) {
+    setPagina(1)
+    if (key === sortKey) {
+      setSortDir(d => (d === 'desc' ? 'asc' : 'desc'))
+    } else {
+      setSortKey(key)
+      setSortDir(key === 'nombre' ? 'asc' : 'desc')
+    }
+  }
+
+  // El filtrado por nombre/apodo ya vino resuelto por la RPC — acá solo
+  // queda ordenar el resultado (conjunto acotado por la búsqueda, barato
+  // de ordenar en el navegador incluso con miles de clientes activos).
+  const ordenados = [...datos].sort((a, b) => {
+    const va = a[sortKey]
+    const vb = b[sortKey]
+    if (typeof va === 'string') {
+      return sortDir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va)
+    }
+    return sortDir === 'asc' ? va - vb : vb - va
+  })
+
+  const totalPaginas = Math.max(1, Math.ceil(ordenados.length / PAGE_SIZE))
+  const inicio       = (pagina - 1) * PAGE_SIZE
+  const pagItems     = ordenados.slice(inicio, inicio + PAGE_SIZE)
+
+  const columnas = [
+    { key: 'nombre',         label: 'Cliente',         align: 'left'  },
+    { key: 'presupuestos',   label: 'Tickets',         align: 'right' },
+    { key: 'ticketPromedio', label: 'Ticket promedio', align: 'right' },
+  ]
+
+  // Solo la primera carga (todavía sin datos) bloquea toda la vista con un
+  // spinner central. Búsquedas subsiguientes atenúan la tabla existente en
+  // vez de blanquearla — se siente más fluido mientras se tipea.
+  const cargandoInicial = cargando && datos.length === 0
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/75" onClick={onClose} />
+      <div className="relative bg-surface-800 border border-surface-700 rounded-2xl shadow-2xl
+                      w-full max-w-3xl animate-slide-up flex flex-col max-h-[90vh]"
+        role="dialog" aria-modal="true" aria-labelledby="modal-ticket-promedio-titulo">
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-5 border-b border-surface-700 flex-shrink-0 gap-4">
+          <div className="min-w-0">
+            <h2 id="modal-ticket-promedio-titulo"
+              className="font-body font-semibold text-white flex items-center gap-2">
+              <BarChart2 size={16} className="text-blue-400" />
+              Ticket promedio por cliente
+            </h2>
+            <p className="text-surface-500 text-xs font-body mt-0.5">
+              {cargandoInicial
+                ? 'Calculando…'
+                : `${ordenados.length} cliente${ordenados.length !== 1 ? 's' : ''}` +
+                  (busquedaEfectiva ? ` · filtrado por "${busquedaEfectiva}"` : '')}
+              {!cargandoInicial && cargando && (
+                <span className="ml-2 text-brand-400/80">Buscando…</span>
+              )}
+            </p>
+          </div>
+          <button onClick={onClose} aria-label="Cerrar"
+            className="text-surface-400 hover:text-white transition-colors text-2xl leading-none w-8 h-8
+                       flex items-center justify-center rounded-lg hover:bg-surface-700 flex-shrink-0">
+            ×
+          </button>
+        </div>
+
+        {/* Búsqueda */}
+        <div className="px-6 py-3 border-b border-surface-700 flex-shrink-0">
+          <label htmlFor="buscar-cliente-ticket" className="sr-only">Buscar cliente por nombre</label>
+          <input
+            id="buscar-cliente-ticket"
+            type="text"
+            value={busqueda}
+            onChange={e => setBusqueda(e.target.value)}
+            placeholder="Buscar cliente por nombre o apodo…"
+            autoComplete="off"
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
+                       font-body focus:outline-none focus:border-brand-500 placeholder:text-surface-500"
+          />
+        </div>
+
+        {/* Tabla / estados */}
+        <div className="overflow-y-auto flex-1" aria-live="polite">
+          {cargandoInicial ? (
+            <div className="flex items-center justify-center py-16" role="status">
+              <div className="w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+              <span className="sr-only">Cargando ticket promedio por cliente…</span>
+            </div>
+          ) : error ? (
+            <div className="text-center py-16 px-6" role="alert">
+              <p className="text-red-400 font-body text-sm mb-3">{error}</p>
+              <button onClick={() => cargarDatos(busquedaEfectiva)}
+                className="px-4 py-2 rounded-xl text-sm font-body border border-surface-600
+                           text-surface-200 hover:border-brand-500/50 hover:text-white transition-all">
+                Reintentar
+              </button>
+            </div>
+          ) : ordenados.length === 0 ? (
+            <div className="text-center py-16 text-surface-500 font-body text-sm px-6">
+              {busquedaEfectiva
+                ? `Sin resultados para "${busquedaEfectiva}".`
+                : 'No hay clientes activos para mostrar.'}
+            </div>
+          ) : (
+            <table className={`w-full text-sm font-body transition-opacity ${cargando ? 'opacity-50 pointer-events-none' : ''}`}>
+              <thead className="sticky top-0 bg-surface-800 z-10">
+                <tr className="border-b border-surface-700">
+                  <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-10">#</th>
+                  {columnas.map(col => (
+                    <th key={col.key} scope="col"
+                      aria-sort={sortKey === col.key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+                      className={`${col.align === 'right' ? 'text-right' : 'text-left'}
+                                  text-surface-400 text-xs tracking-widest uppercase py-1 px-2 whitespace-nowrap`}>
+                      <button onClick={() => toggleSort(col.key)}
+                        className="inline-flex items-center gap-1 py-2 px-2 rounded-lg hover:text-white
+                                   hover:bg-surface-700/60 transition-colors focus:outline-none
+                                   focus-visible:ring-2 focus-visible:ring-brand-500/60">
+                        {col.label}
+                        {sortKey === col.key && (
+                          <span className="text-brand-400" aria-hidden="true">{sortDir === 'desc' ? '▼' : '▲'}</span>
+                        )}
+                      </button>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {pagItems.map((c, i) => {
+                  const rank = inicio + i + 1
+                  return (
+                    <tr key={c.idCliente ?? `sin-cliente-${rank}`}
+                      className="border-b border-surface-700/40 last:border-0 hover:bg-surface-700/30 transition-colors">
+                      <td className="py-3 px-4">
+                        <span className="font-mono text-xs font-bold text-surface-600">{rank}</span>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="text-surface-200 truncate block max-w-xs" title={c.nombre}>
+                          {c.nombre}{c.apodo ? ` (${c.apodo})` : ''}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <span className="text-surface-300 font-mono">{c.presupuestos}</span>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <span className={`font-mono font-bold ${c.presupuestos === 0 ? 'text-surface-500' : 'text-blue-400'}`}>
+                          {formatoMonto(c.ticketPromedio)}
+                        </span>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Paginación */}
+        {!cargandoInicial && !error && totalPaginas > 1 && (
+          <div className={`flex items-center justify-between px-6 py-4 border-t border-surface-700 flex-shrink-0
+                            transition-opacity ${cargando ? 'opacity-50 pointer-events-none' : ''}`}>
+            <span className="text-surface-500 text-xs font-body">
+              Página {pagina} de {totalPaginas} · {ordenados.length} clientes
+            </span>
+            <div className="flex items-center gap-1">
+              <button onClick={() => setPagina(1)} disabled={pagina === 1}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                «
+              </button>
+              <button onClick={() => setPagina(v => Math.max(1, v - 1))} disabled={pagina === 1}
+                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                ‹ Ant.
+              </button>
+
+              {Array.from({ length: totalPaginas }, (_, i) => i + 1)
+                .filter(p => p === 1 || p === totalPaginas || Math.abs(p - pagina) <= 2)
+                .reduce((acc, p, idx, arr) => {
+                  if (idx > 0 && p - arr[idx - 1] > 1) acc.push('…')
+                  acc.push(p)
+                  return acc
+                }, [])
+                .map((item, idx) =>
+                  item === '…' ? (
+                    <span key={`sep-${idx}`} className="px-2 text-surface-600 text-xs">…</span>
+                  ) : (
+                    <button key={item} onClick={() => setPagina(item)}
+                      className={`w-8 h-8 rounded-lg text-xs font-body font-medium transition-all
+                        ${item === pagina
+                          ? 'bg-brand-500 text-white'
+                          : 'text-surface-400 hover:bg-surface-700 hover:text-white'}`}>
+                      {item}
+                    </button>
+                  )
+                )}
+
+              <button onClick={() => setPagina(v => Math.min(totalPaginas, v + 1))} disabled={pagina === totalPaginas}
+                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                Sig. ›
+              </button>
+              <button onClick={() => setPagina(totalPaginas)} disabled={pagina === totalPaginas}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                »
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ─── Gráfico de dona genérico (reemplaza GraficoMensual) ──────────────────
 
 function GraficoDonaGenerico({ datos, colores }) {
@@ -576,6 +886,12 @@ export default function Estadisticas() {
   const [cargando,       setCargando]       = useState(false)
   const [modalProductos, setModalProductos] = useState(false)
   const [modalDemora,    setModalDemora]    = useState(false)
+  const [modalTicketPromedio, setModalTicketPromedio] = useState(false)
+  // Se incrementa en cada apertura y se usa como `key` del modal más abajo:
+  // fuerza a React a destruir la instancia anterior y montar una nueva con
+  // estado de fábrica (búsqueda vacía, debounce sin arrastrar el término
+  // anterior, página 1) en vez de tener que resetear todo eso a mano.
+  const [ticketPromedioInstancia, setTicketPromedioInstancia] = useState(0)
 
   const desde = rangoIdx < 4 ? RANGOS[rangoIdx].desde() : desdeCustom
   const hasta = rangoIdx < 4 ? RANGOS[rangoIdx].hasta() : hastaCustom
@@ -688,7 +1004,9 @@ export default function Estadisticas() {
         <KpiCard icon={TrendingUp}  label="Ingresos extra"    value={formatoMonto(m.ingresosExtra)}  color="green"
           sub="FCI, plazo fijo, etc." />
         <KpiCard icon={BarChart2}   label="Ticket promedio" value={formatoMonto(m.ticketPromedio)}    color="blue"
-          sub="por presupuesto" />
+          sub="por presupuesto"
+          onClick={() => { setTicketPromedioInstancia(v => v + 1); setModalTicketPromedio(true) }}
+          drillDownLabel="Ver por cliente" />
         <KpiCard icon={Users}       label="Clientes únicos"  value={m.clientesUnicos}               color="blue"
           sub="en el período" />
       </div>
@@ -750,6 +1068,16 @@ export default function Estadisticas() {
         open={modalDemora}
         onClose={() => setModalDemora(false)}
         clientes={m.demoraPagoPorCliente ?? []}
+      />
+
+      {/* ── Modal ticket promedio por cliente (drill-down del KPI global) ── */}
+      <ModalTicketPromedioClientes
+        key={ticketPromedioInstancia}
+        open={modalTicketPromedio}
+        onClose={() => setModalTicketPromedio(false)}
+        desde={desde}
+        hasta={hasta}
+        formatoMonto={formatoMonto}
       />
 
       {/* ── 2. Top artículos más vendidos + Top clientes ── */}

@@ -444,6 +444,72 @@ async function _obtenerTopClientes(desde, hasta) {
 }
 
 /**
+ * Drill-down del KPI global "Ticket promedio" → ticket promedio INDIVIDUAL
+ * por cliente. Consumida directamente por el modal de detalle en
+ * Estadisticas.jsx (no forma parte de `obtenerMetricas`: es una consulta más
+ * pesada — trae todos los clientes, no un Top 10 — y solo se paga su costo
+ * cuando el usuario efectivamente hace drill-down, no en cada carga del
+ * dashboard).
+ *
+ * CORRECCIÓN (agregación y búsqueda movidas al servidor): la primera
+ * versión traía `cliente` completo + todo `presupuesto` del período al
+ * navegador y agregaba con Object.values(mapa)/.sort() en JS — con miles de
+ * clientes activos eso empieza a pesar, tanto en payload de red como en
+ * cómputo del lado del cliente. Ahora el GROUP BY (y el filtro de búsqueda)
+ * corren en Postgres vía la RPC `fn_ticket_promedio_por_cliente` (ver
+ * migration_ticket_promedio_cliente.sql) — mismo enfoque que ya usa
+ * `_obtenerDemoraPagoPorCliente` con `fn_demora_pago_por_cliente` — y acá
+ * solo se mapea snake_case → camelCase sobre filas ya agregadas.
+ *
+ * Escenario 2 del AC ("Cálculo correcto del ticket promedio por cliente"):
+ *   ticketPromedio = montoTotalFacturado / cantidadDeTickets
+ * Mismo universo que ya usa el KPI global `m.ticketPromedio` de
+ * `obtenerMetricas`: presupuestos con estado 'aprobado' o 'pagado', dentro
+ * del rango [desde, hasta] vigente en el selector de la pantalla (no un
+ * histórico completo del cliente — el drill-down respeta el mismo período
+ * que el indicador del que se originó).
+ *
+ * Escenario 3 del AC ("Ordenamiento y búsqueda"): `busqueda` filtra por
+ * nombre/apodo (ILIKE + unaccent, sin distinguir acentos/mayúsculas) del
+ * lado del servidor — el ordenamiento por columna sigue resolviéndose en el
+ * componente sobre el resultado ya filtrado, que es un conjunto acotado.
+ *
+ * Escenario 4 del AC ("Cliente sin compras registradas"): la RPC arranca
+ * desde TODOS los clientes activos (no solo los que aparecen en
+ * `presupuesto`) y solo divide cuando `presupuestos > 0` — división por
+ * cero es imposible por construcción, no por un `if` que alguien podría
+ * romper después.
+ *
+ * NOTA DE SUPUESTOS: idénticas a la versión anterior (ver migración SQL
+ * para el detalle) — clientes activos como universo, clientes dados de baja
+ * que igual facturaron en el período no se esconden, ventas sin
+ * `id_cliente` se agrupan bajo "Cliente eliminado" en vez de descartarse.
+ *
+ * @param {string} desde
+ * @param {string} hasta
+ * @param {string|null} [busqueda] Texto de búsqueda por nombre/apodo. `null`
+ *   o cadena vacía trae el listado completo sin filtrar.
+ */
+export async function obtenerTicketPromedioPorCliente(desde, hasta, busqueda = null) {
+  const { data, error } = await supabase.rpc('fn_ticket_promedio_por_cliente', {
+    fecha_desde: desde,
+    fecha_hasta: hasta,
+    busqueda:    busqueda?.trim() || null,
+  })
+
+  if (error) manejarError('obtenerTicketPromedioPorCliente', error)
+
+  return (data ?? []).map(row => ({
+    idCliente:      row.id_cliente,
+    nombre:         row.nombre,
+    apodo:          row.apodo,
+    presupuestos:   Number(row.presupuestos),
+    monto:          Number(row.monto),
+    ticketPromedio: Number(row.ticket_promedio),
+  }))
+}
+
+/**
  * Bloque 8: Clientes únicos del período (COUNT DISTINCT).
  */
 async function _obtenerClientesUnicos(desde, hasta) {

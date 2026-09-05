@@ -381,7 +381,18 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
                       <tr key={d.idDetalle} className="border-b border-surface-700/50">
                         <td className="py-3 px-4 text-surface-500 text-xs font-mono">{i+1}</td>
                         <td className="py-3 px-4 text-surface-400 font-mono text-xs">#{d.idProducto}</td>
-                        <td className="py-3 px-4 text-white font-body">{d.nombreProducto ?? `#${d.idProducto}`}</td>
+                        <td className="py-3 px-4 text-white font-body">
+                          <div className="flex items-center gap-2">
+                            <span>{d.nombreProducto ?? `#${d.idProducto}`}</span>
+                            {d.productoEliminado && (
+                              <span title="Este producto ya no está disponible en el catálogo actual. Se muestran su nombre y precio tal como estaban al momento de la venta.">
+                                <Badge color="gray">
+                                  <span className="flex items-center gap-1"><AlertCircle size={11} />Producto eliminado</span>
+                                </Badge>
+                              </span>
+                            )}
+                          </div>
+                        </td>
                         <td className="py-3 px-4">{d.medida ? <Badge color="blue">{d.medida}</Badge> : <span className="text-surface-500 text-xs">—</span>}</td>
                         <td className="py-3 px-4 text-surface-200 font-mono text-center">{d.cantidad}</td>
                         <td className="py-3 px-4">
