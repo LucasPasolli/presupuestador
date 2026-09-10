@@ -1,5 +1,5 @@
 // src/pages/Estadisticas.jsx
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { obtenerMetricas } from '../services/estadisticasService'
 import { Card, PageHeader, Button } from '../components/ui'
 import {
@@ -7,6 +7,62 @@ import {
   BarChart2, CreditCard, Tag, AlertTriangle, RefreshCw,
   ShoppingCart, Layers, Repeat, Truck, PieChart, CheckCircle, PiggyBank, Boxes, DollarSign
 } from 'lucide-react'
+
+// ─── Hooks de overlay (modal/drawer): scroll-lock + captura de scroll ─────
+//
+// Se comparten entre TODOS los overlays de la página (ModalTopProductos,
+// ModalProductosIncompletos, y cualquier drawer/modal futuro) para no
+// duplicar esta lógica overlay por overlay.
+
+/**
+ * Bloquea el scroll del <body> mientras `activo` sea true. Soporta overlays
+ * anidados/simultáneos porque cada instancia restaura el valor ANTERIOR de
+ * `overflow`/`paddingRight` al desmontarse (no un valor fijo hardcodeado),
+ * así que si dos modales se abren en secuencia no se pisan entre sí.
+ *
+ * Compensa el ancho de la scrollbar con `padding-right` para que el layout
+ * de fondo no se corra horizontalmente al ocultarse la barra — sin esto,
+ * el bloqueo de scroll genera un "salto" visible del contenido.
+ */
+function useLockBodyScroll(activo) {
+  useEffect(() => {
+    if (!activo) return
+
+    const scrollBarWidth = window.innerWidth - document.documentElement.clientWidth
+    const previoOverflow     = document.body.style.overflow
+    const previoPaddingRight = document.body.style.paddingRight
+
+    document.body.style.overflow = 'hidden'
+    if (scrollBarWidth > 0) {
+      document.body.style.paddingRight = `${scrollBarWidth}px`
+    }
+
+    return () => {
+      document.body.style.overflow     = previoOverflow
+      document.body.style.paddingRight = previoPaddingRight
+    }
+  }, [activo])
+}
+
+/**
+ * Devuelve un ref para el contenedor scrolleable del overlay y le da foco
+ * automáticamente apenas `activo` pasa a true — sin que el usuario tenga
+ * que clickear primero. `preventScroll: true` evita que el propio `focus()`
+ * dispare un salto de scroll no deseado.
+ *
+ * El elemento debe tener `tabIndex={-1}` (focuseable por JS, pero fuera del
+ * orden de tabulación normal) y la clase `overscroll-contain` en su CSS
+ * (Tailwind `overscroll-contain` = `overscroll-behavior: contain`), para
+ * que la rueda/gesto táctil no se "escape" hacia el body una vez que el
+ * mouse está sobre la lista.
+ */
+function useAutoFocusScrollable(activo) {
+  const ref = useRef(null)
+  useEffect(() => {
+    if (activo) ref.current?.focus({ preventScroll: true })
+  }, [activo])
+  return ref
+}
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -105,6 +161,9 @@ function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
   // Reset page when modal opens
   useEffect(() => { if (open) setPagina(1) }, [open])
 
+  useLockBodyScroll(open)
+  const scrollRef = useAutoFocusScrollable(open)
+
   if (!open) return null
 
   const MAX_PRODUCTOS = 180
@@ -140,7 +199,8 @@ function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
         </div>
 
         {/* Tabla */}
-        <div className="overflow-y-auto flex-1">
+        <div ref={scrollRef} tabIndex={-1}
+          className="overflow-y-auto overscroll-contain flex-1 focus:outline-none">
           {productos.length === 0 ? (
             <div className="text-center py-16 text-surface-500 font-body text-sm">
               Sin ventas en el período seleccionado.
@@ -266,6 +326,9 @@ function ModalProductosIncompletos({ open, onClose, productos }) {
   // Reset page when modal opens
   useEffect(() => { if (open) setPagina(1) }, [open])
 
+  useLockBodyScroll(open)
+  const scrollRef = useAutoFocusScrollable(open)
+
   if (!open) return null
 
   const totalPaginas = Math.max(1, Math.ceil(productos.length / PAGE_SIZE_INCOMPLETOS))
@@ -298,7 +361,8 @@ function ModalProductosIncompletos({ open, onClose, productos }) {
         </div>
 
         {/* Tabla */}
-        <div className="overflow-y-auto flex-1">
+        <div ref={scrollRef} tabIndex={-1}
+          className="overflow-y-auto overscroll-contain flex-1 focus:outline-none">
           {productos.length === 0 ? (
             <div className="text-center py-16 text-surface-500 font-body text-sm">
               Todos los productos activos tienen ambos precios cargados.
