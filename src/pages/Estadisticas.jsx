@@ -5,7 +5,7 @@ import { Card, PageHeader, Button } from '../components/ui'
 import {
   TrendingUp, TrendingDown, Wallet, Clock, Users, Package,
   BarChart2, CreditCard, Tag, AlertTriangle, RefreshCw,
-  ShoppingCart, Layers, Repeat, Truck, PieChart, CheckCircle, PiggyBank, Boxes
+  ShoppingCart, Layers, Repeat, Truck, PieChart, CheckCircle, PiggyBank, Boxes, DollarSign
 } from 'lucide-react'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -258,8 +258,19 @@ function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
 
 // ─── Modal: productos con datos incompletos (valor de inventario) ─────────
 
+const PAGE_SIZE_INCOMPLETOS = 30
+
 function ModalProductosIncompletos({ open, onClose, productos }) {
+  const [pagina, setPagina] = useState(1)
+
+  // Reset page when modal opens
+  useEffect(() => { if (open) setPagina(1) }, [open])
+
   if (!open) return null
+
+  const totalPaginas = Math.max(1, Math.ceil(productos.length / PAGE_SIZE_INCOMPLETOS))
+  const inicio       = (pagina - 1) * PAGE_SIZE_INCOMPLETOS
+  const pagItems     = productos.slice(inicio, inicio + PAGE_SIZE_INCOMPLETOS)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -302,7 +313,7 @@ function ModalProductosIncompletos({ open, onClose, productos }) {
                 </tr>
               </thead>
               <tbody>
-                {productos.map((p, i) => (
+                {pagItems.map((p, i) => (
                   <tr key={i}
                     className="border-b border-surface-700/40 last:border-0 hover:bg-surface-700/30 transition-colors">
                     <td className="py-3 px-4">
@@ -335,8 +346,162 @@ function ModalProductosIncompletos({ open, onClose, productos }) {
             </table>
           )}
         </div>
+
+        {/* Paginación */}
+        {totalPaginas > 1 && (
+          <div className="flex items-center justify-between px-6 py-4 border-t border-surface-700 flex-shrink-0">
+            <span className="text-surface-500 text-xs font-body">
+              Página {pagina} de {totalPaginas} · {productos.length} productos
+            </span>
+            <div className="flex items-center gap-1">
+              <button onClick={() => setPagina(1)} disabled={pagina === 1}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                «
+              </button>
+              <button onClick={() => setPagina(v => Math.max(1, v - 1))} disabled={pagina === 1}
+                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                ‹ Ant.
+              </button>
+
+              {/* Páginas cercanas */}
+              {Array.from({ length: totalPaginas }, (_, i) => i + 1)
+                .filter(p => p === 1 || p === totalPaginas || Math.abs(p - pagina) <= 2)
+                .reduce((acc, p, idx, arr) => {
+                  if (idx > 0 && p - arr[idx - 1] > 1) acc.push('…')
+                  acc.push(p)
+                  return acc
+                }, [])
+                .map((item, idx) =>
+                  item === '…' ? (
+                    <span key={`sep-${idx}`} className="px-2 text-surface-600 text-xs">…</span>
+                  ) : (
+                    <button key={item} onClick={() => setPagina(item)}
+                      className={`w-8 h-8 rounded-lg text-xs font-body font-medium transition-all
+                        ${item === pagina
+                          ? 'bg-brand-500 text-white'
+                          : 'text-surface-400 hover:bg-surface-700 hover:text-white'}`}>
+                      {item}
+                    </button>
+                  )
+                )}
+
+              <button onClick={() => setPagina(v => Math.min(totalPaginas, v + 1))} disabled={pagina === totalPaginas}
+                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                Sig. ›
+              </button>
+              <button onClick={() => setPagina(totalPaginas)} disabled={pagina === totalPaginas}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                »
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
+  )
+}
+
+// ─── Ranking de productos por ingresos (paginado, Top 20 por página) ──────
+
+const PAGE_SIZE_INGRESOS = 20
+
+function RankingProductosPorIngresos({ productos, desde, hasta }) {
+  const [pagina, setPagina] = useState(1)
+
+  // Si cambia el período (nueva lista), volvemos a la página 1.
+  useEffect(() => { setPagina(1) }, [productos])
+
+  const totalPaginas = Math.max(1, Math.ceil(productos.length / PAGE_SIZE_INGRESOS))
+  const inicio       = (pagina - 1) * PAGE_SIZE_INGRESOS
+  const pagItems     = productos.slice(inicio, inicio + PAGE_SIZE_INGRESOS)
+
+  return (
+    <Card className="p-6">
+      <h3 className="font-body font-semibold text-white text-sm mb-1 flex items-center gap-2">
+        <DollarSign size={15} className="text-brand-500" />
+        Productos con más ingresos
+      </h3>
+      <p className="text-surface-500 text-xs font-body mb-4">
+        {desde} → {hasta} · ordenado por monto facturado (cantidad × precio de venta)
+        {productos.length > 0 && ` · ${productos.length} producto${productos.length !== 1 ? 's' : ''} con ventas`}
+      </p>
+
+      {productos.length === 0 ? (
+        <p className="text-surface-500 text-sm font-body py-8 text-center">
+          No hay datos disponibles para el período seleccionado.
+        </p>
+      ) : (
+        <>
+          <table className="w-full text-sm font-body">
+            <thead>
+              <tr className="border-b border-surface-700">
+                <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-2 px-2 w-10">#</th>
+                <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-2 px-2">Producto</th>
+                <th className="text-right text-surface-400 text-xs tracking-widest uppercase py-2 px-2 w-24">Unidades</th>
+                <th className="text-right text-surface-400 text-xs tracking-widest uppercase py-2 px-2 w-36">Ingresos</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pagItems.map((p, i) => {
+                const rank = inicio + i + 1
+                const esTop3 = rank <= 3
+                return (
+                  <tr key={i} className="border-b border-surface-700/40 last:border-0 hover:bg-surface-700/30 transition-colors">
+                    <td className="py-2.5 px-2">
+                      <span className={`font-mono text-xs font-bold
+                        ${rank === 1 ? 'text-yellow-400' :
+                          rank === 2 ? 'text-surface-300' :
+                          rank === 3 ? 'text-brand-400' : 'text-surface-600'}`}>
+                        {rank}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-2">
+                      <span className={`${esTop3 ? 'text-white font-medium' : 'text-surface-200'} truncate block max-w-xs`}
+                        title={p.nombre}>
+                        {p.nombre}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-2 text-right">
+                      <span className="font-mono text-surface-300">{p.unidades} u.</span>
+                    </td>
+                    <td className="py-2.5 px-2 text-right">
+                      <span className={`font-mono font-bold ${esTop3 ? 'text-brand-400' : 'text-surface-200'}`}>
+                        {fmt(p.monto)}
+                      </span>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+
+          {totalPaginas > 1 && (
+            <div className="flex items-center justify-between pt-4 mt-2 border-t border-surface-700">
+              <span className="text-surface-500 text-xs font-body">
+                Página {pagina} de {totalPaginas} · {productos.length} productos
+              </span>
+              <div className="flex items-center gap-1">
+                <button onClick={() => setPagina(v => Math.max(1, v - 1))} disabled={pagina === 1}
+                  className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
+                             hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                  ‹ Ant.
+                </button>
+                <span className="px-2 text-xs font-body text-surface-300">{pagina} / {totalPaginas}</span>
+                <button onClick={() => setPagina(v => Math.min(totalPaginas, v + 1))} disabled={pagina === totalPaginas}
+                  className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
+                             hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                  Sig. ›
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </Card>
   )
 }
 
@@ -751,6 +916,13 @@ export default function Estadisticas() {
           )}
         </Card>
       </div>
+
+      {/* ── 2b. Ranking de productos por ingresos ── */}
+      <RankingProductosPorIngresos
+        productos={m.productosPorIngresos ?? []}
+        desde={desde}
+        hasta={hasta}
+      />
 
       {/* ── 3. Saldos pendientes globales + Clientes recurrentes vs. nuevos ── */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
