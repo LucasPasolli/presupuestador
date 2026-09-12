@@ -367,8 +367,13 @@ export async function marcarSaldoPagado(idSaldo, idPresupuesto, fechaPago, metod
 
   if (error) manejarError('marcarSaldoPagado', error)
 
-  // Propagar el estado al presupuesto asociado
-  await actualizarEstadoPresupuesto(idPresupuesto, 'pagado')
+  // Propagar el estado al presupuesto asociado. Para Cuenta Corriente la
+  // fecha de cobro "de la verdad" es `saldo.fecha_pago` (la que usa la RPC
+  // de Facturas), pero igual espejamos `fechaPago` en el presupuesto para
+  // que el detalle en Historial.jsx muestre un dato consistente sin tener
+  // que ir a buscar el saldo — es puramente informativo, ninguna consulta
+  // de facturación/estadísticas depende de este valor para CC.
+  await actualizarEstadoPresupuesto(idPresupuesto, 'pagado', { fechaPago })
 }
 
 /**

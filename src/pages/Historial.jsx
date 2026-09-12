@@ -48,6 +48,18 @@ function fmtFecha(iso) {
   const [y, m, d] = iso.split('-')
   return `${d}/${m}/${y}`
 }
+// CORRECCIÓN (desacople Día X / Día Y): fecha real "de hoy" en el huso
+// horario local del navegador, en formato YYYY-MM-DD — usada como default
+// del input de "Fecha de pago" al confirmar un cobro en Efectivo/Transferencia.
+// Ojo: NO usar `new Date().toISOString()` acá, corta en UTC y puede quedar
+// un día adelantado/atrasado según la hora local del usuario.
+function today() {
+  const d = new Date()
+  const yyyy = d.getFullYear()
+  const mm   = String(d.getMonth() + 1).padStart(2, '0')
+  const dd   = String(d.getDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}`
+}
 function pctLabel(factor) {
   const diff = (factor - 1) * 100
   if (Math.abs(diff) < 0.001) return 'Precio de lista'
@@ -97,6 +109,10 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
   const [modal,      setModal]      = useState(null)
   const [errorModal, setErrorModal] = useState('')
   const [delConfirm, setDelConfirm] = useState(false)
+  // CORRECCIÓN (desacople Día X / Día Y): fecha real de cobro capturada por
+  // el usuario al confirmar un pago en Efectivo/Transferencia. Se reinicia a
+  // "hoy" cada vez que se abre el modal de "Registrar pago" (ver abajo).
+  const [fechaPagoInput, setFechaPagoInput] = useState(today())
 
   // Memoizado para que las sumas de detalles no se recalculen en cada render
   // del detalle (p.ej. al abrir/cerrar modales).
@@ -152,10 +168,35 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
 
   async function cambiarEstado(nuevoEstado) {
     setErrorModal('')
+
+    // CORRECCIÓN (desacople Día X / Día Y): para Efectivo/Transferencia el
+    // cobro se registra con la fecha real que cargó el usuario, no con la
+    // fecha de aceptación del presupuesto. Validamos acá (además de required
+    // en el input) para no depender solo de la validación del navegador.
+    const requiereFechaPago = nuevoEstado === 'pagado' && !esCC
+    if (requiereFechaPago) {
+      if (!fechaPagoInput) {
+        setErrorModal('Ingresá la fecha real en que se cobró.')
+        return
+      }
+      if (fechaPagoInput < pres.fecha) {
+        setErrorModal('La fecha de pago no puede ser anterior a la fecha de emisión del presupuesto.')
+        return
+      }
+      if (fechaPagoInput > today()) {
+        setErrorModal('La fecha de pago no puede ser futura.')
+        return
+      }
+    }
+
     try {
       const estadoAnterior = pres.estado
 
-      await actualizarEstadoPresupuesto(pres.idPresupuesto, nuevoEstado)
+      await actualizarEstadoPresupuesto(
+        pres.idPresupuesto,
+        nuevoEstado,
+        requiereFechaPago ? { fechaPago: fechaPagoInput } : {}
+      )
 
       const debeDescontar = (nuevoEstado === 'aprobado' || nuevoEstado === 'pagado') &&
                             estadoAnterior !== 'aprobado' && estadoAnterior !== 'pagado'
@@ -299,14 +340,14 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
               )}
               {pres.estado === 'borrador' && !esCC && (
                 <>
-                  <Button size="sm" icon={CheckCircle2} onClick={() => setModal('pagar')}>Marcar como Pagado</Button>
+                  <Button size="sm" icon={CheckCircle2} onClick={() => { setFechaPagoInput(today()); setModal('pagar') }}>Marcar como Pagado</Button>
                   <Button size="sm" variant="secondary" icon={XCircle}
                     className="hover:bg-red-500/15 hover:border-red-500/40 hover:text-red-400"
                     onClick={() => setModal('rechazar')}>Rechazar</Button>
                 </>
               )}
               {pres.estado === 'aprobado' && !esCC && (
-                <Button size="sm" icon={CheckCircle2} onClick={() => setModal('pagar')}>Marcar como Pagado</Button>
+                <Button size="sm" icon={CheckCircle2} onClick={() => { setFechaPagoInput(today()); setModal('pagar') }}>Marcar como Pagado</Button>
               )}
               {pres.estado === 'aprobado' && esCC && (
                 <div className="flex items-center gap-2 text-surface-400 text-xs font-body bg-surface-700 rounded-xl px-4 py-2.5">
@@ -340,7 +381,18 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
                       <tr key={d.idDetalle} className="border-b border-surface-700/50">
                         <td className="py-3 px-4 text-surface-500 text-xs font-mono">{i+1}</td>
                         <td className="py-3 px-4 text-surface-400 font-mono text-xs">#{d.idProducto}</td>
-                        <td className="py-3 px-4 text-white font-body">{d.nombreProducto ?? `#${d.idProducto}`}</td>
+                        <td className="py-3 px-4 text-white font-body">
+                          <div className="flex items-center gap-2">
+                            <span>{d.nombreProducto ?? `#${d.idProducto}`}</span>
+                            {d.productoEliminado && (
+                              <span title="Este producto ya no está disponible en el catálogo actual. Se muestran su nombre y precio tal como estaban al momento de la venta.">
+                                <Badge color="gray">
+                                  <span className="flex items-center gap-1"><AlertCircle size={11} />Producto eliminado</span>
+                                </Badge>
+                              </span>
+                            )}
+                          </div>
+                        </td>
                         <td className="py-3 px-4">{d.medida ? <Badge color="blue">{d.medida}</Badge> : <span className="text-surface-500 text-xs">—</span>}</td>
                         <td className="py-3 px-4 text-surface-200 font-mono text-center">{d.cantidad}</td>
                         <td className="py-3 px-4">
@@ -445,6 +497,45 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
         </div>
       )}
 
+      {/* CORRECCIÓN (desacople Día X / Día Y): cuadrante de cobro para
+          Efectivo/Transferencia — no hay `saldo` de por medio (esa fila solo
+          existe para CC), así que el dato vive directo en `pres.fechaPago`.
+          Mismo layout que el bloque "Saldo asociado" de arriba para que el
+          usuario encuentre la fecha de cobro en el mismo lugar visual sin
+          importar el método de pago. Solo se muestra una vez confirmado el
+          pago — antes de eso no hay fecha de cobro que mostrar. */}
+      {!esCC && pres.estado === 'pagado' && (
+        <Card className="p-5">
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-surface-400 text-xs uppercase tracking-widest font-body flex items-center gap-1.5">
+              <Wallet size={11} />Cobro registrado
+            </p>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="bg-surface-700 rounded-xl p-3">
+              <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Método</p>
+              <Badge color={BADGE[metodo.badge]}>{metodo.label}</Badge>
+            </div>
+            <div className="bg-surface-700 rounded-xl p-3">
+              <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Emitido</p>
+              <p className="text-white text-sm font-mono">{fmtFecha(pres.fecha)}</p>
+            </div>
+            <div className="bg-surface-700 rounded-xl p-3">
+              <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Pagado el</p>
+              <p className="text-white text-sm font-mono">
+                {pres.fechaPago ? fmtFecha(pres.fechaPago) : (
+                  <span className="text-yellow-400/80 normal-case">Sin registrar</span>
+                )}
+              </p>
+            </div>
+            <div className="bg-surface-700 rounded-xl p-3">
+              <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Monto</p>
+              <p className="text-brand-400 font-mono font-bold">{fmt(pres.monto)}</p>
+            </div>
+          </div>
+        </Card>
+      )}
+
       {/* Modales estado */}
       {[
         { key:'aprobar',  title:'Aprobar presupuesto',  body:`Presupuesto #${pres.idPresupuesto} → Aprobado. Se descuenta stock y se genera saldo pendiente de cobro.`, action:()=>cambiarEstado('aprobado'),   label:'Aprobar',        icon:ThumbsUp },
@@ -453,6 +544,34 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
       ].map(m => (
         <Modal key={m.key} open={modal===m.key} onClose={()=>{setModal(null);setErrorModal('')}} title={m.title} width="max-w-sm">
           <p className="text-surface-300 text-sm font-body mb-4">{m.body}</p>
+
+          {/* CORRECCIÓN (desacople Día X / Día Y): captura explícita de la
+              fecha real de cobro para Efectivo/Transferencia. Nunca se
+              precarga con `pres.fecha` (Día X) — siempre arranca en "hoy",
+              y el usuario la corrige si el cobro fue en otro día. */}
+          {m.key === 'pagar' && (
+            <div className="mb-4">
+              <label htmlFor="fecha-pago-input"
+                className="block text-surface-400 text-xs uppercase tracking-widest font-body mb-1.5">
+                Fecha real de pago
+              </label>
+              <input
+                id="fecha-pago-input"
+                type="date"
+                required
+                value={fechaPagoInput}
+                max={today()}
+                min={pres.fecha}
+                onChange={e => setFechaPagoInput(e.target.value)}
+                className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5
+                           text-white text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
+              />
+              <p className="text-surface-500 text-xs font-body mt-1.5">
+                Emitido el {fmtFecha(pres.fecha)}. Esta es la fecha que se usa para facturación y estadísticas de cobranza — no tiene por qué coincidir.
+              </p>
+            </div>
+          )}
+
           {errorModal && (
             <div className="flex items-center gap-2 text-red-400 text-xs bg-red-500/10 border border-red-500/30 rounded-xl px-3 py-2 mb-4">
               <AlertCircle size={13}/>{errorModal}

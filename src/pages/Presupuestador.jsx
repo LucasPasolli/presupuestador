@@ -504,6 +504,7 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
     if (item.idProducto) {
       onUpdate(uid, 'idProducto', '')
       onUpdate(uid, 'precioUnitario', 0)
+      onUpdate(uid, 'idCategoria', null)
       onUpdate(uid, 'medida', null)
       setStockWarning('')
       onStockError(uid, false)
@@ -519,6 +520,10 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
     onUpdate(uid, 'idProducto',     p.idProducto)
     onUpdate(uid, 'nombreProducto', p.nombre)
     onUpdate(uid, 'precioUnitario', p.precioUnitario)
+    // [FIX Promo-Categoría] Sin esto, calcularPromocionParaItem siempre recibía
+    // idCategoria = null y las promociones con alcance 'categoria' nunca podían
+    // matchear, sin importar a qué categoría perteneciera el producto elegido.
+    onUpdate(uid, 'idCategoria',    p.idCategoria ?? null)
     onUpdate(uid, 'medida',         null)
     setPriceWarning(!p.precioUnitario)
     checkStock(p.idProducto, null, item.cantidad)
@@ -536,6 +541,10 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
           setNombreSearch(p.nombre)
           onUpdate(uid, 'nombreProducto', p.nombre)
           onUpdate(uid, 'precioUnitario', p.precioUnitario)
+          // [FIX Promo-Categoría] misma corrección que en seleccionarProducto:
+          // el picker por ID es una vía alternativa para elegir producto y
+          // también debía propagar la categoría al ítem.
+          onUpdate(uid, 'idCategoria', p.idCategoria ?? null)
           onUpdate(uid, 'medida', null)
           setIdError('')
           setPriceWarning(!p.precioUnitario)
@@ -544,6 +553,7 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
           setNombreSearch('')
           onUpdate(uid, 'nombreProducto', '')
           onUpdate(uid, 'precioUnitario', 0)
+          onUpdate(uid, 'idCategoria', null)
           onUpdate(uid, 'medida', null)
           setIdError(`Sin producto con ID ${clean}`)
         }
@@ -551,6 +561,7 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
         setNombreSearch('')
         onUpdate(uid, 'nombreProducto', '')
         onUpdate(uid, 'precioUnitario', 0)
+        onUpdate(uid, 'idCategoria', null)
         onUpdate(uid, 'medida', null)
         setIdError(`Sin producto con ID ${clean}`)
       }
@@ -558,6 +569,7 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
       setNombreSearch('')
       onUpdate(uid, 'nombreProducto', '')
       onUpdate(uid, 'precioUnitario', 0)
+      onUpdate(uid, 'idCategoria', null)
       onUpdate(uid, 'medida', null)
       setStockWarning('')
       onStockError(uid, false)
@@ -818,7 +830,7 @@ function MetodoPagoSelector({ metodoPago, onMetodoPago, excepcionFactor, onExcep
 }
 
 
-const ITEM_EMPTY = () => ({ _uid: Math.random().toString(36).slice(2), idProducto: '', nombreProducto: '', cantidad: 1, precioUnitario: 0, medida: null })
+const ITEM_EMPTY = () => ({ _uid: Math.random().toString(36).slice(2), idProducto: '', nombreProducto: '', cantidad: 1, precioUnitario: 0, idCategoria: null, medida: null })
 
 export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVerHistorial }) {
   const navigate = useNavigate()
@@ -899,13 +911,32 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
           ? String(((1 - factorDB) * 100).toFixed(4).replace(/\.?0+$/, ''))
           : ''
 
-        const itemsDB = detalles.map(d => ({
-          _uid: Math.random().toString(36).slice(2),
-          idProducto:     String(d.idProducto),
-          nombreProducto: d.nombreProducto ?? '',
-          cantidad:       String(d.cantidad),
-          precioUnitario: d.precioUnitario,
-          medida:         d.medida ?? null,
+        // [FIX Promo-Categoría] `detalle_presupuesto` no guarda id_categoria
+        // (es un snapshot de nombre/precio, no del producto completo), así
+        // que al editar un presupuesto hay que resolverla contra el catálogo
+        // vigente. Sin esto, todo ítem cargado en modo edición quedaba con
+        // idCategoria = undefined y las promociones por categoría no se
+        // recalculaban nunca sobre esos ítems. Usa el caché compartido, así
+        // que si el producto ya fue consultado no genera fetches extra.
+        const itemsDB = await Promise.all(detalles.map(async d => {
+          let idCategoria = null
+          if (d.idProducto) {
+            try {
+              const { producto } = await getProductoCached(parseInt(d.idProducto))
+              idCategoria = producto?.idCategoria ?? null
+            } catch {
+              idCategoria = null
+            }
+          }
+          return {
+            _uid: Math.random().toString(36).slice(2),
+            idProducto:     String(d.idProducto),
+            nombreProducto: d.nombreProducto ?? '',
+            cantidad:       String(d.cantidad),
+            precioUnitario: d.precioUnitario,
+            idCategoria,
+            medida:         d.medida ?? null,
+          }
         }))
 
         setCliente(cliente)

@@ -21,6 +21,8 @@ function mapProducto(row) {
     cantidad:        row.cantidad,
     tieneMedidas:    row.tiene_medidas ? 1 : 0, // los componentes esperan 0/1
     puntoReposicion: row.punto_reposicion,
+    // Baja lógica: por defecto true para no romper filas legacy sin la columna poblada.
+    activo:          row.activo ?? true,
     // si viene con JOIN de categoria
     categoria:       row.categoria ?? null,
   }
@@ -109,9 +111,14 @@ export async function eliminarCategoria(idCategoria) {
  *             JOIN Categoria c ON p.idCategoria = c.idCategoria
  *             ORDER BY p.nombre
  * Usado en: Inventario, ABMC listado completo.
+ *
+ * Por defecto trae también los productos dados de baja lógicamente
+ * (incluirInactivos = true) porque esta es la vista de administración del
+ * catálogo: el admin necesita verlos para poder reactivarlos. Los
+ * buscadores de selección (ver `buscarProductos`) sí los excluyen por defecto.
  */
-export async function obtenerProductos() {
-  const { data, error } = await supabase
+export async function obtenerProductos({ incluirInactivos = true } = {}) {
+  let q = supabase
     .from('producto')
     .select(`
       *,
@@ -119,6 +126,9 @@ export async function obtenerProductos() {
     `)
     .order('nombre')
 
+  if (!incluirInactivos) q = q.eq('activo', true)
+
+  const { data, error } = await q
   if (error) manejarError('obtenerProductos', error)
 
   return data.map(row => ({
@@ -131,8 +141,14 @@ export async function obtenerProductos() {
  * Devuelve productos filtrados por nombre y/o categoría.
  * Mueve al servidor el filtrado que antes se hacía en React.
  * Usado en: Inventario (búsqueda), Presupuestador, PedidosCompra.
+ *
+ * `soloActivos` (default true): excluye productos dados de baja lógica del
+ * resultado. Los buscadores de selección de producto (p. ej. el picker del
+ * Presupuestador) dependen de este default para no ofrecer productos
+ * discontinuados en presupuestos nuevos. Pasar `soloActivos: false`
+ * explícitamente solo desde pantallas de administración que necesiten verlos.
  */
-export async function buscarProductos({ texto = '', idCategoria = null, soloStockCritico = false } = {}) {
+export async function buscarProductos({ texto = '', idCategoria = null, soloStockCritico = false, soloActivos = true } = {}) {
   let q = supabase
     .from('producto')
     .select(`
@@ -149,14 +165,21 @@ export async function buscarProductos({ texto = '', idCategoria = null, soloStoc
     q = q.eq('id_categoria', idCategoria)
   }
 
+  if (soloActivos) {
+    q = q.eq('activo', true)
+  }
+
   if (soloStockCritico) {
     // productos donde cantidad <= punto_reposicion
-    q = q.filter('cantidad', 'lte', supabase.rpc) // ver nota abajo
     // Supabase no soporta filtros entre columnas directamente,
     // usamos RPC para este caso específico:
     const { data, error } = await supabase.rpc('productos_stock_critico')
     if (error) manejarError('buscarProductos(stockCritico)', error)
-    return data.map(row => ({ ...mapProducto(row), categoria: row.categoria_nombre ?? null }))
+    // Defensa en profundidad: la función productos_stock_critico() ya filtra
+    // `activo = true` en el origen (ver 002_baja_logica_productos.sql), pero
+    // se repite acá por si la función se recrea en el futuro sin ese filtro.
+    const filtrado = soloActivos ? data.filter((row) => row.activo !== false) : data
+    return filtrado.map(row => ({ ...mapProducto(row), categoria: row.categoria_nombre ?? null }))
   }
 
   const { data, error } = await q
@@ -273,16 +296,44 @@ export async function actualizarPrecioProveedor(idProducto, precioProveedor) {
 }
 
 /**
- * Elimina un producto. Fallará si tiene detalles de presupuesto (ON DELETE RESTRICT).
- * Equivale a: DELETE FROM Producto WHERE idProducto = ?
+ * Elimina un producto de forma segura.
+ *
+ * Delega en la función de base de datos `eliminar_producto_seguro`, que
+ * dentro de una única transacción intenta la eliminación física y, si el
+ * producto está referenciado en detalle_presupuesto (u otra tabla con FK),
+ * captura la violación de integridad y realiza una baja lógica
+ * (producto.activo = false) en su lugar. Resolver esto en el servidor evita
+ * condiciones de carrera (dos usuarios operando sobre el mismo producto a
+ * la vez) y evita filtrar errores de base de datos (código, constraint,
+ * nombre de tabla) hacia la interfaz — ver ficha SQL 002_baja_logica_productos.sql.
+ *
+ * @returns {'eliminado' | 'baja_logica'} resultado de la operación, para que
+ *          la UI pueda informar al usuario qué ocurrió realmente.
+ * @throws  Error de dominio si el producto no existe.
  */
 export async function eliminarProducto(idProducto) {
-  const { error } = await supabase
-    .from('producto')
-    .delete()
-    .eq('id_producto', idProducto)
+  const { data, error } = await supabase
+    .rpc('eliminar_producto_seguro', { p_id_producto: idProducto })
 
   if (error) manejarError('eliminarProducto', error)
+
+  if (data === 'no_encontrado') {
+    throw new Error('El producto no existe o ya fue eliminado.')
+  }
+
+  return data // 'eliminado' | 'baja_logica'
+}
+
+/**
+ * Reactiva un producto dado de baja lógicamente, volviendo a hacerlo
+ * disponible en los buscadores de selección de producto.
+ * Equivale a: UPDATE Producto SET activo = true WHERE idProducto = ?
+ */
+export async function reactivarProducto(idProducto) {
+  const { error } = await supabase
+    .rpc('reactivar_producto', { p_id_producto: idProducto })
+
+  if (error) manejarError('reactivarProducto', error)
 }
 
 // ─── Mutaciones de Stock (con medidas) ───────────────────────────────────────

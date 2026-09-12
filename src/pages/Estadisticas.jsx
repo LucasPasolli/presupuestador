@@ -1,12 +1,68 @@
 // src/pages/Estadisticas.jsx
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { obtenerMetricas } from '../services/estadisticasService'
 import { Card, PageHeader, Button } from '../components/ui'
 import {
   TrendingUp, TrendingDown, Wallet, Clock, Users, Package,
   BarChart2, CreditCard, Tag, AlertTriangle, RefreshCw,
-  ShoppingCart, Layers, Repeat, Truck, PieChart, CheckCircle, PiggyBank
+  ShoppingCart, Layers, Repeat, Truck, PieChart, CheckCircle, PiggyBank, Boxes, DollarSign
 } from 'lucide-react'
+
+// ─── Hooks de overlay (modal/drawer): scroll-lock + captura de scroll ─────
+//
+// Se comparten entre TODOS los overlays de la página (ModalTopProductos,
+// ModalProductosIncompletos, y cualquier drawer/modal futuro) para no
+// duplicar esta lógica overlay por overlay.
+
+/**
+ * Bloquea el scroll del <body> mientras `activo` sea true. Soporta overlays
+ * anidados/simultáneos porque cada instancia restaura el valor ANTERIOR de
+ * `overflow`/`paddingRight` al desmontarse (no un valor fijo hardcodeado),
+ * así que si dos modales se abren en secuencia no se pisan entre sí.
+ *
+ * Compensa el ancho de la scrollbar con `padding-right` para que el layout
+ * de fondo no se corra horizontalmente al ocultarse la barra — sin esto,
+ * el bloqueo de scroll genera un "salto" visible del contenido.
+ */
+function useLockBodyScroll(activo) {
+  useEffect(() => {
+    if (!activo) return
+
+    const scrollBarWidth = window.innerWidth - document.documentElement.clientWidth
+    const previoOverflow     = document.body.style.overflow
+    const previoPaddingRight = document.body.style.paddingRight
+
+    document.body.style.overflow = 'hidden'
+    if (scrollBarWidth > 0) {
+      document.body.style.paddingRight = `${scrollBarWidth}px`
+    }
+
+    return () => {
+      document.body.style.overflow     = previoOverflow
+      document.body.style.paddingRight = previoPaddingRight
+    }
+  }, [activo])
+}
+
+/**
+ * Devuelve un ref para el contenedor scrolleable del overlay y le da foco
+ * automáticamente apenas `activo` pasa a true — sin que el usuario tenga
+ * que clickear primero. `preventScroll: true` evita que el propio `focus()`
+ * dispare un salto de scroll no deseado.
+ *
+ * El elemento debe tener `tabIndex={-1}` (focuseable por JS, pero fuera del
+ * orden de tabulación normal) y la clase `overscroll-contain` en su CSS
+ * (Tailwind `overscroll-contain` = `overscroll-behavior: contain`), para
+ * que la rueda/gesto táctil no se "escape" hacia el body una vez que el
+ * mouse está sobre la lista.
+ */
+function useAutoFocusScrollable(activo) {
+  const ref = useRef(null)
+  useEffect(() => {
+    if (activo) ref.current?.focus({ preventScroll: true })
+  }, [activo])
+  return ref
+}
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -105,6 +161,9 @@ function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
   // Reset page when modal opens
   useEffect(() => { if (open) setPagina(1) }, [open])
 
+  useLockBodyScroll(open)
+  const scrollRef = useAutoFocusScrollable(open)
+
   if (!open) return null
 
   const MAX_PRODUCTOS = 180
@@ -140,7 +199,8 @@ function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
         </div>
 
         {/* Tabla */}
-        <div className="overflow-y-auto flex-1">
+        <div ref={scrollRef} tabIndex={-1}
+          className="overflow-y-auto overscroll-contain flex-1 focus:outline-none">
           {productos.length === 0 ? (
             <div className="text-center py-16 text-surface-500 font-body text-sm">
               Sin ventas en el período seleccionado.
@@ -253,6 +313,259 @@ function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
         )}
       </div>
     </div>
+  )
+}
+
+// ─── Modal: productos con datos incompletos (valor de inventario) ─────────
+
+const PAGE_SIZE_INCOMPLETOS = 30
+
+function ModalProductosIncompletos({ open, onClose, productos }) {
+  const [pagina, setPagina] = useState(1)
+
+  // Reset page when modal opens
+  useEffect(() => { if (open) setPagina(1) }, [open])
+
+  useLockBodyScroll(open)
+  const scrollRef = useAutoFocusScrollable(open)
+
+  if (!open) return null
+
+  const totalPaginas = Math.max(1, Math.ceil(productos.length / PAGE_SIZE_INCOMPLETOS))
+  const inicio       = (pagina - 1) * PAGE_SIZE_INCOMPLETOS
+  const pagItems     = productos.slice(inicio, inicio + PAGE_SIZE_INCOMPLETOS)
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/75" onClick={onClose} />
+      <div className="relative bg-surface-800 border border-surface-700 rounded-2xl shadow-2xl
+                      w-full max-w-2xl animate-slide-up flex flex-col max-h-[85vh]">
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-5 border-b border-surface-700 flex-shrink-0">
+          <div>
+            <h2 className="font-body font-semibold text-white flex items-center gap-2">
+              <AlertTriangle size={16} className="text-yellow-500" />
+              Productos con datos incompletos
+            </h2>
+            <p className="text-surface-500 text-xs font-body mt-0.5">
+              {productos.length} producto{productos.length !== 1 ? 's' : ''} con stock activo y precio de
+              proveedor y/o venta sin cargar — se contaron como $0 en esa valorización
+            </p>
+          </div>
+          <button onClick={onClose}
+            className="text-surface-400 hover:text-white transition-colors text-2xl leading-none w-8 h-8
+                       flex items-center justify-center rounded-lg hover:bg-surface-700">
+            ×
+          </button>
+        </div>
+
+        {/* Tabla */}
+        <div ref={scrollRef} tabIndex={-1}
+          className="overflow-y-auto overscroll-contain flex-1 focus:outline-none">
+          {productos.length === 0 ? (
+            <div className="text-center py-16 text-surface-500 font-body text-sm">
+              Todos los productos activos tienen ambos precios cargados.
+            </div>
+          ) : (
+            <table className="w-full text-sm font-body">
+              <thead className="sticky top-0 bg-surface-800 z-10">
+                <tr className="border-b border-surface-700">
+                  <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4">Producto</th>
+                  <th className="text-right text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-24">Stock</th>
+                  <th className="text-center text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-40">Falta precio de</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pagItems.map((p, i) => (
+                  <tr key={i}
+                    className="border-b border-surface-700/40 last:border-0 hover:bg-surface-700/30 transition-colors">
+                    <td className="py-3 px-4">
+                      <span className="text-surface-200 truncate block max-w-xs" title={p.nombre}>
+                        {p.nombre}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 text-right">
+                      <span className="font-mono text-surface-300">{p.cantidad}</span>
+                    </td>
+                    <td className="py-3 px-4">
+                      <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                        {p.sinPrecioProveedor && (
+                          <span className="text-[10px] font-body px-2 py-0.5 rounded-full
+                                           bg-red-500/10 border border-red-500/30 text-red-400">
+                            Proveedor
+                          </span>
+                        )}
+                        {p.sinPrecioVenta && (
+                          <span className="text-[10px] font-body px-2 py-0.5 rounded-full
+                                           bg-yellow-500/10 border border-yellow-500/30 text-yellow-400">
+                            Venta
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Paginación */}
+        {totalPaginas > 1 && (
+          <div className="flex items-center justify-between px-6 py-4 border-t border-surface-700 flex-shrink-0">
+            <span className="text-surface-500 text-xs font-body">
+              Página {pagina} de {totalPaginas} · {productos.length} productos
+            </span>
+            <div className="flex items-center gap-1">
+              <button onClick={() => setPagina(1)} disabled={pagina === 1}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                «
+              </button>
+              <button onClick={() => setPagina(v => Math.max(1, v - 1))} disabled={pagina === 1}
+                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                ‹ Ant.
+              </button>
+
+              {/* Páginas cercanas */}
+              {Array.from({ length: totalPaginas }, (_, i) => i + 1)
+                .filter(p => p === 1 || p === totalPaginas || Math.abs(p - pagina) <= 2)
+                .reduce((acc, p, idx, arr) => {
+                  if (idx > 0 && p - arr[idx - 1] > 1) acc.push('…')
+                  acc.push(p)
+                  return acc
+                }, [])
+                .map((item, idx) =>
+                  item === '…' ? (
+                    <span key={`sep-${idx}`} className="px-2 text-surface-600 text-xs">…</span>
+                  ) : (
+                    <button key={item} onClick={() => setPagina(item)}
+                      className={`w-8 h-8 rounded-lg text-xs font-body font-medium transition-all
+                        ${item === pagina
+                          ? 'bg-brand-500 text-white'
+                          : 'text-surface-400 hover:bg-surface-700 hover:text-white'}`}>
+                      {item}
+                    </button>
+                  )
+                )}
+
+              <button onClick={() => setPagina(v => Math.min(totalPaginas, v + 1))} disabled={pagina === totalPaginas}
+                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                Sig. ›
+              </button>
+              <button onClick={() => setPagina(totalPaginas)} disabled={pagina === totalPaginas}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
+                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                »
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─── Ranking de productos por ingresos (paginado, Top 20 por página) ──────
+
+const PAGE_SIZE_INGRESOS = 20
+
+function RankingProductosPorIngresos({ productos, desde, hasta }) {
+  const [pagina, setPagina] = useState(1)
+
+  // Si cambia el período (nueva lista), volvemos a la página 1.
+  useEffect(() => { setPagina(1) }, [productos])
+
+  const totalPaginas = Math.max(1, Math.ceil(productos.length / PAGE_SIZE_INGRESOS))
+  const inicio       = (pagina - 1) * PAGE_SIZE_INGRESOS
+  const pagItems     = productos.slice(inicio, inicio + PAGE_SIZE_INGRESOS)
+
+  return (
+    <Card className="p-6">
+      <h3 className="font-body font-semibold text-white text-sm mb-1 flex items-center gap-2">
+        <DollarSign size={15} className="text-brand-500" />
+        Productos con más ingresos
+      </h3>
+      <p className="text-surface-500 text-xs font-body mb-4">
+        {desde} → {hasta} · ordenado por monto facturado (cantidad × precio de venta)
+        {productos.length > 0 && ` · ${productos.length} producto${productos.length !== 1 ? 's' : ''} con ventas`}
+      </p>
+
+      {productos.length === 0 ? (
+        <p className="text-surface-500 text-sm font-body py-8 text-center">
+          No hay datos disponibles para el período seleccionado.
+        </p>
+      ) : (
+        <>
+          <table className="w-full text-sm font-body">
+            <thead>
+              <tr className="border-b border-surface-700">
+                <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-2 px-2 w-10">#</th>
+                <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-2 px-2">Producto</th>
+                <th className="text-right text-surface-400 text-xs tracking-widest uppercase py-2 px-2 w-24">Unidades</th>
+                <th className="text-right text-surface-400 text-xs tracking-widest uppercase py-2 px-2 w-36">Ingresos</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pagItems.map((p, i) => {
+                const rank = inicio + i + 1
+                const esTop3 = rank <= 3
+                return (
+                  <tr key={i} className="border-b border-surface-700/40 last:border-0 hover:bg-surface-700/30 transition-colors">
+                    <td className="py-2.5 px-2">
+                      <span className={`font-mono text-xs font-bold
+                        ${rank === 1 ? 'text-yellow-400' :
+                          rank === 2 ? 'text-surface-300' :
+                          rank === 3 ? 'text-brand-400' : 'text-surface-600'}`}>
+                        {rank}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-2">
+                      <span className={`${esTop3 ? 'text-white font-medium' : 'text-surface-200'} truncate block max-w-xs`}
+                        title={p.nombre}>
+                        {p.nombre}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-2 text-right">
+                      <span className="font-mono text-surface-300">{p.unidades} u.</span>
+                    </td>
+                    <td className="py-2.5 px-2 text-right">
+                      <span className={`font-mono font-bold ${esTop3 ? 'text-brand-400' : 'text-surface-200'}`}>
+                        {fmt(p.monto)}
+                      </span>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+
+          {totalPaginas > 1 && (
+            <div className="flex items-center justify-between pt-4 mt-2 border-t border-surface-700">
+              <span className="text-surface-500 text-xs font-body">
+                Página {pagina} de {totalPaginas} · {productos.length} productos
+              </span>
+              <div className="flex items-center gap-1">
+                <button onClick={() => setPagina(v => Math.max(1, v - 1))} disabled={pagina === 1}
+                  className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
+                             hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                  ‹ Ant.
+                </button>
+                <span className="px-2 text-xs font-body text-surface-300">{pagina} / {totalPaginas}</span>
+                <button onClick={() => setPagina(v => Math.min(totalPaginas, v + 1))} disabled={pagina === totalPaginas}
+                  className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
+                             hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
+                  Sig. ›
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </Card>
   )
 }
 
@@ -378,6 +691,7 @@ export default function Estadisticas() {
   const [metricas,       setMetricas]       = useState(null)
   const [cargando,       setCargando]       = useState(false)
   const [modalProductos, setModalProductos] = useState(false)
+  const [modalIncompletos, setModalIncompletos] = useState(false)
 
   const desde = rangoIdx < 4 ? RANGOS[rangoIdx].desde() : desdeCustom
   const hasta = rangoIdx < 4 ? RANGOS[rangoIdx].hasta() : hastaCustom
@@ -495,6 +809,66 @@ export default function Estadisticas() {
           sub="en el período" />
       </div>
 
+      {/* ── Valor actual del inventario ── */}
+      <Card className="p-6">
+        <h3 className="font-body font-semibold text-white text-sm mb-1 flex items-center gap-2">
+          <Boxes size={15} className="text-brand-500" />
+          Valor Actual del Inventario
+        </h3>
+        <p className="text-surface-500 text-xs font-body mb-5">
+          Stock activo al día de hoy · no depende del rango de fechas seleccionado arriba
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="bg-surface-700/40 border border-surface-600 rounded-xl p-5">
+            <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">
+              Valor a Costo (Proveedor)
+            </p>
+            <p className="font-mono font-bold text-white text-2xl">
+              {formatoMonto(m.valorInventarioCosto)}
+            </p>
+            <p className="text-surface-500 text-xs font-body mt-1">Capital invertido en stock</p>
+          </div>
+          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-5">
+            <p className="text-emerald-400 text-xs uppercase tracking-widest font-body mb-1">
+              Valor a Precio de Venta
+            </p>
+            <p className="font-mono font-bold text-emerald-400 text-2xl">
+              {formatoMonto(m.valorInventarioVenta)}
+            </p>
+            <p className="text-surface-500 text-xs font-body mt-1">
+              Potencial de ingresos si se vendiera todo el stock
+            </p>
+          </div>
+        </div>
+
+        {m.cantidadProductosValorIncompleto > 0 && (
+          <button
+            onClick={() => setModalIncompletos(true)}
+            className="mt-4 w-full flex items-center justify-between gap-2 bg-yellow-500/10
+                       border border-yellow-500/30 rounded-xl px-4 py-3
+                       hover:bg-yellow-500/15 transition-all group text-left"
+          >
+            <span className="flex items-center gap-2 text-yellow-400 text-xs font-body">
+              <AlertTriangle size={14} className="flex-shrink-0" />
+              {m.cantidadProductosValorIncompleto} producto{m.cantidadProductosValorIncompleto !== 1 ? 's' : ''} con
+              stock y precio incompleto — {m.cantidadProductosValorIncompleto !== 1 ? 'se calcularon' : 'se calculó'} como
+              $0 en esa valorización
+            </span>
+            <span className="text-yellow-400/70 text-xs font-body whitespace-nowrap
+                             group-hover:text-yellow-300 transition-colors">
+              Ver detalle →
+            </span>
+          </button>
+        )}
+      </Card>
+
+      <ModalProductosIncompletos
+        open={modalIncompletos}
+        onClose={() => setModalIncompletos(false)}
+        productos={m.productosValorIncompleto ?? []}
+      />
+
       {/* ── 1. Métodos de Pago + Egresos por categoría ── */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Card className="p-6">
@@ -606,6 +980,13 @@ export default function Estadisticas() {
           )}
         </Card>
       </div>
+
+      {/* ── 2b. Ranking de productos por ingresos ── */}
+      <RankingProductosPorIngresos
+        productos={m.productosPorIngresos ?? []}
+        desde={desde}
+        hasta={hasta}
+      />
 
       {/* ── 3. Saldos pendientes globales + Clientes recurrentes vs. nuevos ── */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

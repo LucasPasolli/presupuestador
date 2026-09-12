@@ -221,57 +221,41 @@ function _calcularMixMetodos(presupuestos) {
 }
 
 /**
- * Bloque 6 + 9 (top productos + todos para modal):
- * Devuelve { topProductos, todosProductosVendidos }.
+ * Bloque 6 + 9 (top productos + todos para modal + ranking por ingresos):
+ * Devuelve { topProductos, todosProductosVendidos, productosPorIngresos }.
  *
- * Equivale a las dos queries GROUP BY sobre DetallePresupuesto con JOIN a Presupuesto.
- * Se hace en una sola query y se corta en JS para el top 10.
+ * Usa la RPC productos_vendidos_periodo() (Postgres), que hace el JOIN
+ * presupuesto↔detalle_presupuesto↔producto y el GROUP BY por producto
+ * server-side, devolviendo ya una fila por producto (no una por venta) y
+ * ordenada por monto DESC. Ver /sql/2026_productos_vendidos_periodo_rpc.sql.
+ *
+ * - productosPorIngresos: se usa tal cual viene de la RPC (ya ordenado por
+ *   monto DESC), sin reordenar en JS.
+ * - todosProductosVendidos / topProductos: se reordena por unidades en JS,
+ *   pero sobre el dataset ya agregado por producto (chico), no sobre las
+ *   filas crudas de venta.
  */
 async function _obtenerProductosVendidos(desde, hasta) {
-  // Obtenemos los IDs de presupuestos aprobados/pagados del período
-  const { data: pres, error: e1 } = await supabase
-    .from('presupuesto')
-    .select('id_presupuesto')
-    .gte('fecha', desde)
-    .lte('fecha', hasta)
-    .in('estado', ['aprobado', 'pagado'])
+  const { data, error } = await supabase.rpc('productos_vendidos_periodo', {
+    p_fecha_desde: desde,
+    p_fecha_hasta: hasta,
+  })
 
-  if (e1) manejarError('_obtenerProductosVendidos(presupuestos)', e1)
-  if (!pres.length) return { topProductos: [], todosProductosVendidos: [] }
+  if (error) manejarError('_obtenerProductosVendidos', error)
 
-  const ids = pres.map(p => p.id_presupuesto)
+  const productosPorIngresos = (data ?? []).map(row => ({
+    idProducto: row.id_producto,
+    nombre:     row.nombre,
+    unidades:   Number(row.unidades),
+    monto:      Number(row.monto),
+  }))
 
-  // Detalles con nombre del producto como fallback
-  const { data: detalles, error: e2 } = await supabase
-    .from('detalle_presupuesto')
-    .select(`
-      id_producto,
-      nombre_producto,
-      cantidad,
-      subtotal,
-      producto ( nombre )
-    `)
-    .in('id_presupuesto', ids)
-
-  if (e2) manejarError('_obtenerProductosVendidos(detalles)', e2)
-
-  // Agregar en JS (equivale al GROUP BY de la query SQLite)
-  const mapa = {}
-  for (const d of detalles) {
-    const nombre = d.nombre_producto ?? d.producto?.nombre ?? '(producto eliminado)'
-    const key    = `${d.id_producto ?? 'null'}::${nombre}`
-    if (!mapa[key]) {
-      mapa[key] = { idProducto: d.id_producto, nombre, unidades: 0, monto: 0 }
-    }
-    mapa[key].unidades += Number(d.cantidad)
-    mapa[key].monto    += Number(d.subtotal)
-  }
-
-  const todos = Object.values(mapa).sort((a, b) => b.unidades - a.unidades)
+  const todosProductosVendidos = [...productosPorIngresos].sort((a, b) => b.unidades - a.unidades)
 
   return {
-    topProductos:          todos.slice(0, 10),
-    todosProductosVendidos: todos,
+    topProductos:            todosProductosVendidos.slice(0, 10),
+    todosProductosVendidos,
+    productosPorIngresos,
   }
 }
 
@@ -673,6 +657,44 @@ async function _obtenerMargenBruto(desde, hasta) {
   return { margenBrutoMonto, margenBrutoPct }
 }
 
+/**
+ * Bloque 18: Valor actual del inventario — a precio de costo (proveedor) y a
+ * precio de venta (lista). Global — refleja el stock ACTUAL, no depende del
+ * rango de fechas seleccionado en el dashboard (a diferencia del resto de
+ * las métricas de este service).
+ *
+ * Usa la RPC obtener_valor_inventario() (Postgres), que agrega SUM(cantidad ×
+ * precio) server-side sobre productos activos y devuelve además el listado
+ * de productos con precio incompleto. Un solo round-trip, y solo viajan
+ * agregados + una lista normalmente chica — nunca el catálogo completo.
+ * Ver /sql/2026_valor_inventario_rpc.sql para la definición de la función.
+ *
+ * Escenario 6 (datos incompletos): las columnas precio_proveedor/precio_unitario
+ * son NOT NULL en el schema, así que "sin precio cargado" se representa como
+ * $0 (mismo criterio que el resto de la app — ver los `?? 0` de
+ * productosService.js). Un precio en $0 no rompe el cálculo: simplemente
+ * aporta $0 a ESA valorización puntual. La RPC ya filtra por stock > 0, así
+ * que un producto sin stock y sin precio no genera ruido en el aviso.
+ */
+async function _obtenerValorInventario() {
+  const { data, error } = await supabase.rpc('obtener_valor_inventario')
+  if (error) manejarError('_obtenerValorInventario', error)
+
+  const resultado = data ?? { valor_costo: 0, valor_venta: 0, productos_incompletos: [] }
+
+  return {
+    valorInventarioCosto: Number(resultado.valor_costo) || 0,
+    valorInventarioVenta: Number(resultado.valor_venta) || 0,
+    productosValorIncompleto: (resultado.productos_incompletos ?? []).map(row => ({
+      idProducto:         row.id_producto,
+      nombre:             row.nombre,
+      cantidad:           row.cantidad,
+      sinPrecioProveedor: row.sin_precio_proveedor,
+      sinPrecioVenta:     row.sin_precio_venta,
+    })),
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // FUNCIÓN PRINCIPAL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -698,6 +720,7 @@ export async function obtenerMetricas(desde, hasta) {
     { stockCritico, cantidadStockCritico },
     inversionesGlobal,
     saldosPendientesGlobal,
+    { valorInventarioCosto, valorInventarioVenta, productosValorIncompleto },
 
     // Grupo B: del período
     { presupuestos, mapaSubtotal },
@@ -706,7 +729,7 @@ export async function obtenerMetricas(desde, hasta) {
     egresosExtra,
     pedidosPendientesMonto,
     estados,
-    { topProductos, todosProductosVendidos },
+    { topProductos, todosProductosVendidos, productosPorIngresos },
     topClientes,
     clientesUnicos,
     topCategorias,
@@ -720,6 +743,7 @@ export async function obtenerMetricas(desde, hasta) {
     _obtenerStockCritico(),
     _obtenerInversionesGlobal(),
     _obtenerSaldosPendientesGlobal(),
+    _obtenerValorInventario(),
 
     // Del período
     _obtenerPresupuestosPeriodo(desde, hasta),
@@ -833,6 +857,12 @@ export async function obtenerMetricas(desde, hasta) {
   m.topProductos          = topProductos
   m.todosProductosVendidos = todosProductosVendidos
 
+  // 7b. Ranking de productos por ingresos (monto = cantidad × precio de venta).
+  // Ya viene ordenado por monto DESC desde la RPC productos_vendidos_periodo()
+  // — no se reordena en JS. El componente pagina esta lista completa
+  // mostrando un Top 20 por página (Escenario 3).
+  m.productosPorIngresos = productosPorIngresos
+
   // 8. Top clientes
   m.topClientes = topClientes
 
@@ -878,6 +908,12 @@ export async function obtenerMetricas(desde, hasta) {
   // 18. Margen bruto
   m.margenBrutoMonto = margenBrutoMonto
   m.margenBrutoPct   = margenBrutoPct
+
+  // 19. Valor actual del inventario (costo proveedor vs. precio de venta)
+  m.valorInventarioCosto        = valorInventarioCosto
+  m.valorInventarioVenta        = valorInventarioVenta
+  m.productosValorIncompleto    = productosValorIncompleto
+  m.cantidadProductosValorIncompleto = productosValorIncompleto.length
 
   return m
 }
