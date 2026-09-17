@@ -5,7 +5,13 @@ import { useNavigate } from 'react-router-dom'
 
 // ─── Services ────────────────────────────────────────────────────────────────
 import { crearCliente, buscarClientes, obtenerClientePorId } from '../services/clientesService'
-import { crearPresupuesto, actualizarPresupuesto, obtenerPresupuestoPorId, obtenerDetallesDePresupuesto } from '../services/presupuestosService'
+import { actualizarPresupuesto, obtenerPresupuestoPorId, obtenerDetallesDePresupuesto } from '../services/presupuestosService'
+// [ANTI-DUPLICACIÓN] El alta ahora pasa por el RPC idempotente (escenario 3
+// de la historia de usuario). `actualizarPresupuesto` sigue igual: la edición
+// de un presupuesto ya existente no puede "duplicarse" de la misma manera
+// que un alta, así que no requiere este cableado.
+import { crearPresupuestoIdempotente } from '../services/presupuestosIdempotente'
+import { useClaveIdempotencia } from '../lib/idempotency'
 import { buscarProductos, obtenerProductoPorId, obtenerMedidasDeProducto } from '../services/productosService'
 import { calcularPromocionParaItem, obtenerPromocionesVigentes } from '../services/promocionesService'
 import { obtenerSaldosPendientesDeCliente } from '../services/saldosService'
@@ -852,6 +858,13 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
   const [stockErrors,        setStockErrors]         = useState({})
   const [saving,             setSaving]              = useState(false)
 
+  // [ANTI-DUPLICACIÓN] Clave de idempotencia de ESTE formulario. Se genera al
+  // montar el componente (una intención = un presupuesto a crear) y se rota
+  // recién después de un alta exitosa, para que "Nuevo presupuesto" identifique
+  // la siguiente intención. Generarla dentro de guardar() sería un error: cada
+  // clic produciría una clave distinta y la idempotencia no serviría de nada.
+  const { leer: leerClaveIdempotencia, rotar: rotarClaveIdempotencia } = useClaveIdempotencia()
+
   // ── Promociones vigentes — se cargan una sola vez ──
   const [promoVigentes, setPromoVigentes] = useState([])
   useEffect(() => {
@@ -1113,8 +1126,23 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
         presupuestoReal = presupuestoEditar
         if (onEditarVolver) { onEditarVolver(presupuestoReal); return }
       } else {
-        const pres = await crearPresupuesto(cabecera, detalles)
+        // [ANTI-DUPLICACIÓN] Escenario 3: si esta solicitud es un reenvío de
+        // una ya procesada (doble pestaña, reintento por latencia, un clic
+        // que se escapó del latch del botón), el backend detecta la clave y
+        // devuelve el mismo id sin insertar de nuevo. `pres.idempotente` es
+        // `true` en ese caso; se deja el detalle en el log para poder ver si
+        // esto ocurre en la práctica.
+        const pres = await crearPresupuestoIdempotente({
+          clave: leerClaveIdempotencia(),
+          cabecera,
+          detalles,
+        })
         presupuestoReal = pres.idPresupuesto
+
+        // La clave identificaba ESTA intención de guardado. Una vez que se
+        // confirmó, se rota: el próximo clic en "Guardar" (otro presupuesto,
+        // o un reintento manual tras cerrar este) es una intención nueva.
+        rotarClaveIdempotencia()
       }
 
       const esCuenta = metodoPago === 'cc15' || metodoPago === 'cc30' ||
@@ -1139,6 +1167,10 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
     productoCacheRef.current.clear()
     setCliente(null); setMetodoPago('efectivo'); setItems([ITEM_EMPTY()])
     setGuardado(null); setError(''); setExcepcionFactor(1); setExcepcionSubMetodo('efectivo')
+    // [ANTI-DUPLICACIÓN] Rotación defensiva: normalmente la clave ya se rotó
+    // tras el éxito en guardar(). Repetirla acá no tiene costo y cubre el
+    // caso borde de que "Nuevo" se dispare desde un lugar que no pasó por ahí.
+    rotarClaveIdempotencia()
   }
 
   // ── Estados de carga ──
