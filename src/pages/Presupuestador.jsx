@@ -1117,6 +1117,13 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
         monto:           totalFinal,
         estado:          'borrador',
         esExcepcion:     esExcepcion ? 1 : 0,
+        // [ANTI-DUPLICACIÓN / FIX] El backend valida que `monto` sea
+        // coherente con la suma del detalle, pero no puede recalcular el
+        // recargo/descuento por método de pago sin duplicar METODOS_BASE
+        // acá y allá (y desincronizarse el día que cambien un %). Se manda
+        // el factor ya resuelto por el frontend; el RPC solo verifica que
+        // monto ≈ round(sum(detalle.subtotal) * factor, 2).
+        factor:          factorReal,
       }
 
       let presupuestoReal
