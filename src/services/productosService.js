@@ -25,8 +25,39 @@ function mapProducto(row) {
     activo:          row.activo ?? true,
     // si viene con JOIN de categoria
     categoria:       row.categoria ?? null,
+    // Proveedores asociados (relación N:M vía producto_proveedor). Solo viene
+    // poblado si el SELECT pidió el JOIN anidado; si no, queda en [] para que
+    // el resto del código no tenga que hacer chequeos de undefined.
+    proveedores: mapProveedoresAsociados(row.producto_proveedor),
   }
 }
+
+/**
+ * Traduce las filas de la relación N:M producto_proveedor (con su JOIN a
+ * proveedor) al shape que consume la UI. Tolera tanto el array vacío/ausente
+ * como filas donde el proveedor fue borrado y el JOIN vino null.
+ */
+function mapProveedoresAsociados(rows) {
+  if (!Array.isArray(rows)) return []
+  return rows
+    .filter(r => r.proveedor) // descarta huérfanos si el proveedor fue eliminado
+    .map(r => ({
+      idProveedor:     r.id_proveedor,
+      nombreFiscal:    r.proveedor.nombre_fiscal,
+      nombreComercial: r.proveedor.nombre_comercial,
+    }))
+}
+
+// Fragmento de SELECT reutilizado en toda query que necesite traer los
+// proveedores asociados a un producto junto con el resto de sus columnas.
+const SELECT_PRODUCTO_CON_PROVEEDORES = `
+      *,
+      categoria ( nombre ),
+      producto_proveedor (
+        id_proveedor,
+        proveedor ( nombre_fiscal, nombre_comercial )
+      )
+    `
 
 function mapMedida(row) {
   if (!row) return null
@@ -120,10 +151,7 @@ export async function eliminarCategoria(idCategoria) {
 export async function obtenerProductos({ incluirInactivos = true } = {}) {
   let q = supabase
     .from('producto')
-    .select(`
-      *,
-      categoria ( nombre )
-    `)
+    .select(SELECT_PRODUCTO_CON_PROVEEDORES)
     .order('nombre')
 
   if (!incluirInactivos) q = q.eq('activo', true)
@@ -148,13 +176,24 @@ export async function obtenerProductos({ incluirInactivos = true } = {}) {
  * discontinuados en presupuestos nuevos. Pasar `soloActivos: false`
  * explícitamente solo desde pantallas de administración que necesiten verlos.
  */
-export async function buscarProductos({ texto = '', idCategoria = null, soloStockCritico = false, soloActivos = true } = {}) {
+export async function buscarProductos({ texto = '', idCategoria = null, idProveedor = null, soloStockCritico = false, soloActivos = true } = {}) {
+  // Cuando se filtra por proveedor, el JOIN a producto_proveedor debe ser
+  // `!inner` para que PostgREST filtre las filas de PRODUCTO (no solo el
+  // array anidado) por ese proveedor. Sin `!inner`, .eq() sobre una relación
+  // embebida por defecto ("left join") filtra el contenido anidado pero
+  // sigue devolviendo todos los productos.
+  const selectConFiltroProveedor = `
+      *,
+      categoria ( nombre ),
+      producto_proveedor!inner (
+        id_proveedor,
+        proveedor ( nombre_fiscal, nombre_comercial )
+      )
+    `
+
   let q = supabase
     .from('producto')
-    .select(`
-      *,
-      categoria ( nombre )
-    `)
+    .select(idProveedor ? selectConFiltroProveedor : SELECT_PRODUCTO_CON_PROVEEDORES)
     .order('nombre')
 
   if (texto.trim()) {
@@ -163,6 +202,12 @@ export async function buscarProductos({ texto = '', idCategoria = null, soloStoc
 
   if (idCategoria) {
     q = q.eq('id_categoria', idCategoria)
+  }
+
+  if (idProveedor) {
+    // Filtra productos que tengan asociado este proveedor específico.
+    // Usado por la futura pantalla de compras por proveedor.
+    q = q.eq('producto_proveedor.id_proveedor', idProveedor)
   }
 
   if (soloActivos) {
@@ -198,7 +243,7 @@ export async function buscarProductos({ texto = '', idCategoria = null, soloStoc
 export async function obtenerProductoPorId(idProducto) {
   const { data, error } = await supabase
     .from('producto')
-    .select(`*, categoria ( nombre )`)
+    .select(SELECT_PRODUCTO_CON_PROVEEDORES)
     .eq('id_producto', idProducto)
     .single()
 
@@ -221,50 +266,119 @@ export async function obtenerMedidasDeProducto(idProducto) {
   return data.map(mapMedida)
 }
 
+/**
+ * Devuelve los proveedores asociados a un producto.
+ * Equivale a: SELECT p.* FROM producto_proveedor pp
+ *             JOIN proveedor p ON p.idProveedor = pp.idProveedor
+ *             WHERE pp.idProducto = ?
+ *
+ * `obtenerProductos`, `buscarProductos` y `obtenerProductoPorId` ya traen
+ * esta info embebida (`producto.proveedores`); usar esta función solo cuando
+ * se necesite la lista de proveedores de un producto puntual sin traer el
+ * resto de sus columnas.
+ */
+export async function obtenerProveedoresDeProducto(idProducto) {
+  const { data, error } = await supabase
+    .from('producto_proveedor')
+    .select('id_proveedor, proveedor ( nombre_fiscal, nombre_comercial )')
+    .eq('id_producto', idProducto)
+
+  if (error) manejarError('obtenerProveedoresDeProducto', error)
+  return mapProveedoresAsociados(data)
+}
+
 // ─── Mutaciones de Producto ───────────────────────────────────────────────────
 
 /**
- * Crea un nuevo producto. Devuelve el producto creado con su ID.
- * Equivale a: INSERT INTO Producto (...) VALUES (...)
+ * Serializa un producto del shape de la UI (camelCase) al jsonb que esperan
+ * los RPC `crear_producto_con_proveedores` / `actualizar_producto_con_proveedores`.
  */
-export async function crearProducto(producto) {
-  const { data, error } = await supabase
-    .from('producto')
-    .insert({
-      id_categoria:     producto.idCategoria,
-      nombre:           producto.nombre,
-      precio_proveedor: producto.precioProveedor ?? 0,
-      precio_unitario:  producto.precioUnitario  ?? 0,
-      cantidad:         producto.cantidad        ?? 0,
-      tiene_medidas:    Boolean(producto.tieneMedidas),
-      punto_reposicion: producto.puntoReposicion ?? 0,
-    })
-    .select()
-    .single()
+function serializarProductoParaRpc(producto) {
+  return {
+    id_categoria:     producto.idCategoria,
+    nombre:           producto.nombre,
+    precio_proveedor: producto.precioProveedor ?? 0,
+    precio_unitario:  producto.precioUnitario  ?? 0,
+    cantidad:         producto.cantidad        ?? 0,
+    tiene_medidas:    Boolean(producto.tieneMedidas),
+    punto_reposicion: producto.puntoReposicion ?? 0,
+  }
+}
+
+/**
+ * Crea un nuevo producto y, opcionalmente, lo asocia a uno o más proveedores.
+ * Equivale a:
+ *   INSERT INTO Producto (...) VALUES (...)
+ *   INSERT INTO producto_proveedor (id_producto, id_proveedor) VALUES (...) × N
+ *
+ * Ambas operaciones corren atómicamente del lado del servidor (función
+ * `crear_producto_con_proveedores`, ver 004_producto_proveedor.sql) para que
+ * nunca quede un producto creado sin sus proveedores por una falla de red
+ * entre el insert de cabecera y el de asociaciones.
+ *
+ * Protección de idempotencia (alta crítica de catálogo, puede duplicarse por
+ * doble click, doble pestaña o reintento automático del cliente):
+ *   1) UI: el botón de guardar se deshabilita mientras `loading` es true.
+ *   2) Se genera una clave de idempotencia por intento de guardado y viaja
+ *      al servidor en cada llamada.
+ *   3) La tabla `idempotency_key` (UNIQUE en `key`) es la red de seguridad
+ *      final: si la misma clave llega dos veces, el servidor devuelve la
+ *      respuesta ya persistida en vez de crear un segundo producto.
+ *
+ * @param {object} producto
+ * @param {number[]} [idsProveedores] IDs de proveedor a asociar. Puede ir
+ *        vacío o ausente: un producto sin proveedor asignado es un estado
+ *        válido (ver Escenario 3 de la historia de asociación proveedor-producto).
+ * @param {string} [idempotencyKey] Clave de idempotencia explícita. Si se
+ *        omite, se genera una nueva — pasarla explícitamente permite que la
+ *        UI reintente la MISMA operación tras un error de red sin riesgo de
+ *        duplicar el producto.
+ */
+export async function crearProducto(producto, idsProveedores = [], idempotencyKey = crypto.randomUUID()) {
+  const { data, error } = await supabase.rpc('crear_producto_con_proveedores', {
+    p_producto:          serializarProductoParaRpc(producto),
+    p_ids_proveedores:   idsProveedores,
+    p_idempotency_key:   idempotencyKey,
+  })
 
   if (error) manejarError('crearProducto', error)
   return mapProducto(data)
 }
 
 /**
- * Actualiza los datos de un producto existente.
- * Equivale a: UPDATE Producto SET ... WHERE idProducto = ?
+ * Actualiza los datos de un producto existente y reemplaza por completo el
+ * conjunto de proveedores asociados (no afecta ningún otro atributo del
+ * producto — ver Escenario 2 de la historia de asociación proveedor-producto).
+ * Equivale a:
+ *   UPDATE Producto SET ... WHERE idProducto = ?
+ *   DELETE FROM producto_proveedor WHERE idProducto = ?
+ *   INSERT INTO producto_proveedor (...) × N
+ *
+ * Corre en una única transacción del lado del servidor (función
+ * `actualizar_producto_con_proveedores`) para evitar que el producto quede
+ * con la cabecera actualizada pero los proveedores a medio sincronizar si
+ * la conexión se corta entre el DELETE y el INSERT.
+ *
+ * No requiere clave de idempotencia: a diferencia de un alta, reemplazar el
+ * conjunto completo de proveedores es una operación naturalmente idempotente
+ * (ejecutarla N veces con el mismo array deja el mismo estado final), así
+ * que el bloqueo de UI (botón deshabilitado durante `loading`) alcanza como
+ * única capa de protección contra doble envío.
+ *
+ * @param {number[]} [idsProveedores]
  */
-export async function actualizarProducto(idProducto, producto) {
-  const { error } = await supabase
-    .from('producto')
-    .update({
-      id_categoria:     producto.idCategoria,
-      nombre:           producto.nombre,
-      precio_proveedor: producto.precioProveedor ?? 0,
-      precio_unitario:  producto.precioUnitario  ?? 0,
-      cantidad:         producto.cantidad        ?? 0,
-      tiene_medidas:    Boolean(producto.tieneMedidas),
-      punto_reposicion: producto.puntoReposicion ?? 0,
-    })
-    .eq('id_producto', idProducto)
+export async function actualizarProducto(idProducto, producto, idsProveedores = []) {
+  const { data, error } = await supabase.rpc('actualizar_producto_con_proveedores', {
+    p_id_producto:      idProducto,
+    p_producto:         serializarProductoParaRpc(producto),
+    p_ids_proveedores:  idsProveedores,
+  })
 
   if (error) manejarError('actualizarProducto', error)
+
+  if (data === 'no_encontrado') {
+    throw new Error('El producto no existe o fue eliminado por otro usuario.')
+  }
 }
 
 /**
@@ -449,4 +563,4 @@ export async function obtenerMaxPrecioProveedorEnPedidos(idProducto) {
 
   if (error) manejarError('obtenerMaxPrecioProveedorEnPedidos', error)
   return data[0]?.precio_unitario ?? 0
-}
+}
