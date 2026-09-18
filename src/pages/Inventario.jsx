@@ -1,5 +1,6 @@
 // src/pages/Inventario.jsx
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { usePaginatedList } from '../hooks/usePaginatedList'
 import {
   obtenerProductos,
   obtenerCategorias,
@@ -9,9 +10,10 @@ import {
   actualizarCantidadProducto,
   obtenerMedidasDeProducto,
 } from '../services/productosService'
+import { obtenerProveedores, contarProductosDeProveedor, actualizarPrecioPorProveedor } from '../services/proveedoresService'
 import { supabase } from '../lib/supabase'
 import { Button, Card, PageHeader, Modal, Input, Select, Badge, Table, Tr, Td } from '../components/ui'
-import { Plus, Search, Pencil, Trash2, ChevronDown, ChevronUp, PackagePlus, X, CheckCircle2, TrendingUp, FileSpreadsheet, AlertTriangle } from 'lucide-react'
+import { Plus, Search, Pencil, Trash2, ChevronDown, ChevronUp, PackagePlus, X, CheckCircle2, TrendingUp, FileSpreadsheet, AlertTriangle, Truck, ChevronsUpDown, Check } from 'lucide-react'
 import * as XLSX from 'xlsx'
 
 // ─── Constantes ───────────────────────────────────────────────────────────
@@ -52,11 +54,107 @@ function Toast({ message, visible, onDone, type = 'success' }) {
   )
 }
 
+// ─── Selector múltiple de proveedores ──────────────────────────────────────
+//
+// Un producto puede tener 0..N proveedores asociados (ver 004_producto_proveedor.sql).
+// No existe un componente <MultiSelect> en components/ui, así que se resuelve
+// acá con un combobox accesible: botón que abre un panel de checkboxes,
+// navegable por teclado y anunciado por lectores de pantalla (role="listbox",
+// aria-selected por opción, aria-expanded en el trigger).
+function ProveedorMultiSelect({ proveedores, value, onChange, error }) {
+  const [open, setOpen] = useState(false)
+  const containerRef = useRef(null)
+
+  useEffect(() => {
+    function onClickFuera(e) {
+      if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false)
+    }
+    function onEscape(e) { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onClickFuera)
+    document.addEventListener('keydown', onEscape)
+    return () => {
+      document.removeEventListener('mousedown', onClickFuera)
+      document.removeEventListener('keydown', onEscape)
+    }
+  }, [])
+
+  function toggle(idProveedor) {
+    if (value.includes(idProveedor)) onChange(value.filter((id) => id !== idProveedor))
+    else onChange([...value, idProveedor])
+  }
+
+  function quitar(idProveedor) {
+    onChange(value.filter((id) => id !== idProveedor))
+  }
+
+  const seleccionados = proveedores.filter((p) => value.includes(p.idProveedor))
+
+  return (
+    <div ref={containerRef} className="relative">
+      <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1.5">
+        Proveedor(es)
+      </label>
+
+      <button type="button" onClick={() => setOpen((o) => !o)}
+        aria-haspopup="listbox" aria-expanded={open}
+        className={`w-full flex items-center justify-between gap-2 bg-surface-700 border rounded-xl px-3 py-2
+          text-left text-sm font-body focus:outline-none focus:border-brand-500 transition-all
+          ${error ? 'border-red-500/60' : 'border-surface-600'}`}>
+        <span className="flex flex-wrap gap-1.5 min-h-[1.25rem]">
+          {seleccionados.length === 0 && (
+            <span className="text-surface-500">Sin proveedor asignado (opcional)</span>
+          )}
+          {seleccionados.map((p) => (
+            <span key={p.idProveedor}
+              className="inline-flex items-center gap-1 bg-surface-600/70 border border-surface-500/50 rounded-lg px-2 py-0.5 text-xs text-white">
+              {p.nombreComercial || p.nombreFiscal}
+              <X size={11} className="cursor-pointer hover:text-red-400"
+                onClick={(e) => { e.stopPropagation(); quitar(p.idProveedor) }} />
+            </span>
+          ))}
+        </span>
+        <ChevronsUpDown size={14} className="flex-shrink-0 text-surface-400" />
+      </button>
+
+      {open && (
+        <div role="listbox" aria-multiselectable="true"
+          className="absolute z-20 mt-1.5 w-full max-h-56 overflow-y-auto bg-surface-800 border border-surface-600
+                     rounded-xl shadow-2xl py-1.5">
+          {proveedores.length === 0 ? (
+            <p className="px-3 py-2 text-surface-500 text-xs font-body">
+              No hay proveedores cargados todavía.
+            </p>
+          ) : (
+            proveedores.map((p) => {
+              const activo = value.includes(p.idProveedor)
+              return (
+                <div key={p.idProveedor} role="option" aria-selected={activo} tabIndex={0}
+                  onClick={() => toggle(p.idProveedor)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(p.idProveedor) } }}
+                  className="flex items-center gap-2.5 px-3 py-2 cursor-pointer text-sm font-body text-surface-200
+                             hover:bg-surface-700 transition-colors focus:outline-none focus:bg-surface-700">
+                  <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center
+                    ${activo ? 'bg-brand-500 border-brand-500' : 'border-surface-500'}`}>
+                    {activo && <Check size={11} className="text-white" />}
+                  </span>
+                  <span className="truncate">{p.nombreComercial || p.nombreFiscal}</span>
+                </div>
+              )
+            })
+          )}
+        </div>
+      )}
+
+      {error && <p className="text-red-400 text-xs font-body mt-1">{error}</p>}
+    </div>
+  )
+}
+
 // ─── Modal: editar producto ───────────────────────────────────────────────
 
-function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
+function EditarProductoModal({ open, onClose, producto, categorias, proveedores, onSaved }) {
   const [form, setForm] = useState({
-    nombre: '', idCategoria: 1, precioProveedor: '', precioUnitario: '', puntoReposicion: '',
+    nombre: '', idCategoria: 1, precioProveedor: '', precioUnitario: '', puntoReposicion: '', idsProveedores: [],
   })
   const [margen,  setMargen]  = useState('')
   const [errors,  setErrors]  = useState({})
@@ -70,6 +168,9 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
       precioProveedor: producto.precioProveedor && producto.precioProveedor > 0 ? String(producto.precioProveedor) : '',
       precioUnitario:  producto.precioUnitario  && producto.precioUnitario  > 0 ? String(producto.precioUnitario)  : '',
       puntoReposicion: producto.puntoReposicion && producto.puntoReposicion > 0 ? String(producto.puntoReposicion) : '',
+      // Escenario 2: el producto puede llegar sin proveedor asignado o con
+      // uno o más ya asociados — en ambos casos se precarga tal cual está.
+      idsProveedores:  (producto.proveedores ?? []).map((p) => p.idProveedor),
     })
     setMargen('')
     setErrors({})
@@ -106,7 +207,7 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
         nombre: form.nombre.trim(), idCategoria: form.idCategoria,
         precioProveedor: pp, precioUnitario: pu, puntoReposicion: pr,
         cantidad: producto.cantidad, tieneMedidas: producto.tieneMedidas,
-      })
+      }, form.idsProveedores)
       onSaved()
       onClose()
     } catch (err) {
@@ -187,6 +288,9 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
           onChange={(e) => { const v = e.target.value.replace(/\D/g, ''); set('puntoReposicion', v) }}
           placeholder="Ej: 5" />
 
+        <ProveedorMultiSelect proveedores={proveedores} value={form.idsProveedores}
+          onChange={(ids) => set('idsProveedores', ids)} />
+
         {errors.general && <p className="text-red-400 text-xs font-body">{errors.general}</p>}
 
         <div className="flex gap-2 pt-2">
@@ -202,16 +306,23 @@ function EditarProductoModal({ open, onClose, producto, categorias, onSaved }) {
 
 // ─── Modal: nuevo producto ────────────────────────────────────────────────
 
-function NuevoProductoModal({ open, onClose, categorias, onSaved }) {
-  const emptyForm = { nombre: '', idCategoria: categorias[0]?.idCategoria ?? 1, precioUnitario: '' }
+function NuevoProductoModal({ open, onClose, categorias, proveedores, onSaved }) {
+  const emptyForm = { nombre: '', idCategoria: categorias[0]?.idCategoria ?? 1, precioUnitario: '', idsProveedores: [] }
   const [form,    setForm]    = useState(emptyForm)
   const [errors,  setErrors]  = useState({})
   const [loading, setLoading] = useState(false)
+  // Clave de idempotencia del intento de alta en curso. Se regenera cada vez
+  // que se abre el modal (nuevo intento de creación) pero se conserva entre
+  // reintentos del MISMO intento (p. ej. si guardar() falla por un error de
+  // red transitorio y el usuario le da a "Crear Producto" de nuevo sin
+  // cerrar el modal), para que un reintento no pueda crear un duplicado.
+  const [idempotencyKey, setIdempotencyKey] = useState(null)
 
   useEffect(() => {
     if (!open) return
     setForm({ ...emptyForm, idCategoria: categorias[0]?.idCategoria ?? 1 })
     setErrors({})
+    setIdempotencyKey(crypto.randomUUID())
   }, [open])
 
   function set(k, v) { setForm((p) => ({ ...p, [k]: v })) }
@@ -231,7 +342,7 @@ function NuevoProductoModal({ open, onClose, categorias, onSaved }) {
       await crearProducto({
         idCategoria: form.idCategoria, nombre: form.nombre.trim(),
         precioProveedor: 0, precioUnitario: precio, cantidad: 0, tieneMedidas: 0, puntoReposicion: 0,
-      })
+      }, form.idsProveedores, idempotencyKey)
       onSaved()
       onClose()
     } catch (err) {
@@ -256,6 +367,8 @@ function NuevoProductoModal({ open, onClose, categorias, onSaved }) {
         <Input label="Precio Unitario de Venta" value={form.precioUnitario}
           onChange={(e) => { const v = e.target.value.replace(',', '.'); if (/^\d*\.?\d*$/.test(v)) set('precioUnitario', v) }}
           error={errors.precioUnitario} placeholder="0.00" />
+        <ProveedorMultiSelect proveedores={proveedores} value={form.idsProveedores}
+          onChange={(ids) => set('idsProveedores', ids)} />
         {errors.general && <p className="text-red-400 text-xs font-body">{errors.general}</p>}
         <div className="flex gap-2 pt-2">
           <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
@@ -469,6 +582,174 @@ function ActualizarPreciosModal({ open, onClose, onSaved }) {
   )
 }
 
+// ─── Modal: actualizar precio proveedor (costo) por proveedor ────────────
+//
+// Distinto del modal anterior: ese actualiza precio_unitario (venta) sobre
+// TODOS los productos usando su propio precio_proveedor como base. Este
+// actualiza precio_proveedor (costo) y solo para los productos asociados a
+// UN proveedor puntual — ver historia "Actualizar precio de producto por
+// proveedor aplicando un margen de aumento porcentual".
+function ActualizarPrecioPorProveedorModal({ open, onClose, onSaved, proveedores }) {
+  const [idProveedor,  setIdProveedor]  = useState('')
+  const [margen,       setMargen]       = useState('')
+  const [confirmado,   setConfirmado]   = useState(false)
+  const [cantidad,     setCantidad]     = useState(null) // null = todavía no se consultó
+  const [loadingCount, setLoadingCount] = useState(false)
+  const [loading,      setLoading]      = useState(false)
+  const [error,        setError]        = useState('')
+  const idempotencyKeyRef = useRef(null)
+
+  // Una clave de idempotencia por apertura de modal (un "intento de
+  // guardado"), no una por click: si el usuario reintenta tras un error de
+  // red sin cerrar el modal, reutiliza la misma clave — ver justificación
+  // completa en proveedoresService.actualizarPrecioPorProveedor().
+  useEffect(() => {
+    if (!open) return
+    idempotencyKeyRef.current = crypto.randomUUID()
+    setIdProveedor(''); setMargen(''); setConfirmado(false)
+    setCantidad(null); setError(''); setLoading(false)
+  }, [open])
+
+  // Escenario 3: apenas se elige un proveedor, chequeamos si tiene
+  // productos asociados ANTES de dejar avanzar al margen y la confirmación.
+  useEffect(() => {
+    if (!idProveedor) { setCantidad(null); return }
+    let cancelado = false
+    setLoadingCount(true); setConfirmado(false)
+    contarProductosDeProveedor(Number(idProveedor))
+      .then((n) => { if (!cancelado) setCantidad(n) })
+      .catch(() => { if (!cancelado) { setCantidad(null); setError('No se pudo verificar los productos de este proveedor.') } })
+      .finally(() => { if (!cancelado) setLoadingCount(false) })
+    return () => { cancelado = true }
+  }, [idProveedor])
+
+  const proveedorSeleccionado = proveedores.find((p) => p.idProveedor === Number(idProveedor))
+  const sinProductos = idProveedor !== '' && !loadingCount && cantidad === 0
+
+  function validarMargen(valor) {
+    if (valor.trim() === '') return 'Ingresá un margen de aumento.'
+    const n = parseFloat(valor.replace(',', '.'))
+    if (isNaN(n)) return 'El margen debe ser un número.'
+    if (n <= 0) return 'El margen debe ser mayor a 0%.'
+    if (n > 1000) return 'Ese margen es demasiado alto. Revisá el valor.'
+    return ''
+  }
+
+  const errorMargen    = margen ? validarMargen(margen) : ''
+  const puedeConfirmar = idProveedor && cantidad > 0 && margen && !errorMargen && confirmado && !loading && !loadingCount
+
+  async function confirmar() {
+    const mensaje = validarMargen(margen)
+    if (mensaje) { setError(mensaje); return } // defensa extra: cubre un submit por Enter con el botón deshabilitado
+    if (!idProveedor || !cantidad) return
+
+    setLoading(true); setError('')
+    try {
+      const mg = parseFloat(margen.replace(',', '.'))
+      const resultado = await actualizarPrecioPorProveedor(Number(idProveedor), mg, idempotencyKeyRef.current)
+
+      if (resultado.resultado === 'sin_productos') {
+        // Carrera improbable: el proveedor se quedó sin productos asociados
+        // entre el conteo inicial y la confirmación. Se informa sin
+        // tratarlo como error de sistema, y no se cierra el modal para que
+        // el usuario pueda elegir otro proveedor.
+        setCantidad(0)
+        setError('Este proveedor ya no tiene productos asociados. No se realizó ningún cambio.')
+        return
+      }
+
+      onSaved(resultado.cantidadProductos)
+      onClose()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Actualizar Precio por Proveedor" width="max-w-md">
+      <div className="space-y-4">
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-4 py-3">
+          <p className="text-amber-200 text-sm font-body">
+            Esta acción actualiza el <strong>precio proveedor (costo)</strong> de los productos asociados
+            al proveedor elegido. No modifica el precio de venta.
+          </p>
+        </div>
+
+        <Select label="Proveedor" value={idProveedor} disabled={loading}
+          onChange={(e) => setIdProveedor(e.target.value)}>
+          <option value="">Seleccioná un proveedor…</option>
+          {proveedores.map((p) => (
+            <option key={p.idProveedor} value={p.idProveedor} className="font-body">
+              {p.nombreComercial || p.nombreFiscal}
+            </option>
+          ))}
+        </Select>
+
+        {idProveedor !== '' && (
+          <div className="text-sm font-body">
+            {loadingCount ? (
+              <p className="text-surface-400">Buscando productos asociados…</p>
+            ) : sinProductos ? (
+              <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/30 rounded-xl px-3 py-2">
+                <AlertTriangle size={15} className="text-red-400 flex-shrink-0 mt-0.5" />
+                <p className="text-red-300">Este proveedor no tiene productos asociados. No hay nada para actualizar.</p>
+              </div>
+            ) : cantidad > 0 ? (
+              <p className="text-surface-300 flex items-center gap-1.5">
+                <Truck size={13} className="text-surface-400 flex-shrink-0" />
+                {cantidad} producto{cantidad === 1 ? '' : 's'} asociado{cantidad === 1 ? '' : 's'} — se {cantidad === 1 ? 'actualizará' : 'actualizarán'} su precio proveedor.
+              </p>
+            ) : null}
+          </div>
+        )}
+
+        {cantidad > 0 && (
+          <>
+            <div className="relative">
+              <TrendingUp size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
+              <input type="text" inputMode="decimal" value={margen} disabled={loading}
+                onChange={(e) => {
+                  const v = e.target.value.replace(',', '.')
+                  if (/^-?\d*\.?\d*$/.test(v)) { setMargen(v); setConfirmado(false); setError('') }
+                }}
+                onKeyDown={(e) => { if (e.key === 'Enter') confirmar() }}
+                placeholder="Margen de aumento (%)"
+                className={`w-full bg-surface-700 border rounded-xl pl-9 pr-10 py-2 text-white
+                           text-sm font-mono focus:outline-none focus:border-brand-500 transition-all
+                           ${errorMargen ? 'border-red-500/60' : 'border-surface-600'}`} />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 text-sm font-mono">%</span>
+            </div>
+            {errorMargen && <p className="text-red-400 text-xs font-body -mt-2">{errorMargen}</p>}
+
+            {margen && !errorMargen && (
+              <label className="flex items-start gap-2.5 text-sm font-body text-surface-300 cursor-pointer select-none">
+                <input type="checkbox" checked={confirmado} disabled={loading}
+                  onChange={(e) => setConfirmado(e.target.checked)}
+                  className="mt-0.5 accent-brand-500 cursor-pointer" />
+                <span>
+                  Confirmo que quiero aumentar el precio proveedor de <strong>{cantidad}</strong> producto{cantidad === 1 ? '' : 's'} de{' '}
+                  <strong>{proveedorSeleccionado?.nombreComercial || proveedorSeleccionado?.nombreFiscal}</strong> en un {margen}%.
+                </span>
+              </label>
+            )}
+          </>
+        )}
+
+        {error && <p className="text-red-400 text-sm font-body">{error}</p>}
+
+        <div className="flex gap-2 pt-2">
+          <Button variant="secondary" className="flex-1" onClick={onClose} disabled={loading}>Cancelar</Button>
+          <Button className="flex-1" onClick={confirmar} disabled={!puedeConfirmar}>
+            {loading ? 'Actualizando...' : 'Actualizar precios'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
 // ─── Modal: nueva categoría ───────────────────────────────────────────────
 
 function CatModal({ open, onClose, onSaved, categorias }) {
@@ -517,15 +798,14 @@ function CatModal({ open, onClose, onSaved, categorias }) {
 const PAGE_SIZE = 50
 
 export default function Inventario() {
-  const [productos,    setProductos]    = useState([])
-  const [allProductos, setAllProductos] = useState([])
   const [categorias,   setCategorias]   = useState([])
+  const [proveedores,  setProveedores]  = useState([])
   const [searchNombre, setSearchNombre] = useState('')
   const [searchId,     setSearchId]     = useState('')
   const [filterCat,    setFilterCat]    = useState('all')
+  const [filterProveedor, setFilterProveedor] = useState('all')
   const [filterStock,  setFilterStock]  = useState('all')
   const [filterBajoStock, setFilterBajoStock] = useState(false)
-  const [page,         setPage]         = useState(1)
   const [sortKey,      setSortKey]      = useState('nombre')
   const [sortDir,      setSortDir]      = useState('asc')
 
@@ -534,56 +814,64 @@ export default function Inventario() {
   const [modalStock,   setModalStock]   = useState(false)
   const [modalCat,     setModalCat]     = useState(false)
   const [modalActualizarPrecios, setModalActualizarPrecios] = useState(false)
+  const [modalActualizarPrecioProveedor, setModalActualizarPrecioProveedor] = useState(false)
   const [selected,      setSelected]      = useState(null)
   const [deleteConfirm, setDeleteConfirm] = useState(null)
   const [toast,         setToast]         = useState(null)
 
   const showToast = useCallback((message, type = 'success') => setToast({ message, type }), [])
 
-  const load = useCallback(async (resetPage = true) => {
-    try {
+  // ── Datos + paginación ────────────────────────────────────────────────
+  // El fetcher trae categorías y proveedores como efecto colateral (los
+  // necesita el resto de la pantalla) y devuelve solo el array de
+  // productos, que es lo que el hook filtra/ordena/pagina.
+  // `reload()` (alias `loadSinResetPage` más abajo) NUNCA resetea `page`:
+  // por eso guardar un producto desde la página 3 ya no vuelve a la 1.
+  const {
+    pageItems: paginated,
+    items:     productos,
+    rawItems:  allProductos,
+    page, setPage, totalPages,
+    reload,
+  } = usePaginatedList({
+    fetcher: async () => {
       // incluirInactivos: false → los productos dados de baja lógica nunca
       // vuelven a listarse en el catálogo, sin necesidad de filtro visual.
-      const [cats, prods] = await Promise.all([obtenerCategorias(), obtenerProductos({ incluirInactivos: false })])
+      const [cats, prods, provs] = await Promise.all([
+        obtenerCategorias(),
+        obtenerProductos({ incluirInactivos: false }),
+        obtenerProveedores(),
+      ])
       setCategorias(cats)
-      const conStock = prods.map((p) => ({ ...p, categoriaNombre: p.categoria, stockTotal: p.cantidad }))
-      setAllProductos(conStock)
-      if (resetPage) setPage(1)
-    } catch (err) {
-      console.error('[Inventario] Error cargando datos:', err)
-    }
-  }, [])
-
-  const loadSinResetPage = useCallback(() => load(false), [load])
-
-  useEffect(() => { load() }, [load])
-
-  // Filtrado y ordenamiento en memoria — sin llamadas a Supabase
-  useEffect(() => {
-    let resultado = [...allProductos]
-
-    if (searchId.trim()) resultado = resultado.filter((p) => String(p.idProducto) === searchId.trim())
-    if (searchNombre.trim()) {
-      const needle = normalize(searchNombre.trim())
-      resultado = resultado.filter((p) => normalize(p.nombre).includes(needle))
-    }
-    if (filterCat !== 'all') resultado = resultado.filter((p) => p.idCategoria === parseInt(filterCat))
-    if (filterStock === 'con') resultado = resultado.filter((p) => p.stockTotal > 0)
-    else if (filterStock === 'sin') resultado = resultado.filter((p) => p.stockTotal === 0)
-    if (filterBajoStock) resultado = resultado.filter((p) => p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion)
-
-    resultado = resultado.sort((a, b) => {
+      setProveedores(provs)
+      return prods.map((p) => ({ ...p, categoriaNombre: p.categoria, stockTotal: p.cantidad }))
+    },
+    clientFilters: { searchNombre, searchId, filterCat, filterProveedor, filterStock, filterBajoStock, sortKey, sortDir },
+    clientFilter: (p, cf) => {
+      if (cf.searchId.trim() && String(p.idProducto) !== cf.searchId.trim()) return false
+      if (cf.searchNombre.trim() && !normalize(p.nombre).includes(normalize(cf.searchNombre.trim()))) return false
+      if (cf.filterCat !== 'all' && p.idCategoria !== parseInt(cf.filterCat)) return false
+      if (cf.filterProveedor !== 'all') {
+        const idProv = parseInt(cf.filterProveedor)
+        if (!(p.proveedores ?? []).some((pv) => pv.idProveedor === idProv)) return false
+      }
+      if (cf.filterStock === 'con' && !(p.stockTotal > 0)) return false
+      if (cf.filterStock === 'sin' && !(p.stockTotal === 0)) return false
+      if (cf.filterBajoStock && !(p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion)) return false
+      return true
+    },
+    sort: (a, b, cf) => {
       let valA, valB
-      if (sortKey === 'stock')       { valA = a.stockTotal;     valB = b.stockTotal }
-      else if (sortKey === 'precio') { valA = a.precioUnitario; valB = b.precioUnitario }
-      else                           { valA = a.nombre;          valB = b.nombre }
-      if (typeof valA === 'string') return sortDir === 'asc' ? valA.localeCompare(valB, 'es') : valB.localeCompare(valA, 'es')
-      return sortDir === 'asc' ? valA - valB : valB - valA
-    })
+      if (cf.sortKey === 'stock')       { valA = a.stockTotal;     valB = b.stockTotal }
+      else if (cf.sortKey === 'precio') { valA = a.precioUnitario; valB = b.precioUnitario }
+      else                              { valA = a.nombre;          valB = b.nombre }
+      if (typeof valA === 'string') return cf.sortDir === 'asc' ? valA.localeCompare(valB, 'es') : valB.localeCompare(valA, 'es')
+      return cf.sortDir === 'asc' ? valA - valB : valB - valA
+    },
+    pageSize: PAGE_SIZE,
+  })
 
-    setProductos(resultado)
-    setPage(1)
-  }, [allProductos, searchNombre, searchId, filterCat, filterStock, filterBajoStock, sortKey, sortDir])
+  const loadSinResetPage = reload
 
   function toggleSort(key) {
     if (sortKey === key) setSortDir((d) => d === 'asc' ? 'desc' : 'asc')
@@ -637,9 +925,6 @@ export default function Inventario() {
     XLSX.writeFile(workbook, `Lista_Productos_${new Date().toISOString().slice(0, 10)}.xlsx`)
   }
 
-  const paginated  = productos.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
-  const totalPages = Math.max(1, Math.ceil(productos.length / PAGE_SIZE))
-
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       <Toast message={toast?.message} type={toast?.type} visible={!!toast} onDone={() => setToast(null)} />
@@ -648,7 +933,8 @@ export default function Inventario() {
         actions={
           <div className="flex gap-2">
             <Button variant="secondary" onClick={() => setModalCat(true)}>+ Categoría</Button>
-            <Button variant="secondary" onClick={() => setModalActualizarPrecios(true)}>Actualizar Precios</Button>
+            <Button variant="secondary" onClick={() => setModalActualizarPrecios(true)}>Actualizar Precios de Venta</Button>
+            <Button variant="secondary" icon={Truck} onClick={() => setModalActualizarPrecioProveedor(true)}>Precio por Proveedor</Button>
             <Button variant="secondary" icon={FileSpreadsheet} onClick={exportarExcel}>Exportar Lista</Button>
             <Button icon={PackagePlus} onClick={() => setModalNuevo(true)}>Nuevo Producto</Button>
           </div>
@@ -657,7 +943,7 @@ export default function Inventario() {
 
       {/* Resumen rápido */}
       {(() => {
-        const hayFiltrosActivos = searchNombre || searchId || filterCat !== 'all' || filterStock !== 'all' || filterBajoStock
+        const hayFiltrosActivos = searchNombre || searchId || filterCat !== 'all' || filterProveedor !== 'all' || filterStock !== 'all' || filterBajoStock
         // Con filtros activos los contadores reflejan la selección actual;
         // sin filtros muestran los totales reales del catálogo completo.
         const base = hayFiltrosActivos ? productos : allProductos
@@ -700,7 +986,7 @@ export default function Inventario() {
       {/* Filtros */}
       <Card className="p-4">
         {(() => {
-          const hayFiltros = searchNombre || searchId || filterCat !== 'all' || filterStock !== 'all' || filterBajoStock
+          const hayFiltros = searchNombre || searchId || filterCat !== 'all' || filterProveedor !== 'all' || filterStock !== 'all' || filterBajoStock
           return (
             <div className="flex flex-wrap gap-3 items-center">
               <div className="flex flex-1 gap-3 min-w-[200px]">
@@ -728,6 +1014,17 @@ export default function Inventario() {
                 ))}
               </select>
 
+              <select value={filterProveedor} onChange={(e) => setFilterProveedor(e.target.value)}
+                className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
+                           font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer">
+                <option value="all" className="font-body">Todos los proveedores</option>
+                {proveedores.map((p) => (
+                  <option key={p.idProveedor} value={p.idProveedor} className="font-body">
+                    {p.nombreComercial || p.nombreFiscal}
+                  </option>
+                ))}
+              </select>
+
               <select value={filterStock} onChange={(e) => setFilterStock(e.target.value)}
                 className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
                            font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer">
@@ -738,7 +1035,7 @@ export default function Inventario() {
 
               {hayFiltros && (
                 <button
-                  onClick={() => { setSearchNombre(''); setSearchId(''); setFilterCat('all'); setFilterStock('all'); setFilterBajoStock(false) }}
+                  onClick={() => { setSearchNombre(''); setSearchId(''); setFilterCat('all'); setFilterProveedor('all'); setFilterStock('all'); setFilterBajoStock(false) }}
                   className="flex items-center gap-2 bg-surface-700 border border-surface-600 rounded-xl px-3 py-2
                              text-surface-300 text-sm font-body hover:border-red-500/50 hover:text-red-400
                              hover:bg-red-500/10 transition-all cursor-pointer whitespace-nowrap">
@@ -781,7 +1078,25 @@ export default function Inventario() {
                   className={`border-b border-surface-700/50 hover:bg-surface-700/30 transition-colors
                     ${p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion ? 'bg-yellow-500/5' : ''}`}>
                   <Td className="font-mono text-surface-400 whitespace-nowrap">#{p.idProducto}</Td>
-                  <Td><span className="text-white font-body">{p.nombre}</span></Td>
+                  <Td>
+                    <span className="text-white font-body">{p.nombre}</span>
+                    {p.proveedores?.length > 0 ? (
+                      <div className="flex items-center gap-1 mt-1 flex-wrap">
+                        <Truck size={11} className="text-surface-500 flex-shrink-0" />
+                        {p.proveedores.slice(0, 2).map((pv) => (
+                          <span key={pv.idProveedor} className="text-surface-400 text-xs font-body truncate">
+                            {pv.nombreComercial || pv.nombreFiscal}
+                            {p.proveedores.indexOf(pv) < Math.min(1, p.proveedores.length - 1) ? ',' : ''}
+                          </span>
+                        ))}
+                        {p.proveedores.length > 2 && (
+                          <span className="text-surface-500 text-xs font-body">+{p.proveedores.length - 2}</span>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-surface-600 text-xs font-body mt-1">Sin proveedor asignado</p>
+                    )}
+                  </Td>
                   <Td><div className="truncate"><Badge color="gray">{p.categoriaNombre}</Badge></div></Td>
                   <Td className="font-mono text-surface-400 whitespace-nowrap">
                     {p.precioProveedor > 0 ? fmt(p.precioProveedor) : <span className="text-surface-600">—</span>}
@@ -840,9 +1155,9 @@ export default function Inventario() {
       </Card>
 
       {/* ── Modales ── */}
-      <NuevoProductoModal open={modalNuevo} onClose={() => setModalNuevo(false)} categorias={categorias}
+      <NuevoProductoModal open={modalNuevo} onClose={() => setModalNuevo(false)} categorias={categorias} proveedores={proveedores}
         onSaved={() => { loadSinResetPage(); showToast('Producto creado correctamente ✓') }} />
-      <EditarProductoModal open={modalEditar} onClose={() => setModalEditar(false)} producto={selected} categorias={categorias}
+      <EditarProductoModal open={modalEditar} onClose={() => setModalEditar(false)} producto={selected} categorias={categorias} proveedores={proveedores}
         onSaved={() => { loadSinResetPage(); showToast('Producto actualizado ✓') }} />
       <StockModal open={modalStock} onClose={() => setModalStock(false)} producto={selected}
         onSaved={() => { loadSinResetPage(); showToast('Stock actualizado ✓') }} />
@@ -850,6 +1165,12 @@ export default function Inventario() {
         onSaved={() => { loadSinResetPage(); showToast('Categoría creada ✓') }} />
       <ActualizarPreciosModal open={modalActualizarPrecios} onClose={() => setModalActualizarPrecios(false)}
         onSaved={() => { loadSinResetPage(); showToast('Precios actualizados correctamente ✓') }} />
+      <ActualizarPrecioPorProveedorModal open={modalActualizarPrecioProveedor} proveedores={proveedores}
+        onClose={() => setModalActualizarPrecioProveedor(false)}
+        onSaved={(cantidad) => {
+          loadSinResetPage()
+          showToast(`Precio proveedor actualizado en ${cantidad} producto${cantidad === 1 ? '' : 's'} ✓`)
+        }} />
 
       <Modal open={!!deleteConfirm} onClose={() => setDeleteConfirm(null)} title="Confirmar eliminación" width="max-w-sm">
         <p className="text-surface-300 text-sm font-body mb-4">

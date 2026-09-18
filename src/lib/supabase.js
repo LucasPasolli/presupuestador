@@ -1,7 +1,7 @@
 // src/lib/supabase.js
-// Cliente Supabase centralizado.
 // NUNCA importar @supabase/supabase-js directamente desde un componente.
 // Todos los accesos a la BD deben pasar por src/services/.
+// Cliente Supabase centralizado.
 
 import { createClient } from '@supabase/supabase-js'
 
