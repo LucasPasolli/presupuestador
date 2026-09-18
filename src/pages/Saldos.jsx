@@ -1,6 +1,7 @@
 // src/pages/Saldos.jsx
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { useLocation } from 'react-router-dom'
+import { usePaginatedList } from '../hooks/usePaginatedList'
 import {
   obtenerSaldos,
   obtenerKPIsSaldos,
@@ -676,12 +677,10 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
 
 export default function Saldos() {
   const location = useLocation()
-  const [saldos,       setSaldos]       = useState([])
   const [selected,     setSelected]     = useState(null)
   const [filterEst,    setFilterEst]    = useState('pendiente')
   const [search,       setSearch]       = useState('')
   const [sortDias,     setSortDias]     = useState('asc')
-  const [page,         setPage]         = useState(1)
   const [toast,        setToast]        = useState('')
   const [pagoModalOpen, setPagoModalOpen] = useState(false)
   // CORRECCIÓN #3: KPIs en estado propio, calculados por el service
@@ -708,21 +707,25 @@ export default function Saldos() {
     obtenerKPIsSaldos().then(setKpis)
   }, [])
 
-  const load = useCallback(async () => {
-    // CORRECCIONES #5 y #6: búsqueda y orden delegados al service
-    const data = await obtenerSaldos({
-      estado:  filterEst !== 'all' ? filterEst : null,
-      orden:   sortDias,
-      search,
-    })
-    setSaldos(data)
-    setPage(1)
-  }, [filterEst, search, sortDias])
-
-  useEffect(() => { load() }, [load])
-
-  const paginated  = saldos.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
-  const totalPages = Math.max(1, Math.ceil(saldos.length / PAGE_SIZE))
+  // ── Datos + paginación ────────────────────────────────────────────────
+  // Filtro, búsqueda y orden se delegan al service (CORRECCIONES #5 y #6),
+  // así que van como `serverFilters`: cambiar cualquiera refetchea y
+  // resetea la página. `reload()` (usado en handleUpdated/onBack tras
+  // marcar un pago) nunca resetea la página.
+  const {
+    pageItems: paginated,
+    items:     saldos,
+    page, setPage, totalPages,
+    reload: load,
+  } = usePaginatedList({
+    fetcher: (f) => obtenerSaldos({
+      estado: f.filterEst !== 'all' ? f.filterEst : null,
+      orden:  f.sortDias,
+      search: f.search,
+    }),
+    serverFilters: { filterEst, search, sortDias },
+    pageSize: PAGE_SIZE,
+  })
 
   function handleUpdated(msg) {
     setToast(msg)

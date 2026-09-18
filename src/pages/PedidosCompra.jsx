@@ -1,6 +1,7 @@
 // src/pages/PedidosCompra.jsx
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
+import { usePaginatedList } from '../hooks/usePaginatedList'
 import { supabase } from '../lib/supabase'
 import { Card, PageHeader, Button, Badge, Modal, Input } from '../components/ui'
 import {
@@ -1491,7 +1492,6 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
 const PAGE_SIZE = 20
 
 export default function PedidosCompra() {
-  const [pedidos,      setPedidos]      = useState([])
   const [cuotasResumen, setCuotasResumen] = useState({}) // { [idPedido]: { cuotasPendientes, montoPendiente, ... } }
   const [vista,        setVista]        = useState('lista') // 'lista' | 'nuevo' | 'detalle' | 'editar'
   const [selected,     setSelected]     = useState(null)
@@ -1500,27 +1500,48 @@ export default function PedidosCompra() {
   const [filterProv,   setFilterProv]   = useState('')
   const [filterDesde,  setFilterDesde]  = useState('')
   const [filterHasta,  setFilterHasta]  = useState('')
-  const [page,         setPage]         = useState(1)
   const [toast,        setToast]        = useState('')
 
-  const load = useCallback(async () => {
-    const data = await obtenerPedidos({
-      estadoPago:      filterEst  !== 'all' ? filterEst  : null,
-      estadoLogistico: filterLog  !== 'all' ? filterLog  : null,
-      fechaDesde:      filterDesde || null,
-      fechaHasta:      filterHasta || null,
-      orden:           'desc',
-    })
-    setPedidos(data)
-    setPage(1)
-
-    // Resumen de cuotas para los pedidos CC fraccionada del listado actual —
-    // 1 sola query batched (in()), no una por pedido.
-    const idsConCuotas = data.filter(p => p.tieneCuotas).map(p => p.idPedido)
-    setCuotasResumen(await obtenerResumenCuotasPorPedidos(idsConCuotas))
-  }, [filterEst, filterLog, filterDesde, filterHasta])
-
-  useEffect(() => { load() }, [load])
+  // ── Datos + paginación ────────────────────────────────────────────────
+  // estado/logística/fechas se filtran server-side (serverFilters: cambiar
+  // cualquiera refetchea y resetea la página). El proveedor/ID se filtra en
+  // memoria sobre lo ya traído (clientFilters: resetea la página pero NO
+  // refetchea). `reload()` (alias `load`, usado tras guardar/editar un
+  // pedido) nunca resetea la página.
+  const {
+    pageItems: paginated,
+    items:     filteredPedidos,
+    rawItems:  pedidos,
+    page, setPage, totalPages,
+    reload: load,
+  } = usePaginatedList({
+    fetcher: async (f) => {
+      const data = await obtenerPedidos({
+        estadoPago:      f.filterEst  !== 'all' ? f.filterEst  : null,
+        estadoLogistico: f.filterLog  !== 'all' ? f.filterLog  : null,
+        fechaDesde:      f.filterDesde || null,
+        fechaHasta:      f.filterHasta || null,
+        orden:           'desc',
+      })
+      // Resumen de cuotas para los pedidos CC fraccionada del listado
+      // actual — 1 sola query batched (in()), no una por pedido.
+      const idsConCuotas = data.filter(p => p.tieneCuotas).map(p => p.idPedido)
+      setCuotasResumen(await obtenerResumenCuotasPorPedidos(idsConCuotas))
+      return data
+    },
+    serverFilters: { filterEst, filterLog, filterDesde, filterHasta },
+    clientFilters: { filterProv },
+    clientFilter: (p, cf) => {
+      if (!cf.filterProv.trim()) return true
+      const term      = norm(cf.filterProv.trim())
+      const isNumeric = /^\d+$/.test(cf.filterProv.trim())
+      return (
+        (isNumeric ? String(p.idPedido) === cf.filterProv.trim() : false) ||
+        (p.nombreProveedor && norm(p.nombreProveedor).includes(term))
+      )
+    },
+    pageSize: PAGE_SIZE,
+  })
 
   // Deuda pendiente real: para pedidos CC fraccionada, sólo lo que falta
   // cobrar (sum de cuotas no pagadas) — no el monto total del pedido, que
@@ -1541,21 +1562,6 @@ export default function PedidosCompra() {
     }
     return p.estadoPago === 'pagado' ? acc + p.monto : acc
   }, 0)
-
-  // Filtro de proveedor/ID se hace en cliente (no pasa al service) igual que antes
-  const filteredPedidos = filterProv.trim()
-    ? pedidos.filter(p => {
-        const term      = norm(filterProv.trim())
-        const isNumeric = /^\d+$/.test(filterProv.trim())
-        return (
-          (isNumeric ? String(p.idPedido) === filterProv.trim() : false) ||
-          (p.nombreProveedor && norm(p.nombreProveedor).includes(term))
-        )
-      })
-    : pedidos
-
-  const paginated  = filteredPedidos.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
-  const totalPages = Math.max(1, Math.ceil(filteredPedidos.length / PAGE_SIZE))
 
   function abrirDetalle(p) { setSelected(p); setVista('detalle') }
   function volverLista()   { setSelected(null); setVista('lista'); load() }
@@ -1627,7 +1633,7 @@ export default function PedidosCompra() {
             <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
             <input
               type="text" value={filterProv}
-              onChange={e => { setFilterProv(e.target.value); setPage(1) }}
+              onChange={e => setFilterProv(e.target.value)}
               placeholder="Buscar por proveedor o ID..."
               className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2 text-white
                          text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
@@ -1637,7 +1643,7 @@ export default function PedidosCompra() {
           {/* Dropdown: Estado Logístico */}
           <select
             value={filterLog}
-            onChange={e => { setFilterLog(e.target.value); setPage(1) }}
+            onChange={e => setFilterLog(e.target.value)}
             className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer [color-scheme:dark]">
             <option value="all">Estado logístico</option>
             <option value="encargado">Encargado</option>
@@ -1647,7 +1653,7 @@ export default function PedidosCompra() {
           {/* Dropdown: Estado Pago */}
           <select
             value={filterEst}
-            onChange={e => { setFilterEst(e.target.value); setPage(1) }}
+            onChange={e => setFilterEst(e.target.value)}
             className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer [color-scheme:dark]">
             <option value="all">Estado de pago</option>
             <option value="pendiente">Pago pendiente</option>
@@ -1671,7 +1677,7 @@ export default function PedidosCompra() {
           {/* Limpiar */}
           {(filterProv || filterDesde || filterHasta || filterEst !== 'all' || filterLog !== 'all') && (
             <button
-              onClick={() => { setFilterProv(''); setFilterDesde(''); setFilterHasta(''); setFilterEst('all'); setFilterLog('all'); setPage(1) }}
+              onClick={() => { setFilterProv(''); setFilterDesde(''); setFilterHasta(''); setFilterEst('all'); setFilterLog('all') }}
               className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-surface-400 text-sm font-body
                          hover:text-white hover:border-surface-500 transition-all whitespace-nowrap">
               Limpiar

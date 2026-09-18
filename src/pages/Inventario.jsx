@@ -1,5 +1,6 @@
 // src/pages/Inventario.jsx
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { usePaginatedList } from '../hooks/usePaginatedList'
 import {
   obtenerProductos,
   obtenerCategorias,
@@ -797,8 +798,6 @@ function CatModal({ open, onClose, onSaved, categorias }) {
 const PAGE_SIZE = 50
 
 export default function Inventario() {
-  const [productos,    setProductos]    = useState([])
-  const [allProductos, setAllProductos] = useState([])
   const [categorias,   setCategorias]   = useState([])
   const [proveedores,  setProveedores]  = useState([])
   const [searchNombre, setSearchNombre] = useState('')
@@ -807,7 +806,6 @@ export default function Inventario() {
   const [filterProveedor, setFilterProveedor] = useState('all')
   const [filterStock,  setFilterStock]  = useState('all')
   const [filterBajoStock, setFilterBajoStock] = useState(false)
-  const [page,         setPage]         = useState(1)
   const [sortKey,      setSortKey]      = useState('nombre')
   const [sortDir,      setSortDir]      = useState('asc')
 
@@ -823,8 +821,20 @@ export default function Inventario() {
 
   const showToast = useCallback((message, type = 'success') => setToast({ message, type }), [])
 
-  const load = useCallback(async (resetPage = true) => {
-    try {
+  // ── Datos + paginación ────────────────────────────────────────────────
+  // El fetcher trae categorías y proveedores como efecto colateral (los
+  // necesita el resto de la pantalla) y devuelve solo el array de
+  // productos, que es lo que el hook filtra/ordena/pagina.
+  // `reload()` (alias `loadSinResetPage` más abajo) NUNCA resetea `page`:
+  // por eso guardar un producto desde la página 3 ya no vuelve a la 1.
+  const {
+    pageItems: paginated,
+    items:     productos,
+    rawItems:  allProductos,
+    page, setPage, totalPages,
+    reload,
+  } = usePaginatedList({
+    fetcher: async () => {
       // incluirInactivos: false → los productos dados de baja lógica nunca
       // vuelven a listarse en el catálogo, sin necesidad de filtro visual.
       const [cats, prods, provs] = await Promise.all([
@@ -834,48 +844,34 @@ export default function Inventario() {
       ])
       setCategorias(cats)
       setProveedores(provs)
-      const conStock = prods.map((p) => ({ ...p, categoriaNombre: p.categoria, stockTotal: p.cantidad }))
-      setAllProductos(conStock)
-      if (resetPage) setPage(1)
-    } catch (err) {
-      console.error('[Inventario] Error cargando datos:', err)
-    }
-  }, [])
-
-  const loadSinResetPage = useCallback(() => load(false), [load])
-
-  useEffect(() => { load() }, [load])
-
-  // Filtrado y ordenamiento en memoria — sin llamadas a Supabase
-  useEffect(() => {
-    let resultado = [...allProductos]
-
-    if (searchId.trim()) resultado = resultado.filter((p) => String(p.idProducto) === searchId.trim())
-    if (searchNombre.trim()) {
-      const needle = normalize(searchNombre.trim())
-      resultado = resultado.filter((p) => normalize(p.nombre).includes(needle))
-    }
-    if (filterCat !== 'all') resultado = resultado.filter((p) => p.idCategoria === parseInt(filterCat))
-    if (filterProveedor !== 'all') {
-      const idProv = parseInt(filterProveedor)
-      resultado = resultado.filter((p) => (p.proveedores ?? []).some((pv) => pv.idProveedor === idProv))
-    }
-    if (filterStock === 'con') resultado = resultado.filter((p) => p.stockTotal > 0)
-    else if (filterStock === 'sin') resultado = resultado.filter((p) => p.stockTotal === 0)
-    if (filterBajoStock) resultado = resultado.filter((p) => p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion)
-
-    resultado = resultado.sort((a, b) => {
+      return prods.map((p) => ({ ...p, categoriaNombre: p.categoria, stockTotal: p.cantidad }))
+    },
+    clientFilters: { searchNombre, searchId, filterCat, filterProveedor, filterStock, filterBajoStock, sortKey, sortDir },
+    clientFilter: (p, cf) => {
+      if (cf.searchId.trim() && String(p.idProducto) !== cf.searchId.trim()) return false
+      if (cf.searchNombre.trim() && !normalize(p.nombre).includes(normalize(cf.searchNombre.trim()))) return false
+      if (cf.filterCat !== 'all' && p.idCategoria !== parseInt(cf.filterCat)) return false
+      if (cf.filterProveedor !== 'all') {
+        const idProv = parseInt(cf.filterProveedor)
+        if (!(p.proveedores ?? []).some((pv) => pv.idProveedor === idProv)) return false
+      }
+      if (cf.filterStock === 'con' && !(p.stockTotal > 0)) return false
+      if (cf.filterStock === 'sin' && !(p.stockTotal === 0)) return false
+      if (cf.filterBajoStock && !(p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion)) return false
+      return true
+    },
+    sort: (a, b, cf) => {
       let valA, valB
-      if (sortKey === 'stock')       { valA = a.stockTotal;     valB = b.stockTotal }
-      else if (sortKey === 'precio') { valA = a.precioUnitario; valB = b.precioUnitario }
-      else                           { valA = a.nombre;          valB = b.nombre }
-      if (typeof valA === 'string') return sortDir === 'asc' ? valA.localeCompare(valB, 'es') : valB.localeCompare(valA, 'es')
-      return sortDir === 'asc' ? valA - valB : valB - valA
-    })
+      if (cf.sortKey === 'stock')       { valA = a.stockTotal;     valB = b.stockTotal }
+      else if (cf.sortKey === 'precio') { valA = a.precioUnitario; valB = b.precioUnitario }
+      else                              { valA = a.nombre;          valB = b.nombre }
+      if (typeof valA === 'string') return cf.sortDir === 'asc' ? valA.localeCompare(valB, 'es') : valB.localeCompare(valA, 'es')
+      return cf.sortDir === 'asc' ? valA - valB : valB - valA
+    },
+    pageSize: PAGE_SIZE,
+  })
 
-    setProductos(resultado)
-    setPage(1)
-  }, [allProductos, searchNombre, searchId, filterCat, filterProveedor, filterStock, filterBajoStock, sortKey, sortDir])
+  const loadSinResetPage = reload
 
   function toggleSort(key) {
     if (sortKey === key) setSortDir((d) => d === 'asc' ? 'desc' : 'asc')
@@ -929,9 +925,6 @@ export default function Inventario() {
     XLSX.writeFile(workbook, `Lista_Productos_${new Date().toISOString().slice(0, 10)}.xlsx`)
   }
 
-  const paginated  = productos.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
-  const totalPages = Math.max(1, Math.ceil(productos.length / PAGE_SIZE))
-
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       <Toast message={toast?.message} type={toast?.type} visible={!!toast} onDone={() => setToast(null)} />
@@ -940,7 +933,7 @@ export default function Inventario() {
         actions={
           <div className="flex gap-2">
             <Button variant="secondary" onClick={() => setModalCat(true)}>+ Categoría</Button>
-            <Button variant="secondary" onClick={() => setModalActualizarPrecios(true)}>Actualizar Precios</Button>
+            <Button variant="secondary" onClick={() => setModalActualizarPrecios(true)}>Actualizar Precios de Venta</Button>
             <Button variant="secondary" icon={Truck} onClick={() => setModalActualizarPrecioProveedor(true)}>Precio por Proveedor</Button>
             <Button variant="secondary" icon={FileSpreadsheet} onClick={exportarExcel}>Exportar Lista</Button>
             <Button icon={PackagePlus} onClick={() => setModalNuevo(true)}>Nuevo Producto</Button>
