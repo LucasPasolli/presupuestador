@@ -1293,8 +1293,8 @@ export default function Estadisticas() {
 
       {/* ── KPIs principales ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KpiCard icon={TrendingUp}  label="Presupuestado"       value={formatoMonto(m.facturadoTotal)}   color="brand"
-          sub={`${m.totalPresupuestos} presupuesto${m.totalPresupuestos!==1?'s':''}`} />
+        <KpiCard icon={TrendingUp}  label="Presupuestado"       value={formatoMonto(m.totalCotizado)}   color="brand"
+          sub={`${m.cantidadCotizaciones} presupuesto${m.cantidadCotizaciones!==1?'s':''}${m.totalRechazados ? ` · ${m.totalRechazados} rechazado${m.totalRechazados!==1?'s':''}` : ''}`} />
         <KpiCard icon={Wallet}      label="Cobrado real"    value={formatoMonto(m.cobradoReal)}       color="green"
           sub={`${pct(m.cobradoReal, m.facturadoTotal)} del total`} />
         <KpiCard icon={TrendingDown} label="Egresos pagados" value={formatoMonto(m.egresosTotal)} color="red"
