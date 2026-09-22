@@ -919,7 +919,43 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
         ])
 
         const esExcepcionDB = pres.esExcepcion === 1
-        const factorDB = pres.montoOriginal > 0 ? pres.monto / pres.montoOriginal : 1
+
+        // [FIX Margen Excepción + Promoción] BUG ORIGINAL:
+        // `montoOriginal` es el subtotal a PRECIO DE LISTA (sin promo, sin
+        // excepción — ver `cabecera.montoOriginal = subtotalSinPromo` en
+        // guardar()). `monto` es el total final CON promo Y CON excepción
+        // ya aplicadas. Calcular factorDB = monto / montoOriginal mezclaba
+        // en un único número el descuento de la promoción del producto Y
+        // el margen de la excepción. Al reabrir el presupuesto para editar,
+        // ese factor "contaminado" con la promo se guardaba como si fuera
+        // el margen puro de la excepción (pctDB) y quedaba en el input
+        // editable. Efecto en cada escenario:
+        //   · Guardar sin tocar nada → la promo se re-aplicaba sobre un
+        //     total que YA la incluía (doble descuento/recargo).
+        //   · Sacar el producto en promo → el "residuo" de la promo se
+        //     quedaba pegado al margen de excepción.
+        //   · Agregar un producto en promo nuevo → no se combinaba con el
+        //     margen de excepción vigente, se pisaban entre sí.
+        //
+        // FIX: reconstruir el subtotal CON promo pero SIN excepción a
+        // partir de `detalle_presupuesto.subtotal`, que es exactamente
+        // `cantidad * precioConPromo` (ver guardar(): `subtotal: cantidad *
+        // precioFinal`). Ese valor es el que se usó como base real del
+        // cálculo al momento del alta/última edición, así que dividir
+        // `monto` por él aísla el margen puro de la excepción,
+        // desacoplado de qué promociones estaban vigentes en ese momento.
+        // Es además un punto fijo estable: si el usuario reabre y guarda
+        // sin cambiar nada, itemsConPromo recalcula el mismo
+        // subtotalConPromo (mismos ítems + mismas promos vigentes) y
+        // totalFinal = round(subtotalConPromo * factorDB, 2) = monto,
+        // sin drift entre ediciones sucesivas (ver Escenario 2).
+        const subtotalConPromoDB = detalles.reduce(
+          (acc, d) => acc + (Number(d.subtotal) || 0),
+          0,
+        )
+        const factorDB = esExcepcionDB && subtotalConPromoDB > 0
+          ? pres.monto / subtotalConPromoDB
+          : 1
         const pctDB = esExcepcionDB
           ? String(((1 - factorDB) * 100).toFixed(4).replace(/\.?0+$/, ''))
           : ''
