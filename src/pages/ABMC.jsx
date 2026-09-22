@@ -2,7 +2,7 @@
 // Página de administración: Alta / Baja / Modificación / Consulta de todas las entidades.
 // REFACTORIZADO: usa exclusivamente las funciones de los servicios.
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   PageHeader, Button, Input, Select, Modal,
   Table, Tr, Td, Badge, Card,
@@ -29,8 +29,9 @@ import {
 import {
   obtenerPresupuestos,
   actualizarMetadataPresupuesto,
-  eliminarPresupuesto,
 } from '../services/presupuestosService'
+import { eliminarPresupuestoConReintegro } from '../services/presupuestosIdempotente'
+import { ErrorOperacion } from '../services/idempotencia'
 import {
   obtenerPedidos,
   actualizarEstadosPedido,
@@ -116,9 +117,12 @@ function Pagination({ page, total, pageSize, onChange }) {
 
 // ─── ConfirmModal ─────────────────────────────────────────────────────────────
 
-function ConfirmModal({ open, onClose, onConfirm, details, message }) {
+function ConfirmModal({
+  open, onClose, onConfirm, details, message,
+  loading = false, confirmLabel = 'Eliminar', error = '', warning = '',
+}) {
   return (
-    <Modal open={open} onClose={onClose} title="Confirmar eliminación" width="max-w-sm">
+    <Modal open={open} onClose={loading ? () => {} : onClose} title="Confirmar eliminación" width="max-w-sm">
       <div className="flex flex-col items-center gap-4 text-center">
         <AlertTriangle size={36} className="text-red-400" />
         {details && details.length > 0 && (
@@ -132,9 +136,22 @@ function ConfirmModal({ open, onClose, onConfirm, details, message }) {
           </div>
         )}
         <p className="text-surface-200 font-body text-sm">{message || '¿Eliminar este registro?'}</p>
+        {/* Advertencia explícita para acciones destructivas con efectos
+            colaterales (p. ej. reintegro de stock / impacto en cuenta
+            corriente). Deliberadamente separada del mensaje principal para
+            que no pase desapercibida entre el resto del texto. */}
+        {warning && (
+          <div className="w-full flex items-start gap-2 bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-3 text-left">
+            <AlertTriangle size={14} className="text-yellow-400 mt-0.5 shrink-0" />
+            <p className="text-yellow-200 text-xs font-body leading-relaxed">{warning}</p>
+          </div>
+        )}
+        {error && <p className="text-red-400 text-xs font-body">{error}</p>}
         <div className="flex gap-3 w-full">
-          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button variant="danger" className="flex-1" onClick={onConfirm}>Eliminar</Button>
+          <Button variant="secondary" className="flex-1" onClick={onClose} disabled={loading}>Cancelar</Button>
+          <Button variant="danger" className="flex-1" onClick={onConfirm} disabled={loading}>
+            {loading ? 'Eliminando…' : confirmLabel}
+          </Button>
         </div>
       </div>
     </Modal>
@@ -143,11 +160,14 @@ function ConfirmModal({ open, onClose, onConfirm, details, message }) {
 
 // ─── InfoBanner ───────────────────────────────────────────────────────────────
 
-function InfoBanner({ message }) {
+function InfoBanner({ message, onClose }) {
   return (
     <div className="flex items-start gap-3 bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-3">
       <Info size={16} className="text-yellow-400 mt-0.5 shrink-0" />
-      <p className="text-yellow-200 text-xs font-body leading-relaxed">{message}</p>
+      <p className="text-yellow-200 text-xs font-body leading-relaxed flex-1">{message}</p>
+      {onClose && (
+        <button onClick={onClose} className="text-yellow-400/70 hover:text-yellow-200 text-xs shrink-0" aria-label="Cerrar aviso">✕</button>
+      )}
     </div>
   )
 }
@@ -476,11 +496,21 @@ function Presupuestos() {
   const [originalEstado, setOriginalEstado] = useState(null)
   const [confirm, setConfirm] = useState(null)
   const [confirmRow, setConfirmRow] = useState(null)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
+  const [resumenEliminacion, setResumenEliminacion] = useState(null)
   const [search, setSearch] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [filtroEstado, setFiltroEstado] = useState('')
   const [page, setPage] = useState(1)
+
+  // Clave de idempotencia del intento de eliminación en curso. Se regenera
+  // cada vez que se abre el modal de confirmación (nuevo intento) y se
+  // conserva entre reintentos del MISMO intento (p. ej. si la RPC falla por
+  // un error de red transitorio y el usuario vuelve a tocar "Eliminar" sin
+  // cerrar el modal) — mismo patrón que NuevoProductoModal en Inventario.jsx.
+  const idempotencyKeyRef = useRef(null)
 
   // Usa los filtros del service server-side en lugar de filtrar en el cliente.
   // Esto corrige el bug principal: obtenerPresupuestos devuelve { data, count },
@@ -552,21 +582,66 @@ function Presupuestos() {
     }
   }
 
+  // Estados que ya descontaron stock en algún momento del flujo (alta directa
+  // 'aprobado'/'pagado' o transición vía actualizarMetadataPresupuesto).
+  // 'borrador' y 'rechazado' nunca descuentan — no corresponde reintegro.
+  const REINTEGRA_ESTADO = (estado) => estado === 'aprobado' || estado === 'pagado'
+
   async function del(id) {
+    setDeleting(true)
+    setDeleteError('')
     try {
-      // eliminarPresupuesto ya borra el saldo asociado internamente
-      await eliminarPresupuesto(id)
+      // eliminarPresupuestoConReintegro es atómica e idempotente: borra el
+      // presupuesto, su detalle y el saldo/pagos de CC asociados, y
+      // reintegra stock si el estado lo amerita — sin costo extra si no
+      // correspondía (la RPC lo detecta sola). Reemplaza a
+      // presupuestosService.eliminarPresupuesto para este botón.
+      const resultado = await eliminarPresupuestoConReintegro({
+        clave: idempotencyKeyRef.current,
+        idPresupuesto: id,
+      })
+
+      setConfirm(null)
+      setConfirmRow(null)
+      load(page)
+
+      // Resumen post-eliminación: solo se muestra si hay algo que el
+      // administrador deba revisar (reintegro parcial o cobros de CC que
+      // se perdieron junto con el saldo). El caso feliz (sin CC, reintegro
+      // completo) no genera ruido en la UI.
+      if (resultado.itemsNoReintegrados?.length || resultado.aplicacionesPagoEliminadas > 0) {
+        const partes = []
+        if (resultado.reintegrado) {
+          partes.push(`Se reintegró stock de ${resultado.itemsReintegrados.length} ítem(s).`)
+        }
+        if (resultado.itemsNoReintegrados?.length) {
+          partes.push(`${resultado.itemsNoReintegrados.length} ítem(s) no se pudieron reponer porque el producto ya no existe en el catálogo — revisar stock manualmente.`)
+        }
+        if (resultado.aplicacionesPagoEliminadas > 0) {
+          partes.push(`Se eliminaron ${resultado.aplicacionesPagoEliminadas} cobro(s) de cuenta corriente por ${fmt(resultado.montoAplicacionesEliminadas)} asociados a este presupuesto.`)
+        }
+        setResumenEliminacion(partes.join(' '))
+      }
     } catch (e) {
-      console.error('[Presupuestos] del:', e)
+      // ErrorOperacion ya trae un mensaje saneado apto para mostrar tal cual.
+      setDeleteError(e instanceof ErrorOperacion ? e.message : 'No se pudo eliminar el presupuesto.')
+    } finally {
+      setDeleting(false)
     }
-    setConfirm(null)
-    setConfirmRow(null)
-    load(page)
   }
 
   function handleConfirm(r) {
+    idempotencyKeyRef.current = crypto.randomUUID()
+    setDeleteError('')
     setConfirm(r.idPresupuesto)
     setConfirmRow(r)
+  }
+
+  function cerrarConfirm() {
+    if (deleting) return // no cerrar en medio de una eliminación en curso
+    setConfirm(null)
+    setConfirmRow(null)
+    setDeleteError('')
   }
 
   const paged = rows
@@ -578,6 +653,10 @@ function Presupuestos() {
 
   return (
     <div className="space-y-4">
+      {resumenEliminacion && (
+        <InfoBanner message={resumenEliminacion} onClose={() => setResumenEliminacion(null)} />
+      )}
+
       <div className="flex gap-2 items-center w-full">
         <div className="flex-1">
           <input
@@ -671,7 +750,9 @@ function Presupuestos() {
         )}
       </Modal>
 
-      <ConfirmModal open={!!confirm} onClose={() => { setConfirm(null); setConfirmRow(null) }} onConfirm={() => del(confirm)}
+      <ConfirmModal open={!!confirm} onClose={cerrarConfirm} onConfirm={() => del(confirm)}
+        loading={deleting}
+        error={deleteError}
         details={confirmRow ? [
           ['ID', `#${confirmRow.idPresupuesto}`],
           ['Cliente', confirmRow.clienteNombre],
@@ -680,6 +761,9 @@ function Presupuestos() {
           ['Estado', confirmRow.estado],
         ] : []}
         message="¿Eliminar este presupuesto y todos sus detalles?"
+        warning={confirmRow && REINTEGRA_ESTADO(confirmRow.estado)
+          ? `Este presupuesto está "${confirmRow.estado}" y ya descontó stock. Al eliminarlo, el sistema reintegrará automáticamente las cantidades al stock disponible${confirmRow.saldoEstado ? ', y se eliminará también el saldo de cuenta corriente asociado (incluyendo cualquier cobro parcial ya registrado)' : ''}. Esta acción no se puede deshacer.`
+          : ''}
       />
     </div>
   )
