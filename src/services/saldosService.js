@@ -9,6 +9,7 @@
 
 import { supabase } from '../lib/supabase'
 import { actualizarEstadoPresupuesto } from './presupuestosService'
+import { logger } from '../lib/logger'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -413,44 +414,220 @@ export async function actualizarSaldo(idSaldo, { monto, fechaVto }) {
 }
 
 /**
- * Revierte un saldo a estado pendiente por su monto original completo.
+ * @typedef {object} ResultadoReversionPago
+ * @property {number}  idSaldo
+ * @property {number}  idPresupuesto
+ * @property {string}  estadoSaldoAnterior
+ * @property {boolean} presupuestoRevertido        `true` si el presupuesto estaba
+ *   'pagado' y volvió a 'aprobado' (con `fecha_pago` limpia).
+ * @property {number}  aplicacionesEliminadas      Cobros imputados que se borraron.
+ * @property {number}  montoAplicacionesEliminadas
+ */
+
+/**
+ * Revierte el pago de un saldo de forma ATÓMICA (RPC `fn_revertir_pago_saldo`,
+ * ver sql/2026_revertir_pago_saldo.sql):
  *
- * ⚠️ Este es un revert "de golpe": pierde la granularidad de qué pagos
- * parciales se habían aplicado (el ledger en `pago`/`pago_aplicacion`
- * permanece, pero el saldo vuelve a deber el 100%). Para deshacer un pago
- * puntual de forma auditable, lo correcto a futuro es una función de
- * reversión de pago (ver sección de Escalabilidad).
+ *   · el saldo vuelve a 'pendiente' por su monto ORIGINAL completo, sin fecha
+ *     de pago,
+ *   · se eliminan los cobros imputados (`pago_aplicacion` + cabeceras `pago`
+ *     huérfanas): el saldo debe el 100% y el ledger tiene que decir lo mismo,
+ *     si no Estadísticas/Facturas contarían dos veces,
+ *   · si el presupuesto estaba 'pagado' vuelve a 'aprobado' y su `fecha_pago`
+ *     se limpia → se reactiva la posibilidad de volver a registrar el cobro.
+ *
+ * Antes era un UPDATE directo sobre `saldo`: el presupuesto quedaba 'pagado'
+ * y los cobros parciales seguían sumando en los KPIs.
+ *
+ * ⚠️ Es un revert "de golpe": no hay reversión parcial de un cobro puntual.
+ * Los llamadores deben pedir confirmación explícita (ver ABMC.jsx).
+ *
+ * @param {number} idSaldo
+ * @returns {Promise<ResultadoReversionPago>}
+ * @throws {Error} con mensaje apto para mostrar al usuario.
  */
 export async function revertirPagoSaldo(idSaldo) {
-  const { data: actual, error: errFetch } = await supabase
-    .from('saldo')
-    .select('monto')
-    .eq('id_saldo', idSaldo)
-    .single()
-  if (errFetch) manejarError('revertirPagoSaldo:fetch', errFetch)
+  const id = Number(idSaldo)
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new Error('Identificador de saldo inválido.')
+  }
 
-  const { error } = await supabase
-    .from('saldo')
-    .update({
-      estado:          'pendiente',
-      fecha_pago:      null,
-      monto_pendiente: actual.monto,
-    })
-    .eq('id_saldo', idSaldo)
+  const { data, error } = await supabase.rpc('fn_revertir_pago_saldo', { p_id_saldo: id })
 
-  if (error) manejarError('revertirPagoSaldo', error)
+  if (error) {
+    console.error('[saldosService] revertirPagoSaldo:', error.message)
+    throw new Error('No se pudo revertir el pago. Reintentá; si el problema persiste, contactá al administrador.')
+  }
+  if (!data?.encontrado) {
+    throw new Error('El saldo ya no existe (pudo haber sido eliminado desde otra sesión). Actualizá la lista.')
+  }
+
+  const resultado = {
+    idSaldo:                     data.idSaldo,
+    idPresupuesto:               data.idPresupuesto,
+    estadoSaldoAnterior:         data.estadoSaldoAnterior,
+    presupuestoRevertido:        Boolean(data.presupuestoRevertido),
+    estadoPresupuestoAnterior:   data.estadoPresupuestoAnterior ?? null,
+    estadoPresupuestoActual:     data.estadoPresupuestoActual ?? null,
+    aplicacionesEliminadas:      Number(data.aplicacionesEliminadas ?? 0),
+    montoAplicacionesEliminadas: Number(data.montoAplicacionesEliminadas ?? 0),
+    pagosHuerfanosEliminados:    Number(data.pagosHuerfanosEliminados ?? 0),
+  }
+
+  logger.warn('saldo.pago_revertido', resultado)
+
+  return resultado
 }
 
 /**
- * Elimina un saldo por su ID.
+ * @typedef {object} ResultadoEliminacionSaldo
+ * @property {number}  idSaldo
+ * @property {number}  idPresupuesto
+ * @property {string}  estadoSaldoEliminado
+ * @property {boolean} presupuestoRevertido        `true` si el presupuesto estaba
+ *   'pagado' y volvió a 'aprobado' (con `fecha_pago` limpia).
+ * @property {string|null} estadoPresupuestoAnterior
+ * @property {string|null} estadoPresupuestoActual
+ * @property {number}  aplicacionesEliminadas      Cobros imputados que se borraron.
+ * @property {number}  montoAplicacionesEliminadas
+ * @property {number}  pagosHuerfanosEliminados
+ */
+
+/**
+ * Elimina un saldo de forma ATÓMICA y consistente (RPC
+ * `fn_eliminar_saldo_con_reversion`, ver sql/2026_eliminar_saldo_con_reversion.sql):
+ *
+ *   · borra los cobros imputados al saldo (dejan de contarse en Estadísticas
+ *     y en el PDF de Facturación),
+ *   · borra el saldo,
+ *   · si el presupuesto estaba 'pagado' lo devuelve a 'aprobado' y limpia su
+ *     fecha de pago → se reactiva el botón de cobro en Historial.
+ *
+ * Antes esto era un DELETE directo sobre `saldo`: dejaba el presupuesto en
+ * 'pagado' para siempre (sin saldo que respaldara ese estado) y los cobros
+ * parciales huérfanos seguían sumando en los KPIs.
+ *
+ * Los errores de base se loguean pero NO se propagan crudos a la UI
+ * (podrían revelar nombres de tablas/constraints).
+ *
+ * @param {number} idSaldo
+ * @returns {Promise<ResultadoEliminacionSaldo>}
+ * @throws {Error} con mensaje apto para mostrar al usuario.
  */
 export async function eliminarSaldo(idSaldo) {
-  const { error } = await supabase
-    .from('saldo')
-    .delete()
-    .eq('id_saldo', idSaldo)
+  const id = Number(idSaldo)
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new Error('Identificador de saldo inválido.')
+  }
 
-  if (error) manejarError('eliminarSaldo', error)
+  const { data, error } = await supabase.rpc('fn_eliminar_saldo_con_reversion', {
+    p_id_saldo: id,
+  })
+
+  if (error) {
+    console.error('[saldosService] eliminarSaldo:', error.message)
+    throw new Error('No se pudo eliminar el saldo. Reintentá; si el problema persiste, contactá al administrador.')
+  }
+  if (!data?.encontrado) {
+    throw new Error('El saldo ya no existe (pudo haber sido eliminado desde otra sesión). Actualizá la lista.')
+  }
+
+  const resultado = {
+    idSaldo:                     data.idSaldo,
+    idPresupuesto:               data.idPresupuesto,
+    estadoSaldoEliminado:        data.estadoSaldoEliminado,
+    presupuestoRevertido:        Boolean(data.presupuestoRevertido),
+    estadoPresupuestoAnterior:   data.estadoPresupuestoAnterior ?? null,
+    estadoPresupuestoActual:     data.estadoPresupuestoActual ?? null,
+    aplicacionesEliminadas:      Number(data.aplicacionesEliminadas ?? 0),
+    montoAplicacionesEliminadas: Number(data.montoAplicacionesEliminadas ?? 0),
+    pagosHuerfanosEliminados:    Number(data.pagosHuerfanosEliminados ?? 0),
+  }
+
+  // Trazabilidad de una operación financiera sensible.
+  logger.warn('saldo.eliminado', resultado)
+
+  return resultado
+}
+
+const DIAS_CC = { cc15: 15, cc30: 30 }
+
+/**
+ * Vencimiento por defecto de un presupuesto de CC: fecha de emisión + plazo
+ * (15 o 30 días). Aritmética en UTC sobre 'YYYY-MM-DD': sin corrimientos por huso.
+ * Pura y exportada para que la UI pueda precargar el mismo valor que usa el servicio.
+ *
+ * @param {string} fechaEmision 'YYYY-MM-DD'
+ * @param {string} metodoPago   'cc15' | 'cc30'
+ * @returns {string} 'YYYY-MM-DD'
+ */
+export function calcularVencimientoCC(fechaEmision, metodoPago) {
+  const dias = DIAS_CC[metodoPago]
+  if (!dias) throw new Error('Solo los presupuestos de cuenta corriente tienen vencimiento.')
+  const vto = new Date(`${fechaEmision}T00:00:00Z`)
+  vto.setUTCDate(vto.getUTCDate() + dias)
+  return vto.toISOString().slice(0, 10)
+}
+
+// 'YYYY-MM-DD' con calendario real (rechaza 2026-02-31, que Date "corrige" solo).
+function esFechaISOValida(f) {
+  if (typeof f !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(f)) return false
+  const d = new Date(`${f}T00:00:00Z`)
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === f
+}
+
+/**
+ * Regenera el saldo pendiente de un presupuesto de Cuenta Corriente que se
+ * quedó sin saldo (p. ej. tras eliminarlo desde ABMC). Es idempotente: si ya
+ * existe uno lo devuelve tal cual, y ante un doble click (violación de la
+ * UNIQUE sobre id_presupuesto) también.
+ *
+ * Fechas del saldo regenerado:
+ *   · fecha_inicio = fecha de emisión del presupuesto.
+ *   · fecha_vto    = `opts.fechaVto` si se indica; si no, emisión + plazo
+ *     (ver `calcularVencimientoCC`). Puede quedar en el pasado (el plazo
+ *     corre desde la emisión): la UI lo advierte y deja elegir otra fecha.
+ *   · fecha_pago   = NULL (la define quien vuelva a cobrar).
+ *
+ * Reutilizada por el flujo de "Aprobar" en Historial (sin `fechaVto`).
+ *
+ * @param {{idPresupuesto:number, idCliente:number, metodoPago:string, fecha:string, monto:number}} presupuesto
+ * @param {{ fechaVto?: string|null }} [opts]
+ */
+export async function regenerarSaldoDePresupuesto(presupuesto, { fechaVto = null } = {}) {
+  if (!DIAS_CC[presupuesto?.metodoPago]) {
+    throw new Error('Solo los presupuestos de cuenta corriente tienen saldo.')
+  }
+
+  // Validar ANTES de tocar la base.
+  let vencimiento = calcularVencimientoCC(presupuesto.fecha, presupuesto.metodoPago)
+  if (fechaVto != null && fechaVto !== '') {
+    if (!esFechaISOValida(fechaVto)) {
+      throw new Error('La fecha de vencimiento no es válida.')
+    }
+    if (fechaVto < presupuesto.fecha) {
+      throw new Error('El vencimiento no puede ser anterior a la fecha de emisión del presupuesto.')
+    }
+    vencimiento = fechaVto
+  }
+
+  const existente = await obtenerSaldoPorPresupuesto(presupuesto.idPresupuesto)
+  if (existente) return existente
+
+  try {
+    return await crearSaldo({
+      idPresupuesto: presupuesto.idPresupuesto,
+      idCliente:     presupuesto.idCliente,
+      fechaInicio:   presupuesto.fecha,
+      fechaVto:      vencimiento,
+      monto:         presupuesto.monto,
+      estado:        'pendiente',
+    })
+  } catch (err) {
+    const yaCreado = await obtenerSaldoPorPresupuesto(presupuesto.idPresupuesto)
+    if (yaCreado) return yaCreado
+    throw err
+  }
 }
 
 /**

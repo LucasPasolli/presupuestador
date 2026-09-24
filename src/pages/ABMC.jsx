@@ -120,7 +120,16 @@ function Pagination({ page, total, pageSize, onChange }) {
 function ConfirmModal({
   open, onClose, onConfirm, details, message,
   loading = false, confirmLabel = 'Eliminar', error = '', warning = '',
+  // Confirmación explícita: si `requireAck` es true, el botón de confirmar
+  // queda deshabilitado hasta tildar la casilla (acciones que revierten
+  // estados financieros).
+  requireAck = false,
+  ackLabel = 'Entiendo las consecuencias y quiero continuar',
 }) {
+  const [ack, setAck] = useState(false)
+  useEffect(() => { if (!open) setAck(false) }, [open])
+  const bloqueado = loading || (requireAck && !ack)
+
   return (
     <Modal open={open} onClose={loading ? () => {} : onClose} title="Confirmar eliminación" width="max-w-sm">
       <div className="flex flex-col items-center gap-4 text-center">
@@ -141,15 +150,27 @@ function ConfirmModal({
             corriente). Deliberadamente separada del mensaje principal para
             que no pase desapercibida entre el resto del texto. */}
         {warning && (
-          <div className="w-full flex items-start gap-2 bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-3 text-left">
-            <AlertTriangle size={14} className="text-yellow-400 mt-0.5 shrink-0" />
+          <div role="alert" className="w-full flex items-start gap-2 bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-3 text-left">
+            <AlertTriangle size={14} className="text-yellow-400 mt-0.5 shrink-0" aria-hidden="true" />
             <p className="text-yellow-200 text-xs font-body leading-relaxed">{warning}</p>
           </div>
         )}
-        {error && <p className="text-red-400 text-xs font-body">{error}</p>}
+        {requireAck && (
+          <label className="w-full flex items-start gap-2 text-left cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={ack}
+              onChange={e => setAck(e.target.checked)}
+              disabled={loading}
+              className="mt-0.5 h-4 w-4 shrink-0 accent-red-500 focus:outline-none focus:ring-2 focus:ring-red-400"
+            />
+            <span className="text-surface-200 text-xs font-body leading-relaxed">{ackLabel}</span>
+          </label>
+        )}
+        {error && <p role="alert" className="text-red-400 text-xs font-body">{error}</p>}
         <div className="flex gap-3 w-full">
           <Button variant="secondary" className="flex-1" onClick={onClose} disabled={loading}>Cancelar</Button>
-          <Button variant="danger" className="flex-1" onClick={onConfirm} disabled={loading}>
+          <Button variant="danger" className="flex-1" onClick={onConfirm} disabled={bloqueado}>
             {loading ? 'Eliminando…' : confirmLabel}
           </Button>
         </div>
@@ -761,9 +782,15 @@ function Presupuestos() {
           ['Estado', confirmRow.estado],
         ] : []}
         message="¿Eliminar este presupuesto y todos sus detalles?"
+        // ⚠️ Esta acción borra el presupuesto ENTERO (detalle, saldo y cobros
+        // de CC incluidos) — no confundir con "Eliminar saldo" de la pestaña
+        // Saldos, que solo revierte el cobro y deja el presupuesto intacto.
+        // El texto lo aclara explícitamente para evitar ese error.
         warning={confirmRow && REINTEGRA_ESTADO(confirmRow.estado)
-          ? `Este presupuesto está "${confirmRow.estado}" y ya descontó stock. Al eliminarlo, el sistema reintegrará automáticamente las cantidades al stock disponible${confirmRow.saldoEstado ? ', y se eliminará también el saldo de cuenta corriente asociado (incluyendo cualquier cobro parcial ya registrado)' : ''}. Esta acción no se puede deshacer.`
+          ? `Este presupuesto está "${confirmRow.estado}" y ya descontó stock. Al eliminarlo (no solo su saldo — el PRESUPUESTO COMPLETO) el sistema reintegrará automáticamente las cantidades al stock disponible${confirmRow.saldoEstado ? ', y se eliminará también el saldo de cuenta corriente asociado (incluyendo cualquier cobro parcial ya registrado)' : ''}. Si solo querés revertir el cobro sin borrar el presupuesto, cancelá y usá "Eliminar saldo" desde la pestaña Saldos. Esta acción no se puede deshacer.`
           : ''}
+        requireAck={!!(confirmRow && REINTEGRA_ESTADO(confirmRow.estado))}
+        ackLabel="Entiendo que esto elimina el presupuesto completo (no solo el saldo) y no se puede deshacer"
       />
     </div>
   )
@@ -944,6 +971,15 @@ function Saldos() {
   const [dateTo, setDateTo] = useState('')
   const [filtroEstado, setFiltroEstado] = useState('')
   const [page, setPage] = useState(1)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
+  // Edición: estado con el que se abrió el modal (para detectar transiciones
+  // reales), confirmación explícita de la reversión y feedback de guardado.
+  const [originalEstado, setOriginalEstado] = useState(null)
+  const [ackRevertir, setAckRevertir] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [resumenOperacion, setResumenOperacion] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -966,38 +1002,120 @@ function Saldos() {
   useEffect(() => { load() }, [load])
   useEffect(() => { setPage(1) }, [search, dateFrom, dateTo, filtroEstado])
 
-  function openEdit(r) { setEditRow({ ...r }); setModal(true) }
+  function openEdit(r) {
+    setEditRow({ ...r })
+    setOriginalEstado(r.estado)
+    setAckRevertir(false)
+    setSaveError('')
+    setModal(true)
+  }
+
+  function cerrarEdit() {
+    if (saving) return
+    setModal(false)
+    setSaveError('')
+  }
+
+  // Volver a "Pendiente" un saldo que ya tenía cobros (pagado o parcial) es una
+  // reversión con efectos colaterales: requiere confirmación explícita.
+  const revierteCobros = !!editRow && editRow.estado === 'pendiente'
+    && (originalEstado === 'pagado' || originalEstado === 'parcial')
 
   async function save() {
+    setSaveError('')
+
+    // Solo actuamos sobre el estado si el usuario lo CAMBIÓ. Antes, guardar un
+    // saldo 'pendiente'/'parcial' (p. ej. para editar solo el vencimiento)
+    // caía en el else y ejecutaba revertirPagoSaldo igualmente.
+    const pasaAPendiente = editRow.estado === 'pendiente' && originalEstado !== 'pendiente'
+
+    if (editRow.estado === 'pagado' && !editRow.fechaPago) {
+      setSaveError('Ingresá la fecha real de pago para marcar el saldo como pagado.')
+      return
+    }
+    if (pasaAPendiente && revierteCobros && !ackRevertir) {
+      setSaveError('Confirmá que entendés las consecuencias de revertir el pago.')
+      return
+    }
+
+    setSaving(true)
     try {
       await actualizarSaldo(editRow.idSaldo, {
         monto:    editRow.monto,
         fechaVto: editRow.fechaVto ?? null,
       })
-      // Actualizar estado y fechaPago directamente vía supabase no está en el
-      // service actual como operación combinada. Usamos la función interna
-      // del service más cercana: marcarSaldoPagado si pasa a pagado,
-      // revertirPagoSaldo si vuelve a pendiente.
-      // Importamos dinámicamente para mantener flexibilidad.
+      // Importación dinámica: mantiene el scope del módulo liviano.
       const { marcarSaldoPagado, revertirPagoSaldo } = await import('../services/saldosService')
       if (editRow.estado === 'pagado') {
-        await marcarSaldoPagado(editRow.idSaldo, editRow.idPresupuesto, editRow.fechaPago || null)
-      } else {
-        await revertirPagoSaldo(editRow.idSaldo)
+        await marcarSaldoPagado(editRow.idSaldo, editRow.idPresupuesto, editRow.fechaPago)
+      } else if (pasaAPendiente) {
+        const r = await revertirPagoSaldo(editRow.idSaldo)
+        const partes = [`Saldo #${r.idSaldo} vuelto a "Pendiente" por su monto completo.`]
+        if (r.presupuestoRevertido) {
+          partes.push(`El presupuesto #${r.idPresupuesto} volvió de "Pagado" a "Aprobado".`)
+        }
+        if (r.aplicacionesEliminadas > 0) {
+          partes.push(`Se eliminaron ${r.aplicacionesEliminadas} cobro(s) por ${fmt(r.montoAplicacionesEliminadas)}.`)
+        }
+        setResumenOperacion(partes.join(' '))
       }
-      setModal(false); load()
+      setModal(false)
+      await load()
     } catch (e) {
-      console.error(e)
+      // Mensaje ya saneado por el service; antes el error se perdía en consola.
+      setSaveError(e?.message || 'No se pudo guardar el saldo.')
+    } finally {
+      setSaving(false)
     }
   }
 
-  async function del(id) {
-    try {
-      await eliminarSaldo(id)
-    } catch (e) {
-      console.error(e)
+  // Cobrado hasta el momento sobre un saldo (monto original − remanente).
+  const cobradoDe = (r) => Math.max(0, Number(r.monto) - Number(r.montoPendiente ?? r.monto))
+
+  // Eliminar un saldo pagado (o con cobros) tiene efectos colaterales sobre el
+  // presupuesto y sobre los KPIs: se exige confirmación explícita.
+  const requiereAck = (r) => !!r && (r.estado === 'pagado' || cobradoDe(r) > 0)
+
+  function advertenciaEliminacion(r) {
+    if (!r) return ''
+    if (r.estado === 'pagado') {
+      return `Este saldo figura como PAGADO. Al eliminarlo se revertirá el estado de pago del presupuesto #${r.idPresupuesto} (volverá a "Aprobado", sin fecha de pago) y se eliminarán los cobros registrados contra este saldo: dejarán de contarse en Estadísticas y en Facturación. Esta acción no se puede deshacer.`
     }
-    setConfirm(null); load()
+    if (cobradoDe(r) > 0) {
+      return `Este saldo ya tiene cobros parciales por ${fmt(cobradoDe(r))}. Al eliminarlo, esos cobros se eliminan también y dejarán de contarse en Estadísticas y en Facturación. Esta acción no se puede deshacer.`
+    }
+    return ''
+  }
+
+  async function del(id) {
+    setDeleting(true)
+    setDeleteError('')
+    try {
+      const r = await eliminarSaldo(id)
+      setConfirm(null)
+
+      const partes = [`Saldo #${r.idSaldo} eliminado.`]
+      if (r.presupuestoRevertido) {
+        partes.push(`El presupuesto #${r.idPresupuesto} volvió de "Pagado" a "Aprobado": ya podés registrar el cobro nuevamente desde Historial.`)
+      }
+      if (r.aplicacionesEliminadas > 0) {
+        partes.push(`Se eliminaron ${r.aplicacionesEliminadas} cobro(s) por ${fmt(r.montoAplicacionesEliminadas)}.`)
+      }
+      setResumenOperacion(partes.join(' '))
+      await load()
+    } catch (e) {
+      // El service ya devuelve un mensaje saneado; se muestra en el modal
+      // (antes el error se tragaba y el modal se cerraba como si hubiera salido bien).
+      setDeleteError(e?.message || 'No se pudo eliminar el saldo.')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  function cerrarConfirm() {
+    if (deleting) return
+    setConfirm(null)
+    setDeleteError('')
   }
 
   const fe = (k) => (e) => setEditRow(p => ({ ...p, [k]: e.target.value }))
@@ -1044,6 +1162,12 @@ function Saldos() {
         </div>
       </div>
 
+      {resumenOperacion && (
+        <div role="status" aria-live="polite">
+          <InfoBanner message={resumenOperacion} onClose={() => setResumenOperacion('')} />
+        </div>
+      )}
+
       <Card>
         <Table headers={['#', 'Cliente', 'Presup.', 'Monto', 'Vence', 'Estado', '']}
           empty={paged.length === 0 ? 'Sin saldos' : null}>
@@ -1058,7 +1182,8 @@ function Saldos() {
               <Td>
                 <div className="flex gap-2 justify-end">
                   <Button variant="ghost" size="sm" icon={Pencil} onClick={() => openEdit(r)} />
-                  <Button variant="ghost" size="sm" icon={Trash2} className="hover:text-red-400" onClick={() => setConfirm(r.idSaldo)} />
+                  <Button variant="ghost" size="sm" icon={Trash2} className="hover:text-red-400" aria-label={`Eliminar saldo #${r.idSaldo}`}
+                    onClick={() => { setDeleteError(''); setConfirm(r.idSaldo) }} />
                 </div>
               </Td>
             </Tr>
@@ -1067,24 +1192,46 @@ function Saldos() {
         <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
       </Card>
 
-      <Modal open={modal} onClose={() => setModal(false)} title="Editar saldo">
+      <Modal open={modal} onClose={cerrarEdit} title="Editar saldo">
         {editRow && (
           <div className="space-y-4">
             <p className="text-surface-400 text-xs">Saldo #{editRow.idSaldo} — {editRow.clienteNombre} — {fmt(editRow.monto)}</p>
             <Select label="Estado" value={editRow.estado} onChange={fe('estado')}>
               <option value="pendiente">Pendiente</option>
+              {/* 'parcial' lo genera el motor de pagos; se muestra (no elegible)
+                  para que el select refleje el estado real y no parezca 'Pendiente'. */}
+              {originalEstado === 'parcial' && <option value="parcial" disabled>Parcial</option>}
               <option value="pagado">Pagado</option>
             </Select>
             <Input label="Fecha de pago" type="date" value={editRow.fechaPago || ''} onChange={fe('fechaPago')} />
+
+            {revierteCobros && (
+              <div className="space-y-3">
+                <InfoBanner message={originalEstado === 'pagado'
+                  ? `Al volver a "Pendiente" se revertirá el pago: el presupuesto #${editRow.idPresupuesto} volverá a "Aprobado" (sin fecha de pago), el saldo deberá su monto completo y se eliminarán los cobros registrados contra él (dejan de contarse en Estadísticas y Facturación). No se puede deshacer.`
+                  : `Este saldo tiene cobros parciales. Al volver a "Pendiente" se eliminan esos cobros y el saldo deberá su monto completo (dejan de contarse en Estadísticas y Facturación). No se puede deshacer.`} />
+                <label className="flex items-start gap-2 cursor-pointer select-none">
+                  <input type="checkbox" checked={ackRevertir} onChange={e => setAckRevertir(e.target.checked)} disabled={saving}
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-red-500 focus:outline-none focus:ring-2 focus:ring-red-400" />
+                  <span className="text-surface-200 text-xs font-body leading-relaxed">Entiendo que se revertirá el estado de pago y se eliminarán los cobros asociados</span>
+                </label>
+              </div>
+            )}
+
+            {saveError && <p role="alert" className="text-red-400 text-xs font-body">{saveError}</p>}
             <div className="flex gap-3 pt-2">
-              <Button variant="secondary" className="flex-1" onClick={() => setModal(false)}>Cancelar</Button>
-              <Button className="flex-1" onClick={save}>Guardar</Button>
+              <Button variant="secondary" className="flex-1" onClick={cerrarEdit} disabled={saving}>Cancelar</Button>
+              <Button className="flex-1" onClick={save} disabled={saving || (revierteCobros && !ackRevertir)}>
+                {saving ? 'Guardando…' : 'Guardar'}
+              </Button>
             </div>
           </div>
         )}
       </Modal>
 
-      <ConfirmModal open={!!confirm} onClose={() => setConfirm(null)} onConfirm={() => del(confirm)}
+      <ConfirmModal open={!!confirm} onClose={cerrarConfirm} onConfirm={() => del(confirm)}
+        loading={deleting}
+        error={deleteError}
         details={confirmRow ? [
           ['ID saldo', `#${confirmRow.idSaldo}`],
           ['Presupuesto', `#${confirmRow.idPresupuesto}`],
@@ -1093,6 +1240,9 @@ function Saldos() {
           ['Estado', confirmRow.estado],
         ] : []}
         message="¿Eliminar este saldo?"
+        warning={advertenciaEliminacion(confirmRow)}
+        requireAck={requiereAck(confirmRow)}
+        ackLabel="Entiendo que se revertirá el estado de pago y se eliminarán los cobros asociados"
       />
     </div>
   )

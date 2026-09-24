@@ -17,9 +17,10 @@ import {
 } from '../services/presupuestosService'
 import { obtenerClientePorId } from '../services/clientesService'
 import {
-  crearSaldo,
   obtenerSaldoPorPresupuesto,
   eliminarSaldoPorPresupuesto,
+  regenerarSaldoDePresupuesto,
+  calcularVencimientoCC,
 } from '../services/saldosService'
 import { descontarStock } from '../services/productosService'
 import { useDebounce } from '../hooks/useDebounce'
@@ -113,6 +114,10 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
   // el usuario al confirmar un pago en Efectivo/Transferencia. Se reinicia a
   // "hoy" cada vez que se abre el modal de "Registrar pago" (ver abajo).
   const [fechaPagoInput, setFechaPagoInput] = useState(today())
+  // Reactivación del cobro CC tras eliminar el saldo (ver `sinSaldoCC`).
+  const [reactivando,     setReactivando]     = useState(false)
+  const [errorReactivar,  setErrorReactivar]  = useState('')
+  const [fechaVtoInput,   setFechaVtoInput]   = useState('')
 
   // Memoizado para que las sumas de detalles no se recalculen en cada render
   // del detalle (p.ej. al abrir/cerrar modales).
@@ -156,6 +161,11 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
   const estado      = ESTADOS[pres.estado]  ?? ESTADOS.borrador
   const metodo      = METODOS_PAGO[pres.metodoPago] ?? { label: pres.metodoPago, badge: 'gray' }
   const puedeActuar = pres.estado === 'borrador' || pres.estado === 'aprobado'
+  // Presupuesto de CC aprobado SIN saldo: ocurre cuando el saldo se eliminó
+  // desde ABMC (el presupuesto vuelve de 'pagado' a 'aprobado'). Sin este caso
+  // el usuario vería "el cobro se gestiona desde Saldos" pero no habría ningún
+  // saldo allí: un callejón sin salida.
+  const sinSaldoCC  = esCC && pres.estado === 'aprobado' && !loading && !saldo
 
   const _subtotalConPromo = detalles.reduce((acc, d) => acc + (parseFloat(d.subtotal) || 0), 0)
   let factorReal
@@ -211,20 +221,8 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
       }
 
       if (nuevoEstado === 'aprobado' && esCC) {
-        const yaExiste = await obtenerSaldoPorPresupuesto(pres.idPresupuesto)
-        if (!yaExiste) {
-          const diasCC   = pres.metodoPago === 'cc15' ? 15 : 30
-          const fechaFin = new Date(pres.fecha)
-          fechaFin.setDate(fechaFin.getDate() + diasCC)
-          await crearSaldo({
-            idPresupuesto: pres.idPresupuesto,
-            idCliente:     pres.idCliente,
-            fechaInicio:   pres.fecha,
-            fechaVto:      fechaFin.toISOString().slice(0, 10),
-            monto:         pres.monto,
-            estado:        'pendiente',
-          })
-        }
+        // Idempotente: si el saldo ya existe no lo duplica.
+        await regenerarSaldoDePresupuesto(pres)
       }
 
       if (nuevoEstado === 'rechazado') {
@@ -236,6 +234,36 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
       onUpdated()
     } catch (err) {
       setErrorModal(err.message)
+    }
+  }
+
+  // Abre el modal con el vencimiento por defecto (emisión + plazo), editable.
+  function abrirReactivar() {
+    setErrorReactivar('')
+    setFechaVtoInput(calcularVencimientoCC(pres.fecha, pres.metodoPago))
+    setModal('reactivar')
+  }
+
+  async function reactivarCobroCC() {
+    setErrorReactivar('')
+    if (!fechaVtoInput) {
+      setErrorReactivar('Ingresá la fecha de vencimiento.')
+      return
+    }
+    if (fechaVtoInput < pres.fecha) {
+      setErrorReactivar('El vencimiento no puede ser anterior a la fecha de emisión del presupuesto.')
+      return
+    }
+    setReactivando(true)
+    try {
+      await regenerarSaldoDePresupuesto(pres, { fechaVto: fechaVtoInput })
+      setModal(null)
+      await reload()
+      onUpdated()
+    } catch (err) {
+      setErrorReactivar(err?.message || 'No se pudo reactivar el cobro.')
+    } finally {
+      setReactivando(false)
     }
   }
 
@@ -349,9 +377,19 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
               {pres.estado === 'aprobado' && !esCC && (
                 <Button size="sm" icon={CheckCircle2} onClick={() => { setFechaPagoInput(today()); setModal('pagar') }}>Marcar como Pagado</Button>
               )}
-              {pres.estado === 'aprobado' && esCC && (
+              {pres.estado === 'aprobado' && esCC && !sinSaldoCC && (
                 <div className="flex items-center gap-2 text-surface-400 text-xs font-body bg-surface-700 rounded-xl px-4 py-2.5">
                   <Clock size={13} />El cobro se gestiona desde <span className="text-white font-medium ml-1">Saldos</span>
+                </div>
+              )}
+              {sinSaldoCC && (
+                <div className="w-full space-y-2">
+                  <p className="text-surface-400 text-xs font-body">
+                    Este presupuesto de cuenta corriente no tiene saldo asociado (fue eliminado). Reactivá el cobro para volver a registrar si fue pagado o no desde Saldos.
+                  </p>
+                  <Button size="sm" icon={CheckCircle2} onClick={abrirReactivar}>
+                    Reactivar cobro (regenerar saldo)
+                  </Button>
                 </div>
               )}
             </div>
@@ -583,6 +621,54 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
           </div>
         </Modal>
       ))}
+
+      {/* Modal reactivar cobro CC: el usuario elige el vencimiento del saldo
+          regenerado. Por defecto emisión + plazo (puede quedar ya vencido). */}
+      <Modal open={modal==='reactivar'} onClose={()=>{ if (!reactivando) { setModal(null); setErrorReactivar('') } }}
+        title="Reactivar cobro" width="max-w-sm">
+        <p className="text-surface-300 text-sm font-body mb-4">
+          Se regenerará el saldo pendiente de <span className="text-white font-mono">{fmt(pres.monto)}</span> para el presupuesto <span className="text-white font-mono">#{pres.idPresupuesto}</span>. Luego podrás registrar el cobro desde Saldos.
+        </p>
+        <div className="mb-4">
+          <label htmlFor="fecha-vto-input"
+            className="block text-surface-400 text-xs uppercase tracking-widest font-body mb-1.5">
+            Fecha de vencimiento
+          </label>
+          <input
+            id="fecha-vto-input"
+            type="date"
+            required
+            value={fechaVtoInput}
+            min={pres.fecha}
+            disabled={reactivando}
+            onChange={e => setFechaVtoInput(e.target.value)}
+            aria-describedby="fecha-vto-ayuda"
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5
+                       text-white text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
+          />
+          <p id="fecha-vto-ayuda" className="text-surface-500 text-xs font-body mt-1.5">
+            Sugerido: emisión ({fmtFecha(pres.fecha)}) + {pres.metodoPago === 'cc15' ? 15 : 30} días. Podés cambiarlo.
+          </p>
+          {fechaVtoInput && fechaVtoInput < today() && (
+            <p role="status" className="text-yellow-400/90 text-xs font-body mt-1.5 flex items-start gap-1.5">
+              <AlertCircle size={12} className="mt-0.5 shrink-0" aria-hidden="true" />
+              Esta fecha ya pasó: el saldo se creará vencido y contará como mora en Saldos y Estadísticas.
+            </p>
+          )}
+        </div>
+        {errorReactivar && (
+          <div role="alert" className="flex items-center gap-2 text-red-400 text-xs bg-red-500/10 border border-red-500/30 rounded-xl px-3 py-2 mb-4">
+            <AlertCircle size={13} aria-hidden="true" />{errorReactivar}
+          </div>
+        )}
+        <div className="flex gap-2">
+          <Button variant="secondary" className="flex-1" disabled={reactivando}
+            onClick={()=>{ setModal(null); setErrorReactivar('') }}>Cancelar</Button>
+          <Button className="flex-1" icon={CheckCircle2} onClick={reactivarCobroCC} disabled={reactivando}>
+            {reactivando ? 'Reactivando…' : 'Reactivar'}
+          </Button>
+        </div>
+      </Modal>
 
       {/* Modal eliminar */}
       <Modal open={delConfirm} onClose={()=>setDelConfirm(false)} title="Eliminar presupuesto" width="max-w-sm">
@@ -899,7 +985,20 @@ export default function Historial() {
                               )}
                             </div>
                           )}
-                          {!p.saldoEstado && <span className="text-surface-600 text-xs">—</span>}
+                          {/* CC aprobado sin saldo: quedó así porque se eliminó el saldo
+                              pagado (o se revirtió su pago). Es un estado transitorio válido
+                              (Escenario 2 del fix), pero sin esta señal la fila se ve igual
+                              que un presupuesto en efectivo sin saldo — el usuario cree que
+                              "se perdió" en vez de ver que necesita reactivar el cobro. */}
+                          {!p.saldoEstado && (p.metodoPago === 'cc15' || p.metodoPago === 'cc30') && p.estado === 'aprobado' && (
+                            <div className="flex items-center gap-1" title="El saldo fue eliminado — reactivá el cobro desde el detalle del presupuesto">
+                              <AlertCircle size={12} className="text-yellow-400 shrink-0" aria-hidden="true" />
+                              <span className="text-yellow-400/90 text-[11px] font-body">Reactivar cobro</span>
+                            </div>
+                          )}
+                          {!p.saldoEstado && !((p.metodoPago === 'cc15' || p.metodoPago === 'cc30') && p.estado === 'aprobado') && (
+                            <span className="text-surface-600 text-xs">—</span>
+                          )}
                         </td>
                         <td className="py-3 px-4 text-surface-500"><FileText size={15}/></td>
                       </tr>
