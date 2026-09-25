@@ -2,7 +2,7 @@
 // Página de administración: Alta / Baja / Modificación / Consulta de todas las entidades.
 // REFACTORIZADO: usa exclusivamente las funciones de los servicios.
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   PageHeader, Button, Input, Select, Modal,
   Table, Tr, Td, Badge, Card,
@@ -94,6 +94,20 @@ const fmt = (n) =>
     : '—'
 
 const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
+
+// Normaliza texto para búsquedas: minúsculas + sin tildes/diacríticos.
+// NFD descompone caracteres acentuados en base + marca diacrítica combinante
+// (p.ej. "é" → "e" + ´), y como la "ñ" se descompone en "n" + combining tilde
+// (U+0303), este mismo mecanismo también resuelve "ñ" ≈ "n" en la búsqueda
+// (ver Escenario 4 de la US). Solo afecta la comparación: los datos originales
+// (con sus tildes/ñ) se muestran sin modificar en la tabla de resultados.
+const normalizarTexto = (s) =>
+  (s ?? '')
+    .toString()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
 
 // ─── Pagination component ─────────────────────────────────────────────────────
 
@@ -268,15 +282,17 @@ function Clientes() {
     setForm(p => ({ ...p, [k]: val }))
   }
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
-    if (!q) return true
-    if (/^\d+$/.test(q)) return String(r.idCliente) === q
-    const nombreApellido = `${r.nombre} ${r.apellido}`.toLowerCase()
-    const apellidoNombre = `${r.apellido} ${r.nombre}`.toLowerCase()
-    return nombreApellido.includes(q) || apellidoNombre.includes(q) ||
-      r.nombre.toLowerCase().includes(q) || r.apellido.toLowerCase().includes(q)
-  })
+  const filtered = useMemo(() => {
+    const q = normalizarTexto(search)
+    if (!q) return allRows
+    if (/^\d+$/.test(q)) return allRows.filter(r => String(r.idCliente) === q)
+    return allRows.filter(r => {
+      const nombreApellido = normalizarTexto(`${r.nombre} ${r.apellido}`)
+      const apellidoNombre = normalizarTexto(`${r.apellido} ${r.nombre}`)
+      return nombreApellido.includes(q) || apellidoNombre.includes(q) ||
+        normalizarTexto(r.nombre).includes(q) || normalizarTexto(r.apellido).includes(q)
+    })
+  }, [allRows, search])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idCliente === confirm)
 
@@ -421,15 +437,15 @@ function Proveedores() {
     setForm(p => ({ ...p, [k]: val }))
   }
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
-    if (!q) return true
-    if (/^\d+$/.test(q)) return String(r.idProveedor) === q
-    return (
-      r.nombreFiscal.toLowerCase().includes(q) ||
-      (r.nombreComercial || '').toLowerCase().includes(q)
+  const filtered = useMemo(() => {
+    const q = normalizarTexto(search)
+    if (!q) return allRows
+    if (/^\d+$/.test(q)) return allRows.filter(r => String(r.idProveedor) === q)
+    return allRows.filter(r =>
+      normalizarTexto(r.nombreFiscal).includes(q) ||
+      normalizarTexto(r.nombreComercial || '').includes(q)
     )
-  })
+  }, [allRows, search])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idProveedor === confirm)
 
@@ -857,15 +873,15 @@ function Pedidos() {
 
   const fe = (k) => (e) => setEditRow(p => ({ ...p, [k]: e.target.value }))
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
+  const filtered = useMemo(() => allRows.filter(r => {
+    const q = normalizarTexto(search)
     const matchFrom = !dateFrom || r.fecha >= dateFrom
     const matchTo = !dateTo || r.fecha <= dateTo
     if (!q) return matchFrom && matchTo
     if (/^\d+$/.test(q)) return String(r.idPedido) === q && matchFrom && matchTo
-    const matchQ = (r.provNombre || '').toLowerCase().includes(q)
+    const matchQ = normalizarTexto(r.provNombre || '').includes(q)
     return matchQ && matchFrom && matchTo
-  })
+  }), [allRows, search, dateFrom, dateTo])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idPedido === confirm)
 
@@ -1120,16 +1136,16 @@ function Saldos() {
 
   const fe = (k) => (e) => setEditRow(p => ({ ...p, [k]: e.target.value }))
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
+  const filtered = useMemo(() => allRows.filter(r => {
+    const q = normalizarTexto(search)
     const matchEstado = !filtroEstado || r.estado === filtroEstado
     const matchFrom = !dateFrom || r.fechaFin >= dateFrom
     const matchTo = !dateTo || r.fechaFin <= dateTo
     if (!q) return matchEstado && matchFrom && matchTo
     if (/^\d+$/.test(q)) return String(r.idSaldo) === q && matchEstado && matchFrom && matchTo
-    const matchQ = (r.clienteNombre || '').toLowerCase().includes(q)
+    const matchQ = normalizarTexto(r.clienteNombre || '').includes(q)
     return matchQ && matchEstado && matchFrom && matchTo
-  })
+  }), [allRows, search, filtroEstado, dateFrom, dateTo])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idSaldo === confirm)
 
@@ -1312,17 +1328,17 @@ function Egresos() {
   const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }))
   const fn = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value === '' ? '' : Number(e.target.value) }))
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
+  const filtered = useMemo(() => allRows.filter(r => {
+    const q = normalizarTexto(search)
     const matchCat = !filtCat || r.categoria === filtCat
     const matchMetodo = !filtMetodo || r.metodoPago === filtMetodo
     const matchFrom = !dateFrom || r.fecha >= dateFrom
     const matchTo = !dateTo || r.fecha <= dateTo
     if (!q) return matchCat && matchMetodo && matchFrom && matchTo
     if (/^\d+$/.test(q)) return String(r.idEgreso) === q && matchCat && matchMetodo && matchFrom && matchTo
-    const matchQ = r.descripcion.toLowerCase().includes(q) || r.categoria.toLowerCase().includes(q)
+    const matchQ = normalizarTexto(r.descripcion).includes(q) || normalizarTexto(r.categoria).includes(q)
     return matchQ && matchCat && matchMetodo && matchFrom && matchTo
-  })
+  }), [allRows, search, filtCat, filtMetodo, dateFrom, dateTo])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idEgreso === confirm)
 
@@ -1490,16 +1506,16 @@ function Ingresos() {
   const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }))
   const fn = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value === '' ? '' : Number(e.target.value) }))
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
+  const filtered = useMemo(() => allRows.filter(r => {
+    const q = normalizarTexto(search)
     const matchCat = !filtCat || r.categoria === filtCat
     const matchFrom = !dateFrom || r.fecha >= dateFrom
     const matchTo = !dateTo || r.fecha <= dateTo
     if (!q) return matchCat && matchFrom && matchTo
     if (/^\d+$/.test(q)) return String(r.idIngreso) === q && matchCat && matchFrom && matchTo
-    const matchQ = r.descripcion.toLowerCase().includes(q) || (r.categoria || '').toLowerCase().includes(q)
+    const matchQ = normalizarTexto(r.descripcion).includes(q) || normalizarTexto(r.categoria || '').includes(q)
     return matchQ && matchCat && matchFrom && matchTo
-  })
+  }), [allRows, search, filtCat, dateFrom, dateTo])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idIngreso === confirm)
 
@@ -1725,15 +1741,15 @@ function Inversiones() {
 
   const totalGeneral = totalesPorCat.reduce((a, t) => a + t.neto, 0)
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
+  const filtered = useMemo(() => allRows.filter(r => {
+    const q = normalizarTexto(search)
     const matchCat = !filtCat || r.categoria === filtCat
     const matchFrom = !dateFrom || r.fecha >= dateFrom
     const matchTo = !dateTo || r.fecha <= dateTo
     if (!q) return matchCat && matchFrom && matchTo
     if (/^\d+$/.test(q)) return String(r.idInversion) === q && matchCat && matchFrom && matchTo
-    return (r.descripcion.toLowerCase().includes(q) || r.categoria.toLowerCase().includes(q)) && matchCat && matchFrom && matchTo
-  })
+    return (normalizarTexto(r.descripcion).includes(q) || normalizarTexto(r.categoria).includes(q)) && matchCat && matchFrom && matchTo
+  }), [allRows, search, filtCat, dateFrom, dateTo])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idInversion === confirm)
 
@@ -2000,12 +2016,12 @@ function Categorias() {
 
   const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }))
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
-    if (!q) return true
-    if (/^\d+$/.test(q)) return String(r.idCategoria) === q
-    return r.nombre.toLowerCase().includes(q)
-  })
+  const filtered = useMemo(() => {
+    const q = normalizarTexto(search)
+    if (!q) return allRows
+    if (/^\d+$/.test(q)) return allRows.filter(r => String(r.idCategoria) === q)
+    return allRows.filter(r => normalizarTexto(r.nombre).includes(q))
+  }, [allRows, search])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idCategoria === confirm)
 
