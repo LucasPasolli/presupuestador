@@ -1252,7 +1252,7 @@ function Saldos() {
 // EGRESOS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const CATEGORIAS_EGRESO = ['ART', 'Comida', 'Envíos', 'Flete', 'Impuesto a las ganancias', 'Ingresos Brutos', 'IVA', 'Mantenimiento', 'Publicidad', 'Seguro de vida', 'Servicios', 'Sueldo', 'Transporte', 'Otro']
+const CATEGORIAS_EGRESO = ['ART', 'Comida', 'Débitos CC', 'Envíos', 'Flete', 'Impuesto a las ganancias', 'Ingresos Brutos', 'IVA', 'Mantenimiento', 'Publicidad', 'Retención de Ingresos Brutos', 'Seguro de vida', 'Servicios', 'Sueldo', 'Transporte', 'Otro']
 const EGRESO_BLANK = { fecha: new Date().toISOString().slice(0, 10), categoria: 'Otro', descripcion: '', monto: '', metodoPago: 'efectivo' }
 
 function Egresos() {
