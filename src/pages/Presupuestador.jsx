@@ -373,7 +373,16 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
   const [nombreResults,  setNombreResults]  = useState([])
   const [showDrop,       setShowDrop]       = useState(false)
   const [dropPos,        setDropPos]        = useState({ top: 0, left: 0, width: 0 })
+  // `medidas`: variantes completas del producto ({ medida, cantidad, ... }),
+  // no solo el nombre — se necesita la cantidad para poder distinguir
+  // "no hay stock en ninguna medida" de "seleccioná una medida".
   const [medidas,        setMedidas]        = useState([])
+  // Si el producto seleccionado usa medidas (tiene_medidas = true en catálogo).
+  // Necesario aparte de `medidas.length` porque un producto puede usar
+  // medidas y aun así no tener NINGUNA variante cargada todavía (mismo caso
+  // que "sin stock" desde la perspectiva del presupuestador: no hay nada
+  // seleccionable).
+  const [usaMedidas,     setUsaMedidas]      = useState(false)
   const [idError,        setIdError]        = useState('')
   const [stockWarning,   setStockWarning]   = useState('')
   const [priceWarning,   setPriceWarning]   = useState(false)
@@ -451,21 +460,32 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
   // ya fue consultado en esta sesión (por checkStock u otro ItemRow), los datos
   // vienen del Map en memoria sin ir a la red.
   useEffect(() => {
-    if (!item.idProducto) { setMedidas([]); return }
+    if (!item.idProducto) { setMedidas([]); setUsaMedidas(false); return }
     let cancelled = false
     getProductoCached(parseInt(item.idProducto))
       .then(({ producto: prod, medidas: ms }) => {
         if (cancelled || !prod) return
+        setUsaMedidas(!!prod.tieneMedidas)
         if (prod.tieneMedidas) {
-          if (!cancelled) setMedidas(ms.map(r => r.medida))
+          // Guardamos las variantes completas (no solo `medida`): el
+          // selector necesita `cantidad` para saber si hay stock en
+          // ALGUNA de ellas y así poder deshabilitarse con un mensaje
+          // claro en lugar de quedar vacío (ver Escenario 1).
+          setMedidas(ms)
         } else {
           setMedidas([])
           onUpdate(uid, 'medida', null)
         }
       })
-      .catch(() => { if (!cancelled) setMedidas([]) })
+      .catch(() => { if (!cancelled) { setMedidas([]); setUsaMedidas(false) } })
     return () => { cancelled = true }
   }, [item.idProducto])
+
+  // Solo tiene sentido evaluar "sin stock en ninguna medida" para productos
+  // que efectivamente usan medidas. Cubre las dos formas en que un producto
+  // puede llegar a este estado: (a) no tiene ninguna variante cargada en
+  // producto_medida, o (b) tiene variantes pero todas en cantidad 0.
+  const sinStockEnNingunaMedida = usaMedidas && medidas.every(m => (m.cantidad ?? 0) <= 0)
 
   // [OPTIMIZACIÓN 2] checkStock ahora usa el caché compartido — no hace fetch
   // si el producto ya fue consultado antes en esta sesión de presupuesto.
@@ -680,7 +700,22 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
 
       {/* Medida */}
       <td className="py-2 px-2 w-32">
-        {medidas.length > 0 ? (
+        {!usaMedidas ? (
+          // Producto que no maneja medidas: no hay nada que elegir acá.
+          <span className="text-surface-500 text-xs px-2">—</span>
+        ) : sinStockEnNingunaMedida ? (
+          // Escenario 1: el producto usa medidas pero ninguna variante tiene
+          // stock cargado (o no tiene variantes en absoluto). En vez de dejar
+          // el selector vacío/engañoso, se deshabilita e informa el motivo
+          // explícitamente para que el usuario no confunda esto con un olvido
+          // suyo de elegir una medida.
+          <select disabled value=""
+            title="Este producto no tiene stock disponible en ninguna medida"
+            className="w-full bg-surface-800 border border-red-900/50 rounded-lg px-2 py-1.5
+                       text-red-400/90 text-xs font-body cursor-not-allowed">
+            <option value="">Sin stock</option>
+          </select>
+        ) : (
           <select value={item.medida || ''}
             onChange={e => {
               onUpdate(uid, 'medida', e.target.value)
@@ -689,10 +724,12 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
             className="w-full bg-surface-700 border border-surface-600 rounded-lg px-2 py-1.5
                        text-white text-sm font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer">
             <option value="">— medida —</option>
-            {medidas.map(m => <option key={m} value={m}>{m}</option>)}
+            {medidas.map(m => (
+              <option key={m.medida} value={m.medida}>
+                {m.medida}{(m.cantidad ?? 0) <= 0 ? ' (sin stock)' : ''}
+              </option>
+            ))}
           </select>
-        ) : (
-          <span className="text-surface-500 text-xs px-2">—</span>
         )}
       </td>
 
@@ -1097,9 +1134,22 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
           setError(`El producto ID ${it.idProducto} no existe en el inventario.`)
           return
         }
-        if (prod.tieneMedidas && !it.medida) {
-          setError(`Seleccioná una medida para el producto ID ${it.idProducto}.`)
-          return
+        if (prod.tieneMedidas) {
+          const nombreProd = prod.nombre || it.nombreProducto || `ID ${it.idProducto}`
+          const hayStockEnAlgunaMedida = (medidas ?? []).some(m => (m.cantidad ?? 0) > 0)
+
+          // Primero se descarta la causa de fondo (no hay stock cargado en
+          // NINGUNA medida): si ese es el caso, decirle "seleccioná una
+          // medida" sería engañoso porque no hay ninguna opción válida para
+          // elegir. Ver Escenario 2 — el mensaje debe reflejar la causa real.
+          if (!hayStockEnAlgunaMedida) {
+            setError(`El producto "${nombreProd}" no tiene stock disponible en ninguna medida.`)
+            return
+          }
+          if (!it.medida) {
+            setError(`Seleccioná una medida para el producto "${nombreProd}".`)
+            return
+          }
         }
         if (!parseFloat(it.precioUnitario)) {
           setError(`El producto "${it.nombreProducto || 'ID ' + it.idProducto}" no tiene precio definido. Asignalo desde Inventario.`)
