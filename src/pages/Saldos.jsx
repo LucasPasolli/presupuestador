@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react'
 import { useLocation } from 'react-router-dom'
 import { usePaginatedList } from '../hooks/usePaginatedList'
+import { useScrollAnchor } from '../hooks/useScrollToTopOnChange'
 import {
   obtenerSaldos,
   obtenerKPIsSaldos,
@@ -726,6 +727,7 @@ export default function Saldos() {
     serverFilters: { filterEst, search, sortDias },
     pageSize: PAGE_SIZE,
   })
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   function handleUpdated(msg) {
     setToast(msg)
@@ -850,6 +852,7 @@ export default function Saldos() {
       </Card>
 
       {/* Tabla */}
+      <div ref={tableAnchorRef}>
       <Card className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm font-body">
@@ -932,12 +935,13 @@ export default function Saldos() {
               {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, saldos.length)} de {saldos.length}
             </p>
             <div className="flex gap-2">
-              <Button size="sm" variant="secondary" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>← Ant.</Button>
-              <Button size="sm" variant="secondary" onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}>Sig. →</Button>
+              <Button size="sm" variant="secondary" onClick={() => { setPage(p => Math.max(1, p - 1)); scrollToStart() }} disabled={page === 1}>← Ant.</Button>
+              <Button size="sm" variant="secondary" onClick={() => { setPage(p => Math.min(totalPages, p + 1)); scrollToStart() }} disabled={page === totalPages}>Sig. →</Button>
             </div>
           </div>
         )}
       </Card>
+      </div>
     </div>
   )
 }

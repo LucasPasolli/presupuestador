@@ -24,6 +24,7 @@ import {
 } from '../services/saldosService'
 import { descontarStock } from '../services/productosService'
 import { useDebounce } from '../hooks/useDebounce'
+import { useScrollAnchor } from '../hooks/useScrollToTopOnChange'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -704,6 +705,7 @@ export default function Historial() {
   // `page` controla el offset que se envía a Supabase.
   // `totalCount` viene del count:'exact' de la query — nunca descargamos todas las filas.
   const [page,       setPage]       = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
   const [totalCount, setTotalCount] = useState(0)
 
   // ── Data y estado de carga ────────────────────────────────────────────────
@@ -921,6 +923,7 @@ export default function Historial() {
       </Card>
 
       {/* Tabla */}
+      <div ref={tableAnchorRef}>
       <Card className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm font-body">
@@ -1024,15 +1027,16 @@ export default function Historial() {
             </p>
             <div className="flex gap-2">
               <Button size="sm" variant="secondary"
-                onClick={() => setPage(p => Math.max(1, p-1))}
+                onClick={() => { setPage(p => Math.max(1, p-1)); scrollToStart() }}
                 disabled={page === 1 || loading}>← Anterior</Button>
               <Button size="sm" variant="secondary"
-                onClick={() => setPage(p => Math.min(totalPages, p+1))}
+                onClick={() => { setPage(p => Math.min(totalPages, p+1)); scrollToStart() }}
                 disabled={page === totalPages || loading}>Siguiente →</Button>
             </div>
           </div>
         )}
       </Card>
+      </div>
     </div>
   )
 }

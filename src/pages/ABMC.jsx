@@ -7,6 +7,7 @@ import {
   PageHeader, Button, Input, Select, Modal,
   Table, Tr, Td, Badge, Card,
 } from '../components/ui'
+import { useScrollAnchor } from '../hooks/useScrollToTopOnChange'
 import {
   Users, Truck, FileText, ShoppingCart,
   Wallet, TrendingDown, TrendingUp, Tag, Plus, Pencil, Trash2,
@@ -111,19 +112,26 @@ const normalizarTexto = (s) =>
 
 // ─── Pagination component ─────────────────────────────────────────────────────
 
-function Pagination({ page, total, pageSize, onChange }) {
+function Pagination({ page, total, pageSize, onChange, onNavigate }) {
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   if (totalPages <= 1) return null
   const from = (page - 1) * pageSize + 1
   const to = Math.min(page * pageSize, total)
+  // goTo: cambia de página Y reposiciona el scroll en el MISMO evento de
+  // clic (nunca vía useEffect), para que el reposicionamiento sea siempre
+  // consecuencia directa de la acción del usuario.
+  const goTo = (p) => {
+    onChange(p)
+    onNavigate?.()
+  }
   return (
     <div className="flex items-center justify-between px-6 py-3 border-t border-surface-700">
       <p className="text-surface-400 text-xs font-body tabular-nums">
         {from}–{to} de {total}
       </p>
       <div className="flex gap-2">
-        <Button size="sm" variant="secondary" onClick={() => onChange(Math.max(1, page - 1))} disabled={page === 1}>← Anterior</Button>
-        <Button size="sm" variant="secondary" onClick={() => onChange(Math.min(totalPages, page + 1))} disabled={page === totalPages}>Siguiente →</Button>
+        <Button size="sm" variant="secondary" onClick={() => goTo(Math.max(1, page - 1))} disabled={page === 1}>← Anterior</Button>
+        <Button size="sm" variant="secondary" onClick={() => goTo(Math.min(totalPages, page + 1))} disabled={page === totalPages}>Siguiente →</Button>
       </div>
     </div>
   )
@@ -226,6 +234,7 @@ function Clientes() {
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const load = useCallback(async () => {
     try {
@@ -311,6 +320,7 @@ function Clientes() {
         <Button icon={Plus} onClick={openCreate}>Nuevo cliente</Button>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['ID', 'Apellido', 'Nombre', 'Apodo', 'Comercio', 'CUIT', 'Teléfono', '']}
           empty={paged.length === 0 ? 'Sin clientes registrados' : null}>
@@ -332,8 +342,9 @@ function Clientes() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar cliente' : 'Nuevo cliente'}>
         <div className="space-y-4">
@@ -386,6 +397,7 @@ function Proveedores() {
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const load = useCallback(async () => {
     try {
@@ -464,6 +476,7 @@ function Proveedores() {
         <Button icon={Plus} onClick={openCreate}>Nuevo proveedor</Button>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['ID', 'Nombre fiscal', 'Nombre comercial', 'CUIT/RUT', 'Teléfono', 'Email', '']}
           empty={paged.length === 0 ? 'Sin proveedores' : null}>
@@ -484,8 +497,9 @@ function Proveedores() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar proveedor' : 'Nuevo proveedor'}>
         <div className="space-y-4">
@@ -541,6 +555,7 @@ function Presupuestos() {
   const [dateTo, setDateTo] = useState('')
   const [filtroEstado, setFiltroEstado] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   // Clave de idempotencia del intento de eliminación en curso. Se regenera
   // cada vez que se abre el modal de confirmación (nuevo intento) y se
@@ -722,6 +737,7 @@ function Presupuestos() {
         </div>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['#', 'Fecha', 'Cliente', 'Método', 'Monto', 'Estado', '']}
           empty={!loading && paged.length === 0 ? 'Sin presupuestos' : null}>
@@ -749,8 +765,9 @@ function Presupuestos() {
             ))
           }
         </Table>
-        <Pagination page={page} total={total} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={total} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title="Editar presupuesto">
         {editRow && (
@@ -828,6 +845,7 @@ function Pedidos() {
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const load = useCallback(async () => {
     try {
@@ -907,6 +925,7 @@ function Pedidos() {
         </div>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['#', 'Fecha', 'Proveedor', 'Monto', 'Método', 'Pago', 'Logística', '']}
           empty={paged.length === 0 ? 'Sin pedidos' : null}>
@@ -928,8 +947,9 @@ function Pedidos() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title="Editar pedido de compra">
         {editRow && (
@@ -987,6 +1007,7 @@ function Saldos() {
   const [dateTo, setDateTo] = useState('')
   const [filtroEstado, setFiltroEstado] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState('')
   // Edición: estado con el que se abrió el modal (para detectar transiciones
@@ -1184,6 +1205,7 @@ function Saldos() {
         </div>
       )}
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['#', 'Cliente', 'Presup.', 'Monto', 'Vence', 'Estado', '']}
           empty={paged.length === 0 ? 'Sin saldos' : null}>
@@ -1205,8 +1227,9 @@ function Saldos() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={cerrarEdit} title="Editar saldo">
         {editRow && (
@@ -1284,6 +1307,7 @@ function Egresos() {
   const [filtCat, setFiltCat] = useState('')
   const [filtMetodo, setFiltMetodo] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const load = useCallback(async () => {
     try {
@@ -1379,6 +1403,7 @@ function Egresos() {
         <Button icon={Plus} onClick={openCreate}>Nuevo egreso</Button>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['Fecha', 'Categoría', 'Descripción', 'Método', 'Monto', '']}
           empty={paged.length === 0 ? 'Sin egresos' : null}>
@@ -1398,8 +1423,9 @@ function Egresos() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar egreso' : 'Nuevo egreso'}>
         <div className="space-y-4">
@@ -1462,6 +1488,7 @@ function Ingresos() {
   const [dateTo, setDateTo] = useState('')
   const [filtCat, setFiltCat] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const load = useCallback(async () => {
     try {
@@ -1548,6 +1575,7 @@ function Ingresos() {
         <Button icon={Plus} onClick={openCreate}>Nuevo ingreso</Button>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['#', 'Fecha', 'Categoría', 'Descripción', 'Monto', '']}
           empty={paged.length === 0 ? 'Sin ingresos registrados' : null}>
@@ -1567,8 +1595,9 @@ function Ingresos() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar ingreso' : 'Nuevo ingreso'}>
         <div className="space-y-4">
@@ -1625,6 +1654,7 @@ function Inversiones() {
   const [dateTo, setDateTo] = useState('')
   const [filtCat, setFiltCat] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
   const [retirarCat, setRetirarCat] = useState('FCI')
   const [retirarMonto, setRetirarMonto] = useState('')
   const [retirarFecha, setRetirarFecha] = useState(new Date().toISOString().slice(0, 10))
@@ -1807,6 +1837,7 @@ function Inversiones() {
         <Button icon={Plus} onClick={openCreate} className="bg-teal-600/80 hover:bg-teal-500/90 border-teal-500/50 text-white">Nueva inversión</Button>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['#', 'Fecha', 'Categoría', 'Descripción', 'Estado', 'Monto', '']}
           empty={paged.length === 0 ? 'Sin inversiones registradas' : null}>
@@ -1829,8 +1860,9 @@ function Inversiones() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar inversión' : 'Nueva inversión'}>
         <div className="space-y-4">
@@ -1968,6 +2000,7 @@ function Categorias() {
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const load = useCallback(async () => {
     try {
@@ -2040,6 +2073,7 @@ function Categorias() {
         <Button icon={Plus} onClick={openCreate}>Nueva categoría</Button>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['ID', 'Nombre', 'Productos', '']}
           empty={paged.length === 0 ? 'Sin categorías' : null}>
@@ -2057,8 +2091,9 @@ function Categorias() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar categoría' : 'Nueva categoría'}>
         <div className="space-y-4">

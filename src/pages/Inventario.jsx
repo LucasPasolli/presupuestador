@@ -1,6 +1,7 @@
 // src/pages/Inventario.jsx
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { usePaginatedList } from '../hooks/usePaginatedList'
+import { useScrollAnchor } from '../hooks/useScrollToTopOnChange'
 import {
   obtenerProductos,
   obtenerCategorias,
@@ -870,6 +871,7 @@ export default function Inventario() {
     },
     pageSize: PAGE_SIZE,
   })
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const loadSinResetPage = reload
 
@@ -1048,6 +1050,7 @@ export default function Inventario() {
       </Card>
 
       {/* Tabla */}
+      <div ref={tableAnchorRef}>
       <Card className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full table-fixed text-sm font-body">
@@ -1147,12 +1150,13 @@ export default function Inventario() {
               {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, productos.length)} de {productos.length}
             </p>
             <div className="flex gap-2">
-              <Button size="sm" variant="secondary" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1}>← Anterior</Button>
-              <Button size="sm" variant="secondary" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page === totalPages}>Siguiente →</Button>
+              <Button size="sm" variant="secondary" onClick={() => { setPage((p) => Math.max(1, p - 1)); scrollToStart() }} disabled={page === 1}>← Anterior</Button>
+              <Button size="sm" variant="secondary" onClick={() => { setPage((p) => Math.min(totalPages, p + 1)); scrollToStart() }} disabled={page === totalPages}>Siguiente →</Button>
             </div>
           </div>
         )}
       </Card>
+      </div>
 
       {/* ── Modales ── */}
       <NuevoProductoModal open={modalNuevo} onClose={() => setModalNuevo(false)} categorias={categorias} proveedores={proveedores}

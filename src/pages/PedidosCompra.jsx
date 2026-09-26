@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { usePaginatedList } from '../hooks/usePaginatedList'
+import { useScrollAnchor } from '../hooks/useScrollToTopOnChange'
 import { supabase } from '../lib/supabase'
 import { Card, PageHeader, Button, Badge, Modal, Input } from '../components/ui'
 import {
@@ -1542,6 +1543,7 @@ export default function PedidosCompra() {
     },
     pageSize: PAGE_SIZE,
   })
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   // Deuda pendiente real: para pedidos CC fraccionada, sólo lo que falta
   // cobrar (sum de cuotas no pagadas) — no el monto total del pedido, que
@@ -1688,6 +1690,7 @@ export default function PedidosCompra() {
       </Card>
 
       {/* Tabla */}
+      <div ref={tableAnchorRef}>
       <Card className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm font-body">
@@ -1772,12 +1775,13 @@ export default function PedidosCompra() {
               {(page-1)*PAGE_SIZE+1}–{Math.min(page*PAGE_SIZE, filteredPedidos.length)} de {filteredPedidos.length}
             </p>
             <div className="flex gap-2">
-              <Button size="sm" variant="secondary" onClick={() => setPage(p => Math.max(1,p-1))} disabled={page===1}>← Ant.</Button>
-              <Button size="sm" variant="secondary" onClick={() => setPage(p => Math.min(totalPages,p+1))} disabled={page===totalPages}>Sig. →</Button>
+              <Button size="sm" variant="secondary" onClick={() => { setPage(p => Math.max(1,p-1)); scrollToStart() }} disabled={page===1}>← Ant.</Button>
+              <Button size="sm" variant="secondary" onClick={() => { setPage(p => Math.min(totalPages,p+1)); scrollToStart() }} disabled={page===totalPages}>Sig. →</Button>
             </div>
           </div>
         )}
       </Card>
+      </div>
     </div>
   )
 }
