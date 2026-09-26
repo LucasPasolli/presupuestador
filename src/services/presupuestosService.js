@@ -63,11 +63,70 @@ function mapDetalle(row) {
   }
 }
 
+// ─── Búsqueda de cliente: normalización multi-palabra e insensible a tildes ───
+//
+// BUG ORIGINAL: la búsqueda hacía
+//   `nombre_cliente.ilike.%${search}%,apellido_cliente.ilike.%${search}%`
+// es decir, buscaba el STRING COMPLETO ingresado como substring de UNA sola
+// columna. Con una sola palabra funcionaba de casualidad (coincidía con
+// nombre_cliente O apellido_cliente). Con 2+ palabras ("Juan Perez") no
+// existe ninguna columna que contenga el string completo "Juan Perez" (el
+// nombre y el apellido viven en columnas separadas), así que la búsqueda no
+// devolvía NADA a partir de la segunda palabra — el bug reportado.
+//
+// FIX: se separa el término en palabras, se normalizan (sin tildes,
+// minúsculas) y se exige que TODAS aparezcan — sin importar el orden —
+// dentro de `busqueda_cliente`, una columna GENERATED en Postgres que
+// concatena y normaliza nombre + apellido (ver migración
+// `supabase/migrations/*_busqueda_cliente_multiword.sql`).
+//
+// Cada palabra se agrega como una llamada `.ilike()` INDEPENDIENTE (no
+// `.or()`): PostgREST combina con AND los filtros que llegan como query
+// params separados, incluso si apuntan a la misma columna. `.or()` en
+// cambio arma un único OR dentro de una misma condición — es la pieza que
+// estaba mal en el código original y la razón por la que dos palabras
+// nunca podían matchear juntas.
+//
+// IMPORTANTE: esta normalización debe producir el MISMO resultado que la
+// función `f_unaccent_lower()` usada en la columna generada de Postgres
+// (NFD + strip de marcas diacríticas ≈ unaccent() para los acentos del
+// español: á,é,í,ó,ú,ñ,ü). Si se cambia una, hay que cambiar la otra.
+
+const MAX_PALABRAS_BUSQUEDA = 8 // evita queries pathológicas (ej. cientos de espacios)
+
+export function normalizarTexto(texto) {
+  return (texto ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // quita tildes/diéresis/virgulilla
+    .toLowerCase()
+    .trim()
+}
+
+// Escapa los caracteres especiales de LIKE/ILIKE (%, _ y el propio escape \)
+// para que un término de búsqueda que los contenga se interprete como texto
+// literal y no como wildcard de Postgres (por ejemplo, para que buscar
+// "50%" o "a_b" no dispare un patrón no intencional).
+export function escaparComodinesLike(texto) {
+  return texto.replace(/[\\%_]/g, '\\$&')
+}
+
+// Divide el término de búsqueda en palabras normalizadas, filtra vacíos y
+// limita la cantidad para acotar el costo de la query.
+export function dividirEnPalabrasDeBusqueda(texto) {
+  return normalizarTexto(texto)
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, MAX_PALABRAS_BUSQUEDA)
+}
+
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
 // Campos mínimos para la tabla del Historial.
 // Omite monto_original y es_excepcion que no se muestran en la lista.
 // IMPORTANTE: si agregás columnas al listado, añadirlas aquí también.
+// (No hace falta incluir `busqueda_cliente`: PostgREST permite filtrar por
+// columnas que no están en el `select`, ya que el filtro se resuelve contra
+// la tabla, no contra la proyección devuelta al cliente.)
 const CAMPOS_LISTA = `
   id_presupuesto,
   id_cliente,
@@ -109,6 +168,8 @@ const CAMPOS_DETALLE = `
  *   - count:'exact' devuelve el total sin traer todas las filas.
  *   - Búsqueda textual con ilike/eq en Supabase, no en Array.filter().
  *   - Ordenación por sortKey pasado como parámetro.
+ *   - Búsqueda por nombre/apellido: multi-palabra (cualquier orden) e
+ *     insensible a tildes, contra la columna generada `busqueda_cliente`.
  *
  * @returns {{ data: Presupuesto[], count: number }}
  */
@@ -142,17 +203,17 @@ export async function obtenerPresupuestos({
   if (metodoPago)  q = q.eq('metodo_pago', metodoPago)
   if (esExcepcion !== null) q = q.eq('es_excepcion', esExcepcion)
 
-  // Búsqueda: si es número busca por ID exacto; si es texto busca nombre+apellido.
-  // Esto reemplaza el Array.filter() que antes corría en el browser sobre 2000 filas.
+  // Búsqueda: si es número busca por ID exacto; si es texto busca nombre+apellido
+  // exigiendo que TODAS las palabras ingresadas matcheen (ver helpers arriba).
   if (search) {
     const s = search.trim()
     if (/^\d+$/.test(s)) {
       q = q.eq('id_presupuesto', parseInt(s, 10))
     } else {
-      // ilike sobre los dos campos: cualquier parte del nombre o apellido
-      q = q.or(
-        `nombre_cliente.ilike.%${s}%,apellido_cliente.ilike.%${s}%`
-      )
+      const palabras = dividirEnPalabrasDeBusqueda(s)
+      for (const palabra of palabras) {
+        q = q.ilike('busqueda_cliente', `%${escaparComodinesLike(palabra)}%`)
+      }
     }
   }
 

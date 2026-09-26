@@ -32,6 +32,15 @@ export const CODIGOS = /** @type {const} */ ({
   CLAVE_REUTILIZADA:  'P0IDK', // definido por nosotros en el SQL
   OPERACION_EN_CURSO: 'P0IDP',
   SIN_PERMISO:        '42501',
+  // AGREGADO (feature: reintegro de stock al eliminar presupuesto pagado):
+  // código genérico para "el recurso ya no existe" — cubre la carrera donde
+  // dos requests apuntan al mismo id y una ya lo borró cuando llega la otra.
+  // Nombre y código intencionalmente genéricos para que cualquier RPC de
+  // borrado futura (no solo presupuestos) pueda reusarlo sin inventar el
+  // suyo. No reutilizar 'P0002': ese código lo emite el motor de PL/pgSQL
+  // internamente (no_data_found de STRICT INTO) y mezclar semántica propia
+  // con la del motor genera falsos positivos difíciles de rastrear.
+  RECURSO_NO_ENCONTRADO: 'P0NFD',
 })
 
 const REINTENTOS_MAX   = 2
@@ -80,6 +89,8 @@ export function mapearErrorSeguro(error) {
       return { mensaje: 'Los datos ingresados no cumplen las reglas de validación.', codigo, reintentable: false }
     case CODIGOS.SIN_PERMISO:
       return { mensaje: 'No tenés permisos para realizar esta acción.', codigo, reintentable: false }
+    case CODIGOS.RECURSO_NO_ENCONTRADO:
+      return { mensaje: 'Este registro ya no existe. Es posible que se haya eliminado desde otra pestaña o dispositivo — actualizá la pantalla.', codigo, reintentable: false }
     case 'TIMEOUT':
       return { mensaje: 'El servidor tardó demasiado en responder. Verificá si la operación se completó antes de reintentar.', codigo, reintentable: true }
     default:

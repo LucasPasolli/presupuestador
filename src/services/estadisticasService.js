@@ -10,6 +10,7 @@
 // que ya consume el componente.
 
 import { supabase } from '../lib/supabase'
+import { obtenerCobradoEnPeriodo } from './cobrosService'
 
 // ─── Helper de error ──────────────────────────────────────────────────────────
 
@@ -109,75 +110,17 @@ async function _obtenerPresupuestosPeriodo(desde, hasta) {
  * NOTA (Pago Parcial): este enfoque SUBSUME la corrección de pago parcial que
  * tenía `_obtenerSaldosDelPeriodo` — un saldo cobrado a medias no "desaparece"
  * del KPI, porque cada aplicación parcial se suma por su `pago.fecha` real
- * (ver `_obtenerPagosParcialesEnPeriodo`), que además es más preciso que
+ * (ver `cobrosService.obtenerPagosParcialesEnPeriodo`), que además es más preciso que
  * derivarlo de `monto − monto_pendiente`: si un saldo se cobró en dos cuotas
  * en meses distintos, cada parte cae en el mes en que entró la plata.
  */
-async function _obtenerPagosParcialesEnPeriodo(desde, hasta) {
-  const { data: pagos, error: e1 } = await supabase
-    .from('pago')
-    .select('id_pago, fecha')
-    .gte('fecha', desde)
-    .lte('fecha', hasta)
-
-  if (e1) manejarError('_obtenerPagosParcialesEnPeriodo(pagos)', e1)
-  if (!pagos?.length) return []
-
-  const idsPago = pagos.map(p => p.id_pago)
-
-  const { data: aplicaciones, error: e2 } = await supabase
-    .from('pago_aplicacion')
-    .select(`
-      id_aplicacion,
-      id_pago,
-      monto_aplicado,
-      saldo ( id_presupuesto )
-    `)
-    .in('id_pago', idsPago)
-
-  if (e2) manejarError('_obtenerPagosParcialesEnPeriodo(aplicaciones)', e2)
-
-  return (aplicaciones ?? [])
-    .filter(a => a.saldo?.id_presupuesto != null)
-    .map(a => ({
-      idPresupuesto: a.saldo.id_presupuesto,
-      montoAplicado: Number(a.monto_aplicado),
-    }))
-}
-
-async function _obtenerCobradoEnPeriodo(desde, hasta) {
-  const [rpcResult, pagosParciales] = await Promise.all([
-    supabase.rpc('obtener_presupuestos_facturables', {
-      fecha_desde: desde,
-      fecha_hasta: hasta,
-    }),
-    _obtenerPagosParcialesEnPeriodo(desde, hasta),
-  ])
-
-  const { data: presupuestos, error } = rpcResult
-  if (error) manejarError('_obtenerCobradoEnPeriodo(rpc)', error)
-
-  // Igual que en Facturas: un presupuesto con AL MENOS un pago parcial no se
-  // cuenta también como "venta completa" — evita duplicar lo cobrado.
-  const idsConPagoParcial = new Set(pagosParciales.map(pp => pp.idPresupuesto))
-  const ventas = (presupuestos ?? []).filter(p => !idsConPagoParcial.has(p.id_presupuesto))
-
-  const montoContado = ventas
-    .filter(p => p.metodo_pago === 'efectivo' || p.metodo_pago === 'transferencia')
-    .reduce((a, p) => a + Number(p.monto), 0)
-
-  const montoCCDirecto = ventas
-    .filter(p => p.metodo_pago === 'cc15' || p.metodo_pago === 'cc30')
-    .reduce((a, p) => a + Number(p.monto), 0)
-
-  const montoCCParcial = pagosParciales.reduce((a, pp) => a + pp.montoAplicado, 0)
-
-  return {
-    contado: montoContado,
-    cc:      montoCCDirecto + montoCCParcial,
-    total:   montoContado + montoCCDirecto + montoCCParcial,
-  }
-}
+// _obtenerPagosParcialesEnPeriodo / _obtenerCobradoEnPeriodo se movieron a
+// cobrosService.js (obtenerPagosParcialesEnPeriodo / obtenerCobradoEnPeriodo):
+// dashboardService.js necesita exactamente la misma regla de negocio para su
+// propio KPI de cobro mensual, y duplicarla ahí habría sido la forma más
+// rápida de que las dos pantallas volvieran a divergir en el criterio de
+// fecha (el bug original, otra vez, pero entre dos services en vez de entre
+// dos columnas). Se reexporta con `obtenerCobradoEnPeriodo(desde, hasta)`.
 
 /**
  * Bloque 3a: Suma de ingresos extra del período (tabla ingreso).
@@ -496,21 +439,71 @@ async function _obtenerClientesUnicos(desde, hasta) {
 }
 
 /**
- * Bloque 9: Egresos de pedidos pagados del período.
+ * Bloque 9: Egresos REALMENTE pagados a proveedores en el período.
+ *
+ * CORRECCIÓN #1 (mismo bug Día X / Día Y de la task original, ahora del
+ * lado de compras): filtraba por `pedido_compra.fecha` (fecha de
+ * CREACIÓN del pedido) en vez de `pedido_compra.fecha_pago` (fecha real
+ * en que se pagó). Un pedido creado en enero y pagado en febrero sumaba
+ * como egreso de enero, y no aparecía en febrero — que es cuando
+ * realmente salió la plata.
+ *
+ * CORRECCIÓN #2 (cuotas parciales no se sumaban — reporte de este bug):
+ * un pedido con plan de cuotas (`tiene_cuotas = true`) permanece en
+ * `estado_pago = 'pendiente'` hasta que se paga la ÚLTIMA cuota (ver
+ * `marcar_cuota_pagada` / `pedidosCuotasService.marcarCuotaPagada`, y el
+ * mismo criterio ya documentado en `_obtenerPedidosPendientesMontoGlobal`
+ * más arriba). Con el filtro `estado_pago = 'pagado'` a secas, un pedido
+ * fraccionado en 3 cuotas — aunque ya se hubieran pagado 2 de las 3 —
+ * quedaba TOTALMENTE afuera de "Egresos pagados" hasta cerrar la
+ * tercera. En ese momento el monto TOTAL del pedido entraba de una vez,
+ * atribuido a `pedido_compra.fecha` (ni siquiera a la fecha de esa
+ * última cuota) — el resto de la plata que ya había salido en cuotas
+ * anteriores nunca quedaba reflejada en ningún período.
+ *
+ * Ahora se suman dos fuentes, separadas por `tiene_cuotas` para no
+ * duplicar (mismo particionamiento que ya usa
+ * `_obtenerPedidosPendientesMontoGlobal`):
+ *   - Pedidos SIN cuotas, pagados de una sola vez → `pedido_compra.monto`
+ *     filtrado por `pedido_compra.fecha_pago` real.
+ *   - Pedidos CON cuotas → cada cuota con `estado = 'pagada'` suma por
+ *     SU PROPIA `fecha_pago` (`pedido_compra_cuota.fecha_pago`), sin
+ *     esperar a que el plan se cierre completo.
+ *
  * Equivale a:
  *   SELECT COALESCE(SUM(monto),0) FROM PedidoCompra
- *   WHERE fecha BETWEEN ? AND ? AND estadoPago = 'pagado'
+ *   WHERE fecha_pago BETWEEN ? AND ? AND estadoPago = 'pagado' AND NOT tieneCuotas
+ *   +
+ *   SELECT COALESCE(SUM(monto),0) FROM PedidoCompraCuota
+ *   WHERE fecha_pago BETWEEN ? AND ? AND estado = 'pagada'
  */
 async function _obtenerEgresosPedidosPagados(desde, hasta) {
-  const { data, error } = await supabase
-    .from('pedido_compra')
-    .select('monto')
-    .gte('fecha', desde)
-    .lte('fecha', hasta)
-    .eq('estado_pago', 'pagado')
+  const [sinCuotasResult, cuotasResult] = await Promise.all([
+    supabase
+      .from('pedido_compra')
+      .select('monto')
+      .eq('estado_pago', 'pagado')
+      .eq('tiene_cuotas', false)
+      .gte('fecha_pago', desde)
+      .lte('fecha_pago', hasta),
+    supabase
+      .from('pedido_compra_cuota')
+      .select('monto')
+      .eq('estado', 'pagada')
+      .gte('fecha_pago', desde)
+      .lte('fecha_pago', hasta),
+  ])
 
-  if (error) manejarError('_obtenerEgresosPedidosPagados', error)
-  return data.reduce((a, r) => a + Number(r.monto), 0)
+  const { data: sinCuotas, error: e1 } = sinCuotasResult
+  if (e1) manejarError('_obtenerEgresosPedidosPagados(sin cuotas)', e1)
+
+  const { data: cuotasPagadas, error: e2 } = cuotasResult
+  if (e2) manejarError('_obtenerEgresosPedidosPagados(cuotas)', e2)
+
+  const totalSinCuotas = sinCuotas.reduce((a, r) => a + Number(r.monto), 0)
+  const totalCuotas    = cuotasPagadas.reduce((a, r) => a + Number(r.monto), 0)
+
+  return totalSinCuotas + totalCuotas
 }
 
 /**
@@ -530,7 +523,19 @@ async function _obtenerEgresosExtra(desde, hasta) {
 }
 
 /**
- * Bloque 9c: Pedidos pendientes de pago del período — deuda real con proveedores.
+ * Bloque 9c: Pedidos pendientes de pago — deuda real y ACTUAL con proveedores.
+ *
+ * CORRECCIÓN (mismo criterio que `pendienteCC`, bloque 3 más abajo): esta
+ * métrica estaba filtrada por `pedido_compra.fecha BETWEEN desde AND hasta`,
+ * es decir, solo contaba pedidos CREADOS dentro del rango elegido en
+ * pantalla. Eso es incorrecto para una deuda: si filtrás Estadísticas por
+ * "este mes" y tenés un pedido pendiente de pago creado el mes pasado, esa
+ * deuda seguía existiendo pero desaparecía del KPI apenas cambiabas de
+ * período — la plata que le debés al proveedor no depende de qué rango de
+ * fechas estés mirando en pantalla, es una foto del estado actual.
+ *
+ * Ahora es GLOBAL (sin parámetros de fecha) y vive en el Grupo A de
+ * `obtenerMetricas` junto con `pendienteCC`.
  *
  * Para pedidos "todo o nada" (efectivo/transferencia/echeck/CC simple),
  * la deuda es el monto completo mientras estado_pago sea 'pendiente'
@@ -544,22 +549,19 @@ async function _obtenerEgresosExtra(desde, hasta) {
  *
  * Equivale a:
  *   SELECT COALESCE(SUM(monto),0) FROM PedidoCompra
- *   WHERE fecha BETWEEN ? AND ? AND estadoPago = 'pendiente' AND NOT tieneCuotas
+ *   WHERE estadoPago = 'pendiente' AND NOT tieneCuotas
  *   +
  *   SELECT COALESCE(SUM(c.monto),0) FROM PedidoCompraCuota c
  *   JOIN PedidoCompra p ON p.idPedido = c.idPedido
- *   WHERE p.fecha BETWEEN ? AND ? AND p.estadoPago = 'pendiente'
- *     AND p.tieneCuotas AND c.estado <> 'pagada'
+ *   WHERE p.estadoPago = 'pendiente' AND p.tieneCuotas AND c.estado <> 'pagada'
  */
-async function _obtenerPedidosPendientesMonto(desde, hasta) {
+async function _obtenerPedidosPendientesMontoGlobal() {
   const { data, error } = await supabase
     .from('pedido_compra')
     .select('id_pedido, monto, tiene_cuotas')
-    .gte('fecha', desde)
-    .lte('fecha', hasta)
     .eq('estado_pago', 'pendiente')
 
-  if (error) manejarError('_obtenerPedidosPendientesMonto', error)
+  if (error) manejarError('_obtenerPedidosPendientesMontoGlobal', error)
 
   const sinCuotas = data.filter(r => !r.tiene_cuotas)
   const conCuotas  = data.filter(r => r.tiene_cuotas)
@@ -576,7 +578,7 @@ async function _obtenerPedidosPendientesMonto(desde, hasta) {
       .in('id_pedido', ids)
       .neq('estado', 'pagada')
 
-    if (e2) manejarError('_obtenerPedidosPendientesMonto(cuotas)', e2)
+    if (e2) manejarError('_obtenerPedidosPendientesMontoGlobal(cuotas)', e2)
     total += cuotasPendientes.reduce((a, c) => a + Number(c.monto), 0)
   }
 
@@ -584,20 +586,39 @@ async function _obtenerPedidosPendientesMonto(desde, hasta) {
 }
 
 /**
- * Bloque 11: Todos los presupuestos del período (todos los estados) para
- * calcular tasa de conversión.
+ * Bloque 11: TODOS los presupuestos del período, sin filtrar por estado —
+ * se usa para tasa de conversión Y para el KPI "Presupuestado".
+ *
+ * CORRECCIÓN (KPI "Presupuestado" no reflejaba rechazados): antes la
+ * tarjeta "Presupuestado" (m.facturadoTotal / m.totalPresupuestos) salía
+ * de `_obtenerPresupuestosPeriodo`, que está filtrado a
+ * `estado IN ('aprobado','pagado')` porque ese dataset alimenta también
+ * descuentos/recargos/mix de métodos de pago — métricas que solo tienen
+ * sentido sobre venta CERRADA. Un presupuesto 'rechazado' (o en
+ * 'borrador') nunca pasa ese filtro, así que su monto desaparecía sin
+ * dejar rastro en ningún KPI de la pantalla: ni sumaba a "Presupuestado"
+ * ni se veía en ningún otro lado (la tasa de conversión SÍ contaba el
+ * rechazo, pero no se mostraba en la UI — ver `m.totalRechazados`).
+ *
+ * "Presupuestado" ahora representa actividad TOTAL de cotización (se haya
+ * cerrado en venta o no) y sale de este bloque, que ya traía todos los
+ * estados — solo se le agregó `monto` a la selección para no pagar un
+ * round-trip extra a la base. `m.facturadoTotal` (aprobado+pagado) se
+ * mantiene sin cambios para los cálculos que sí necesitan acotarse a venta
+ * cerrada (`% cobrado sobre el total`, `% de descuentos`).
+ *
  * Equivale a:
- *   SELECT estado FROM Presupuesto WHERE fecha BETWEEN ? AND ?
+ *   SELECT estado, monto FROM Presupuesto WHERE fecha BETWEEN ? AND ?
  */
-async function _obtenerEstadosPresupuestos(desde, hasta) {
+async function _obtenerActividadCotizacionPeriodo(desde, hasta) {
   const { data, error } = await supabase
     .from('presupuesto')
-    .select('estado')
+    .select('estado, monto')
     .gte('fecha', desde)
     .lte('fecha', hasta)
 
-  if (error) manejarError('_obtenerEstadosPresupuestos', error)
-  return data.map(r => r.estado)
+  if (error) manejarError('_obtenerActividadCotizacionPeriodo', error)
+  return data.map(r => ({ estado: r.estado, monto: Number(r.monto) }))
 }
 
 /**
@@ -896,14 +917,14 @@ export async function obtenerMetricas(desde, hasta) {
     saldosPendientesGlobal,
     demoraPagoPorCliente,
     { valorInventarioCosto, valorInventarioVenta, productosValorIncompleto },
+    pedidosPendientesMonto,
 
     // Grupo B: del período
     { presupuestos, mapaSubtotal },
     ingresosExtra,
     egresosPedidosPagados,
     egresosExtra,
-    pedidosPendientesMonto,
-    estados,
+    actividadCotizacion,
     { topProductos, todosProductosVendidos, productosPorIngresos },
     topClientes,
     clientesUnicos,
@@ -920,14 +941,14 @@ export async function obtenerMetricas(desde, hasta) {
     _obtenerSaldosPendientesGlobal(),
     _obtenerDemoraPagoPorCliente(),
     _obtenerValorInventario(),
+    _obtenerPedidosPendientesMontoGlobal(),
 
     // Del período
     _obtenerPresupuestosPeriodo(desde, hasta),
     _obtenerIngresosExtra(desde, hasta),
     _obtenerEgresosPedidosPagados(desde, hasta),
     _obtenerEgresosExtra(desde, hasta),
-    _obtenerPedidosPendientesMonto(desde, hasta),
-    _obtenerEstadosPresupuestos(desde, hasta),
+    _obtenerActividadCotizacionPeriodo(desde, hasta),
     _obtenerProductosVendidos(desde, hasta),
     _obtenerTopClientes(desde, hasta),
     _obtenerClientesUnicos(desde, hasta),
@@ -936,7 +957,7 @@ export async function obtenerMetricas(desde, hasta) {
     _obtenerTopProveedores(desde, hasta),
     _obtenerClientesRecurrentesVsNuevos(desde, hasta),
     _obtenerMargenBruto(desde, hasta),
-    _obtenerCobradoEnPeriodo(desde, hasta),
+    obtenerCobradoEnPeriodo(desde, hasta),
   ])
 
   // ── Cálculos derivados (pura lógica JS, sin más queries) ──────────────────
@@ -944,9 +965,20 @@ export async function obtenerMetricas(desde, hasta) {
   const m = {}
 
   // 1. KPIs de presupuestos
+  //
+  // `facturadoTotal` / `totalPresupuestos` quedan acotados a venta CERRADA
+  // (aprobado+pagado) porque de acá salen `ticketPromedio` y los % de
+  // descuentos/cobrado más abajo — mezclar rechazados ahí distorsionaría
+  // esos ratios (un ticket rechazado no es un "ticket vendido").
   m.facturadoTotal    = presupuestos.reduce((a, p) => a + p.monto, 0)
   m.totalPresupuestos = presupuestos.length
   m.ticketPromedio    = m.totalPresupuestos ? m.facturadoTotal / m.totalPresupuestos : 0
+
+  // 1b. "Presupuestado" (tarjeta principal) = actividad TOTAL de
+  // cotización del período, todos los estados incluidos — ver corrección
+  // en `_obtenerActividadCotizacionPeriodo`.
+  m.totalCotizado        = actividadCotizacion.reduce((a, p) => a + p.monto, 0)
+  m.cantidadCotizaciones = actividadCotizacion.length
 
   // 2. Descuentos
   m.descuentosPromos = presupuestos.reduce((a, p) => {
@@ -979,7 +1011,7 @@ export async function obtenerMetricas(desde, hasta) {
   // antes ambas cosas se calculaban filtrando por `presupuesto.fecha`
   // (fecha de CREACIÓN), sin importar el método de pago. Ahora:
   //
-  //   - `cobradoReal` sale de `_obtenerCobradoEnPeriodo`, que mide dinero
+  //   - `cobradoReal` sale de `cobrosService.obtenerCobradoEnPeriodo`, que mide dinero
   //     efectivamente cobrado DENTRO del rango [desde, hasta] según la
   //     fecha real de cada cobro (`presupuesto.fecha_pago` para contado,
   //     `saldo.fecha_pago` para CC saldado de una vez, `pago.fecha` para
@@ -1050,12 +1082,17 @@ export async function obtenerMetricas(desde, hasta) {
   m.egresosPedidos = egresosPedidosPagados
   m.egresosExtra   = egresosExtra
   m.egresosTotal   = m.egresosPedidos + m.egresosExtra
+  // `pedidosPendientes` ya no se recorta por período (ver corrección en
+  // `_obtenerPedidosPendientesMontoGlobal`) — mismo criterio que `pendienteCC`
+  // en el bloque 3: es una deuda con proveedores vigente HOY, no algo que
+  // "pertenezca" al rango [desde, hasta] elegido en pantalla.
   m.pedidosPendientes = pedidosPendientesMonto
 
   // 11. Resultado operativo
   m.resultadoEstimado = m.cobradoReal + m.ingresosExtra - m.egresosTotal
 
-  // 12. Tasa de conversión
+  // 12. Tasa de conversión (mismo dataset que "Presupuestado" — todos los estados)
+  const estados           = actividadCotizacion.map(p => p.estado)
   const totalTodos       = estados.length
   const totalConvertidos = estados.filter(e => e === 'aprobado' || e === 'pagado').length
   const totalRechazados  = estados.filter(e => e === 'rechazado').length

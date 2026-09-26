@@ -3,6 +3,7 @@
 // Son exclusivamente de lectura — ninguna mutación vive en este service.
 
 import { supabase } from '../lib/supabase'
+import { obtenerCobradoEnPeriodo } from './cobrosService'
 
 function manejarError(operacion, error) {
   console.error(`[dashboardService] ${operacion}:`, error.message)
@@ -65,6 +66,15 @@ async function contarPresupuestosBorrador() {
 
 /**
  * Cuenta presupuestos aprobados del mes actual.
+ *
+ * NOTA (alcance de la corrección de KPIs de cobro): esta métrica mide
+ * ACTIVIDAD comercial (cuántos presupuestos se aprobaron este mes), no
+ * dinero cobrado — por eso sigue filtrando por `presupuesto.fecha`
+ * (fecha de creación/aprobación) a propósito. No confundir con
+ * `sumarCobradoMes()`, que sí depende de la fecha real de pago. Un
+ * presupuesto 'aprobado' puede no tener `fecha_pago` todavía (Cuenta
+ * Corriente pendiente) y aun así debe contar acá.
+ *
  * Equivale a:
  *   SELECT COUNT(*) FROM Presupuesto
  *   WHERE estado = 'aprobado'
@@ -72,11 +82,7 @@ async function contarPresupuestosBorrador() {
  *   AND fecha <= último día del mes
  */
 async function contarPresupuestosAprobadosMes() {
-  const ahora      = new Date()
-  const primerDia  = new Date(ahora.getFullYear(), ahora.getMonth(), 1)
-    .toISOString().split('T')[0]
-  const ultimoDia  = new Date(ahora.getFullYear(), ahora.getMonth() + 1, 0)
-    .toISOString().split('T')[0]
+  const { primerDia, ultimoDia } = _rangoMesActual()
 
   const { count, error } = await supabase
     .from('presupuesto')
@@ -90,28 +96,49 @@ async function contarPresupuestosAprobadosMes() {
 }
 
 /**
- * Suma ventas (monto) del mes actual para presupuestos aprobados y pagados.
- * Equivale a:
- *   SELECT SUM(monto) FROM Presupuesto
- *   WHERE estado IN ('aprobado','pagado')
- *   AND fecha >= primer día del mes
+ * Calcula el rango [primerDia, ultimoDia] del mes calendario actual, en
+ * formato 'YYYY-MM-DD'. Compartido por las métricas mensuales del Dashboard.
  */
-async function sumarVentasMes() {
+function _rangoMesActual() {
   const ahora     = new Date()
   const primerDia = new Date(ahora.getFullYear(), ahora.getMonth(), 1)
     .toISOString().split('T')[0]
   const ultimoDia = new Date(ahora.getFullYear(), ahora.getMonth() + 1, 0)
     .toISOString().split('T')[0]
+  return { primerDia, ultimoDia }
+}
 
-  const { data, error } = await supabase
-    .from('presupuesto')
-    .select('monto')
-    .in('estado', ['aprobado', 'pagado'])
-    .gte('fecha', primerDia)
-    .lte('fecha', ultimoDia)
-
-  if (error) manejarError('sumarVentasMes', error)
-  return data.reduce((acc, row) => acc + Number(row.monto), 0)
+/**
+ * Dinero REALMENTE cobrado en lo que va del mes actual (base caja).
+ *
+ * CORRECCIÓN (criterio de fecha en KPIs de cobro): esta métrica se llamaba
+ * `sumarVentasMes` y sumaba `presupuesto.monto` para estado IN
+ * ('aprobado','pagado') filtrando por `presupuesto.fecha` — la fecha de
+ * CREACIÓN del presupuesto (Día X), no la fecha en que efectivamente entró
+ * el dinero (Día Y). Consecuencias del bug original:
+ *   - Un presupuesto creado en enero y cobrado en febrero sumaba en el KPI
+ *     de enero, y no aparecía en el de febrero (Escenario 1 de la task).
+ *   - Un presupuesto 'aprobado' pero todavía sin cobrar (Cuenta Corriente
+ *     pendiente) ya sumaba como si fuera plata en caja (Escenario 3: no
+ *     debe contabilizarse hasta que exista fecha de pago real).
+ *
+ * Ahora reutiliza `cobrosService.obtenerCobradoEnPeriodo`, la misma fuente
+ * de verdad que ya usan Estadísticas y Facturas: resuelve, por método de
+ * pago, `presupuesto.fecha_pago` (contado), `saldo.fecha_pago` (CC pagada
+ * de una vez) o la suma de `pago.fecha` de cada aplicación parcial (CC
+ * cobrada de a partes) — nunca la fecha de creación. Un presupuesto
+ * 'aprobado' sin fecha de pago simplemente no aparece en ningún período,
+ * hasta que se registre su cobro.
+ *
+ * Equivale a:
+ *   SELECT COALESCE(SUM(monto_realmente_cobrado), 0)
+ *   FROM <fuente resuelta por cobrosService>
+ *   WHERE fecha_de_cobro_real BETWEEN primer_dia_del_mes AND hoy
+ */
+async function sumarCobradoMes() {
+  const { primerDia, ultimoDia } = _rangoMesActual()
+  const { total } = await obtenerCobradoEnPeriodo(primerDia, ultimoDia)
+  return total
 }
 
 /**
@@ -185,7 +212,7 @@ export async function obtenerDatosDashboard() {
     stockCritico,
     presupuestosBorrador,
     presupuestosAprobadosMes,
-    ventasMes,
+    cobradoMes,
     saldosPendientes,
     pedidosPendientes,
     ultimosPresupuestos,
@@ -195,7 +222,7 @@ export async function obtenerDatosDashboard() {
     contarProductosStockCritico(),
     contarPresupuestosBorrador(),
     contarPresupuestosAprobadosMes(),
-    sumarVentasMes(),
+    sumarCobradoMes(),
     sumarSaldosPendientes(),
     contarPedidosPendientes(),
     obtenerUltimosPresupuestos(5),
@@ -207,7 +234,12 @@ export async function obtenerDatosDashboard() {
     stockCritico,
     presupuestosBorrador,
     presupuestosAprobadosMes,
-    ventasMes,
+    // RENOMBRADO desde `ventasMes` → `cobradoMes`: el valor ya representa
+    // dinero efectivamente cobrado en el mes (fecha de pago real), no
+    // presupuestos creados/aprobados en el mes. Ver nota de ⚠️ BREAKING
+    // CHANGE en la respuesta — requiere actualizar el consumidor en
+    // Dashboard.jsx (`datos.ventasMes` → `datos.cobradoMes`).
+    cobradoMes,
     saldosPendientes,
     pedidosPendientes,
     ultimosPresupuestos,

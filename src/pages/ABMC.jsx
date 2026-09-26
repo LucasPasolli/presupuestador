@@ -2,11 +2,12 @@
 // Página de administración: Alta / Baja / Modificación / Consulta de todas las entidades.
 // REFACTORIZADO: usa exclusivamente las funciones de los servicios.
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   PageHeader, Button, Input, Select, Modal,
   Table, Tr, Td, Badge, Card,
 } from '../components/ui'
+import { useScrollAnchor } from '../hooks/useScrollToTopOnChange'
 import {
   Users, Truck, FileText, ShoppingCart,
   Wallet, TrendingDown, TrendingUp, Tag, Plus, Pencil, Trash2,
@@ -29,8 +30,9 @@ import {
 import {
   obtenerPresupuestos,
   actualizarMetadataPresupuesto,
-  eliminarPresupuesto,
 } from '../services/presupuestosService'
+import { eliminarPresupuestoConReintegro } from '../services/presupuestosIdempotente'
+import { ErrorOperacion } from '../services/idempotencia'
 import {
   obtenerPedidos,
   actualizarEstadosPedido,
@@ -94,21 +96,42 @@ const fmt = (n) =>
 
 const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
 
+// Normaliza texto para búsquedas: minúsculas + sin tildes/diacríticos.
+// NFD descompone caracteres acentuados en base + marca diacrítica combinante
+// (p.ej. "é" → "e" + ´), y como la "ñ" se descompone en "n" + combining tilde
+// (U+0303), este mismo mecanismo también resuelve "ñ" ≈ "n" en la búsqueda
+// (ver Escenario 4 de la US). Solo afecta la comparación: los datos originales
+// (con sus tildes/ñ) se muestran sin modificar en la tabla de resultados.
+const normalizarTexto = (s) =>
+  (s ?? '')
+    .toString()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+
 // ─── Pagination component ─────────────────────────────────────────────────────
 
-function Pagination({ page, total, pageSize, onChange }) {
+function Pagination({ page, total, pageSize, onChange, onNavigate }) {
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   if (totalPages <= 1) return null
   const from = (page - 1) * pageSize + 1
   const to = Math.min(page * pageSize, total)
+  // goTo: cambia de página Y reposiciona el scroll en el MISMO evento de
+  // clic (nunca vía useEffect), para que el reposicionamiento sea siempre
+  // consecuencia directa de la acción del usuario.
+  const goTo = (p) => {
+    onChange(p)
+    onNavigate?.()
+  }
   return (
     <div className="flex items-center justify-between px-6 py-3 border-t border-surface-700">
       <p className="text-surface-400 text-xs font-body tabular-nums">
         {from}–{to} de {total}
       </p>
       <div className="flex gap-2">
-        <Button size="sm" variant="secondary" onClick={() => onChange(Math.max(1, page - 1))} disabled={page === 1}>← Anterior</Button>
-        <Button size="sm" variant="secondary" onClick={() => onChange(Math.min(totalPages, page + 1))} disabled={page === totalPages}>Siguiente →</Button>
+        <Button size="sm" variant="secondary" onClick={() => goTo(Math.max(1, page - 1))} disabled={page === 1}>← Anterior</Button>
+        <Button size="sm" variant="secondary" onClick={() => goTo(Math.min(totalPages, page + 1))} disabled={page === totalPages}>Siguiente →</Button>
       </div>
     </div>
   )
@@ -116,9 +139,21 @@ function Pagination({ page, total, pageSize, onChange }) {
 
 // ─── ConfirmModal ─────────────────────────────────────────────────────────────
 
-function ConfirmModal({ open, onClose, onConfirm, details, message }) {
+function ConfirmModal({
+  open, onClose, onConfirm, details, message,
+  loading = false, confirmLabel = 'Eliminar', error = '', warning = '',
+  // Confirmación explícita: si `requireAck` es true, el botón de confirmar
+  // queda deshabilitado hasta tildar la casilla (acciones que revierten
+  // estados financieros).
+  requireAck = false,
+  ackLabel = 'Entiendo las consecuencias y quiero continuar',
+}) {
+  const [ack, setAck] = useState(false)
+  useEffect(() => { if (!open) setAck(false) }, [open])
+  const bloqueado = loading || (requireAck && !ack)
+
   return (
-    <Modal open={open} onClose={onClose} title="Confirmar eliminación" width="max-w-sm">
+    <Modal open={open} onClose={loading ? () => {} : onClose} title="Confirmar eliminación" width="max-w-sm">
       <div className="flex flex-col items-center gap-4 text-center">
         <AlertTriangle size={36} className="text-red-400" />
         {details && details.length > 0 && (
@@ -132,9 +167,34 @@ function ConfirmModal({ open, onClose, onConfirm, details, message }) {
           </div>
         )}
         <p className="text-surface-200 font-body text-sm">{message || '¿Eliminar este registro?'}</p>
+        {/* Advertencia explícita para acciones destructivas con efectos
+            colaterales (p. ej. reintegro de stock / impacto en cuenta
+            corriente). Deliberadamente separada del mensaje principal para
+            que no pase desapercibida entre el resto del texto. */}
+        {warning && (
+          <div role="alert" className="w-full flex items-start gap-2 bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-3 text-left">
+            <AlertTriangle size={14} className="text-yellow-400 mt-0.5 shrink-0" aria-hidden="true" />
+            <p className="text-yellow-200 text-xs font-body leading-relaxed">{warning}</p>
+          </div>
+        )}
+        {requireAck && (
+          <label className="w-full flex items-start gap-2 text-left cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={ack}
+              onChange={e => setAck(e.target.checked)}
+              disabled={loading}
+              className="mt-0.5 h-4 w-4 shrink-0 accent-red-500 focus:outline-none focus:ring-2 focus:ring-red-400"
+            />
+            <span className="text-surface-200 text-xs font-body leading-relaxed">{ackLabel}</span>
+          </label>
+        )}
+        {error && <p role="alert" className="text-red-400 text-xs font-body">{error}</p>}
         <div className="flex gap-3 w-full">
-          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button variant="danger" className="flex-1" onClick={onConfirm}>Eliminar</Button>
+          <Button variant="secondary" className="flex-1" onClick={onClose} disabled={loading}>Cancelar</Button>
+          <Button variant="danger" className="flex-1" onClick={onConfirm} disabled={bloqueado}>
+            {loading ? 'Eliminando…' : confirmLabel}
+          </Button>
         </div>
       </div>
     </Modal>
@@ -143,11 +203,14 @@ function ConfirmModal({ open, onClose, onConfirm, details, message }) {
 
 // ─── InfoBanner ───────────────────────────────────────────────────────────────
 
-function InfoBanner({ message }) {
+function InfoBanner({ message, onClose }) {
   return (
     <div className="flex items-start gap-3 bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-3">
       <Info size={16} className="text-yellow-400 mt-0.5 shrink-0" />
-      <p className="text-yellow-200 text-xs font-body leading-relaxed">{message}</p>
+      <p className="text-yellow-200 text-xs font-body leading-relaxed flex-1">{message}</p>
+      {onClose && (
+        <button onClick={onClose} className="text-yellow-400/70 hover:text-yellow-200 text-xs shrink-0" aria-label="Cerrar aviso">✕</button>
+      )}
     </div>
   )
 }
@@ -171,6 +234,7 @@ function Clientes() {
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const load = useCallback(async () => {
     try {
@@ -227,15 +291,17 @@ function Clientes() {
     setForm(p => ({ ...p, [k]: val }))
   }
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
-    if (!q) return true
-    if (/^\d+$/.test(q)) return String(r.idCliente) === q
-    const nombreApellido = `${r.nombre} ${r.apellido}`.toLowerCase()
-    const apellidoNombre = `${r.apellido} ${r.nombre}`.toLowerCase()
-    return nombreApellido.includes(q) || apellidoNombre.includes(q) ||
-      r.nombre.toLowerCase().includes(q) || r.apellido.toLowerCase().includes(q)
-  })
+  const filtered = useMemo(() => {
+    const q = normalizarTexto(search)
+    if (!q) return allRows
+    if (/^\d+$/.test(q)) return allRows.filter(r => String(r.idCliente) === q)
+    return allRows.filter(r => {
+      const nombreApellido = normalizarTexto(`${r.nombre} ${r.apellido}`)
+      const apellidoNombre = normalizarTexto(`${r.apellido} ${r.nombre}`)
+      return nombreApellido.includes(q) || apellidoNombre.includes(q) ||
+        normalizarTexto(r.nombre).includes(q) || normalizarTexto(r.apellido).includes(q)
+    })
+  }, [allRows, search])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idCliente === confirm)
 
@@ -254,6 +320,7 @@ function Clientes() {
         <Button icon={Plus} onClick={openCreate}>Nuevo cliente</Button>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['ID', 'Apellido', 'Nombre', 'Apodo', 'Comercio', 'CUIT', 'Teléfono', '']}
           empty={paged.length === 0 ? 'Sin clientes registrados' : null}>
@@ -275,8 +342,9 @@ function Clientes() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar cliente' : 'Nuevo cliente'}>
         <div className="space-y-4">
@@ -329,6 +397,7 @@ function Proveedores() {
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const load = useCallback(async () => {
     try {
@@ -380,15 +449,15 @@ function Proveedores() {
     setForm(p => ({ ...p, [k]: val }))
   }
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
-    if (!q) return true
-    if (/^\d+$/.test(q)) return String(r.idProveedor) === q
-    return (
-      r.nombreFiscal.toLowerCase().includes(q) ||
-      (r.nombreComercial || '').toLowerCase().includes(q)
+  const filtered = useMemo(() => {
+    const q = normalizarTexto(search)
+    if (!q) return allRows
+    if (/^\d+$/.test(q)) return allRows.filter(r => String(r.idProveedor) === q)
+    return allRows.filter(r =>
+      normalizarTexto(r.nombreFiscal).includes(q) ||
+      normalizarTexto(r.nombreComercial || '').includes(q)
     )
-  })
+  }, [allRows, search])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idProveedor === confirm)
 
@@ -407,6 +476,7 @@ function Proveedores() {
         <Button icon={Plus} onClick={openCreate}>Nuevo proveedor</Button>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['ID', 'Nombre fiscal', 'Nombre comercial', 'CUIT/RUT', 'Teléfono', 'Email', '']}
           empty={paged.length === 0 ? 'Sin proveedores' : null}>
@@ -427,8 +497,9 @@ function Proveedores() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar proveedor' : 'Nuevo proveedor'}>
         <div className="space-y-4">
@@ -476,11 +547,22 @@ function Presupuestos() {
   const [originalEstado, setOriginalEstado] = useState(null)
   const [confirm, setConfirm] = useState(null)
   const [confirmRow, setConfirmRow] = useState(null)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
+  const [resumenEliminacion, setResumenEliminacion] = useState(null)
   const [search, setSearch] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [filtroEstado, setFiltroEstado] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
+
+  // Clave de idempotencia del intento de eliminación en curso. Se regenera
+  // cada vez que se abre el modal de confirmación (nuevo intento) y se
+  // conserva entre reintentos del MISMO intento (p. ej. si la RPC falla por
+  // un error de red transitorio y el usuario vuelve a tocar "Eliminar" sin
+  // cerrar el modal) — mismo patrón que NuevoProductoModal en Inventario.jsx.
+  const idempotencyKeyRef = useRef(null)
 
   // Usa los filtros del service server-side en lugar de filtrar en el cliente.
   // Esto corrige el bug principal: obtenerPresupuestos devuelve { data, count },
@@ -552,21 +634,66 @@ function Presupuestos() {
     }
   }
 
+  // Estados que ya descontaron stock en algún momento del flujo (alta directa
+  // 'aprobado'/'pagado' o transición vía actualizarMetadataPresupuesto).
+  // 'borrador' y 'rechazado' nunca descuentan — no corresponde reintegro.
+  const REINTEGRA_ESTADO = (estado) => estado === 'aprobado' || estado === 'pagado'
+
   async function del(id) {
+    setDeleting(true)
+    setDeleteError('')
     try {
-      // eliminarPresupuesto ya borra el saldo asociado internamente
-      await eliminarPresupuesto(id)
+      // eliminarPresupuestoConReintegro es atómica e idempotente: borra el
+      // presupuesto, su detalle y el saldo/pagos de CC asociados, y
+      // reintegra stock si el estado lo amerita — sin costo extra si no
+      // correspondía (la RPC lo detecta sola). Reemplaza a
+      // presupuestosService.eliminarPresupuesto para este botón.
+      const resultado = await eliminarPresupuestoConReintegro({
+        clave: idempotencyKeyRef.current,
+        idPresupuesto: id,
+      })
+
+      setConfirm(null)
+      setConfirmRow(null)
+      load(page)
+
+      // Resumen post-eliminación: solo se muestra si hay algo que el
+      // administrador deba revisar (reintegro parcial o cobros de CC que
+      // se perdieron junto con el saldo). El caso feliz (sin CC, reintegro
+      // completo) no genera ruido en la UI.
+      if (resultado.itemsNoReintegrados?.length || resultado.aplicacionesPagoEliminadas > 0) {
+        const partes = []
+        if (resultado.reintegrado) {
+          partes.push(`Se reintegró stock de ${resultado.itemsReintegrados.length} ítem(s).`)
+        }
+        if (resultado.itemsNoReintegrados?.length) {
+          partes.push(`${resultado.itemsNoReintegrados.length} ítem(s) no se pudieron reponer porque el producto ya no existe en el catálogo — revisar stock manualmente.`)
+        }
+        if (resultado.aplicacionesPagoEliminadas > 0) {
+          partes.push(`Se eliminaron ${resultado.aplicacionesPagoEliminadas} cobro(s) de cuenta corriente por ${fmt(resultado.montoAplicacionesEliminadas)} asociados a este presupuesto.`)
+        }
+        setResumenEliminacion(partes.join(' '))
+      }
     } catch (e) {
-      console.error('[Presupuestos] del:', e)
+      // ErrorOperacion ya trae un mensaje saneado apto para mostrar tal cual.
+      setDeleteError(e instanceof ErrorOperacion ? e.message : 'No se pudo eliminar el presupuesto.')
+    } finally {
+      setDeleting(false)
     }
-    setConfirm(null)
-    setConfirmRow(null)
-    load(page)
   }
 
   function handleConfirm(r) {
+    idempotencyKeyRef.current = crypto.randomUUID()
+    setDeleteError('')
     setConfirm(r.idPresupuesto)
     setConfirmRow(r)
+  }
+
+  function cerrarConfirm() {
+    if (deleting) return // no cerrar en medio de una eliminación en curso
+    setConfirm(null)
+    setConfirmRow(null)
+    setDeleteError('')
   }
 
   const paged = rows
@@ -578,6 +705,10 @@ function Presupuestos() {
 
   return (
     <div className="space-y-4">
+      {resumenEliminacion && (
+        <InfoBanner message={resumenEliminacion} onClose={() => setResumenEliminacion(null)} />
+      )}
+
       <div className="flex gap-2 items-center w-full">
         <div className="flex-1">
           <input
@@ -606,6 +737,7 @@ function Presupuestos() {
         </div>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['#', 'Fecha', 'Cliente', 'Método', 'Monto', 'Estado', '']}
           empty={!loading && paged.length === 0 ? 'Sin presupuestos' : null}>
@@ -633,8 +765,9 @@ function Presupuestos() {
             ))
           }
         </Table>
-        <Pagination page={page} total={total} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={total} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title="Editar presupuesto">
         {editRow && (
@@ -671,7 +804,9 @@ function Presupuestos() {
         )}
       </Modal>
 
-      <ConfirmModal open={!!confirm} onClose={() => { setConfirm(null); setConfirmRow(null) }} onConfirm={() => del(confirm)}
+      <ConfirmModal open={!!confirm} onClose={cerrarConfirm} onConfirm={() => del(confirm)}
+        loading={deleting}
+        error={deleteError}
         details={confirmRow ? [
           ['ID', `#${confirmRow.idPresupuesto}`],
           ['Cliente', confirmRow.clienteNombre],
@@ -680,6 +815,15 @@ function Presupuestos() {
           ['Estado', confirmRow.estado],
         ] : []}
         message="¿Eliminar este presupuesto y todos sus detalles?"
+        // ⚠️ Esta acción borra el presupuesto ENTERO (detalle, saldo y cobros
+        // de CC incluidos) — no confundir con "Eliminar saldo" de la pestaña
+        // Saldos, que solo revierte el cobro y deja el presupuesto intacto.
+        // El texto lo aclara explícitamente para evitar ese error.
+        warning={confirmRow && REINTEGRA_ESTADO(confirmRow.estado)
+          ? `Este presupuesto está "${confirmRow.estado}" y ya descontó stock. Al eliminarlo (no solo su saldo — el PRESUPUESTO COMPLETO) el sistema reintegrará automáticamente las cantidades al stock disponible${confirmRow.saldoEstado ? ', y se eliminará también el saldo de cuenta corriente asociado (incluyendo cualquier cobro parcial ya registrado)' : ''}. Si solo querés revertir el cobro sin borrar el presupuesto, cancelá y usá "Eliminar saldo" desde la pestaña Saldos. Esta acción no se puede deshacer.`
+          : ''}
+        requireAck={!!(confirmRow && REINTEGRA_ESTADO(confirmRow.estado))}
+        ackLabel="Entiendo que esto elimina el presupuesto completo (no solo el saldo) y no se puede deshacer"
       />
     </div>
   )
@@ -701,6 +845,7 @@ function Pedidos() {
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const load = useCallback(async () => {
     try {
@@ -746,15 +891,15 @@ function Pedidos() {
 
   const fe = (k) => (e) => setEditRow(p => ({ ...p, [k]: e.target.value }))
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
+  const filtered = useMemo(() => allRows.filter(r => {
+    const q = normalizarTexto(search)
     const matchFrom = !dateFrom || r.fecha >= dateFrom
     const matchTo = !dateTo || r.fecha <= dateTo
     if (!q) return matchFrom && matchTo
     if (/^\d+$/.test(q)) return String(r.idPedido) === q && matchFrom && matchTo
-    const matchQ = (r.provNombre || '').toLowerCase().includes(q)
+    const matchQ = normalizarTexto(r.provNombre || '').includes(q)
     return matchQ && matchFrom && matchTo
-  })
+  }), [allRows, search, dateFrom, dateTo])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idPedido === confirm)
 
@@ -780,6 +925,7 @@ function Pedidos() {
         </div>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['#', 'Fecha', 'Proveedor', 'Monto', 'Método', 'Pago', 'Logística', '']}
           empty={paged.length === 0 ? 'Sin pedidos' : null}>
@@ -801,8 +947,9 @@ function Pedidos() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title="Editar pedido de compra">
         {editRow && (
@@ -860,6 +1007,16 @@ function Saldos() {
   const [dateTo, setDateTo] = useState('')
   const [filtroEstado, setFiltroEstado] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
+  // Edición: estado con el que se abrió el modal (para detectar transiciones
+  // reales), confirmación explícita de la reversión y feedback de guardado.
+  const [originalEstado, setOriginalEstado] = useState(null)
+  const [ackRevertir, setAckRevertir] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [resumenOperacion, setResumenOperacion] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -882,52 +1039,134 @@ function Saldos() {
   useEffect(() => { load() }, [load])
   useEffect(() => { setPage(1) }, [search, dateFrom, dateTo, filtroEstado])
 
-  function openEdit(r) { setEditRow({ ...r }); setModal(true) }
+  function openEdit(r) {
+    setEditRow({ ...r })
+    setOriginalEstado(r.estado)
+    setAckRevertir(false)
+    setSaveError('')
+    setModal(true)
+  }
+
+  function cerrarEdit() {
+    if (saving) return
+    setModal(false)
+    setSaveError('')
+  }
+
+  // Volver a "Pendiente" un saldo que ya tenía cobros (pagado o parcial) es una
+  // reversión con efectos colaterales: requiere confirmación explícita.
+  const revierteCobros = !!editRow && editRow.estado === 'pendiente'
+    && (originalEstado === 'pagado' || originalEstado === 'parcial')
 
   async function save() {
+    setSaveError('')
+
+    // Solo actuamos sobre el estado si el usuario lo CAMBIÓ. Antes, guardar un
+    // saldo 'pendiente'/'parcial' (p. ej. para editar solo el vencimiento)
+    // caía en el else y ejecutaba revertirPagoSaldo igualmente.
+    const pasaAPendiente = editRow.estado === 'pendiente' && originalEstado !== 'pendiente'
+
+    if (editRow.estado === 'pagado' && !editRow.fechaPago) {
+      setSaveError('Ingresá la fecha real de pago para marcar el saldo como pagado.')
+      return
+    }
+    if (pasaAPendiente && revierteCobros && !ackRevertir) {
+      setSaveError('Confirmá que entendés las consecuencias de revertir el pago.')
+      return
+    }
+
+    setSaving(true)
     try {
       await actualizarSaldo(editRow.idSaldo, {
         monto:    editRow.monto,
         fechaVto: editRow.fechaVto ?? null,
       })
-      // Actualizar estado y fechaPago directamente vía supabase no está en el
-      // service actual como operación combinada. Usamos la función interna
-      // del service más cercana: marcarSaldoPagado si pasa a pagado,
-      // revertirPagoSaldo si vuelve a pendiente.
-      // Importamos dinámicamente para mantener flexibilidad.
+      // Importación dinámica: mantiene el scope del módulo liviano.
       const { marcarSaldoPagado, revertirPagoSaldo } = await import('../services/saldosService')
       if (editRow.estado === 'pagado') {
-        await marcarSaldoPagado(editRow.idSaldo, editRow.idPresupuesto, editRow.fechaPago || null)
-      } else {
-        await revertirPagoSaldo(editRow.idSaldo)
+        await marcarSaldoPagado(editRow.idSaldo, editRow.idPresupuesto, editRow.fechaPago)
+      } else if (pasaAPendiente) {
+        const r = await revertirPagoSaldo(editRow.idSaldo)
+        const partes = [`Saldo #${r.idSaldo} vuelto a "Pendiente" por su monto completo.`]
+        if (r.presupuestoRevertido) {
+          partes.push(`El presupuesto #${r.idPresupuesto} volvió de "Pagado" a "Aprobado".`)
+        }
+        if (r.aplicacionesEliminadas > 0) {
+          partes.push(`Se eliminaron ${r.aplicacionesEliminadas} cobro(s) por ${fmt(r.montoAplicacionesEliminadas)}.`)
+        }
+        setResumenOperacion(partes.join(' '))
       }
-      setModal(false); load()
+      setModal(false)
+      await load()
     } catch (e) {
-      console.error(e)
+      // Mensaje ya saneado por el service; antes el error se perdía en consola.
+      setSaveError(e?.message || 'No se pudo guardar el saldo.')
+    } finally {
+      setSaving(false)
     }
   }
 
-  async function del(id) {
-    try {
-      await eliminarSaldo(id)
-    } catch (e) {
-      console.error(e)
+  // Cobrado hasta el momento sobre un saldo (monto original − remanente).
+  const cobradoDe = (r) => Math.max(0, Number(r.monto) - Number(r.montoPendiente ?? r.monto))
+
+  // Eliminar un saldo pagado (o con cobros) tiene efectos colaterales sobre el
+  // presupuesto y sobre los KPIs: se exige confirmación explícita.
+  const requiereAck = (r) => !!r && (r.estado === 'pagado' || cobradoDe(r) > 0)
+
+  function advertenciaEliminacion(r) {
+    if (!r) return ''
+    if (r.estado === 'pagado') {
+      return `Este saldo figura como PAGADO. Al eliminarlo se revertirá el estado de pago del presupuesto #${r.idPresupuesto} (volverá a "Aprobado", sin fecha de pago) y se eliminarán los cobros registrados contra este saldo: dejarán de contarse en Estadísticas y en Facturación. Esta acción no se puede deshacer.`
     }
-    setConfirm(null); load()
+    if (cobradoDe(r) > 0) {
+      return `Este saldo ya tiene cobros parciales por ${fmt(cobradoDe(r))}. Al eliminarlo, esos cobros se eliminan también y dejarán de contarse en Estadísticas y en Facturación. Esta acción no se puede deshacer.`
+    }
+    return ''
+  }
+
+  async function del(id) {
+    setDeleting(true)
+    setDeleteError('')
+    try {
+      const r = await eliminarSaldo(id)
+      setConfirm(null)
+
+      const partes = [`Saldo #${r.idSaldo} eliminado.`]
+      if (r.presupuestoRevertido) {
+        partes.push(`El presupuesto #${r.idPresupuesto} volvió de "Pagado" a "Aprobado": ya podés registrar el cobro nuevamente desde Historial.`)
+      }
+      if (r.aplicacionesEliminadas > 0) {
+        partes.push(`Se eliminaron ${r.aplicacionesEliminadas} cobro(s) por ${fmt(r.montoAplicacionesEliminadas)}.`)
+      }
+      setResumenOperacion(partes.join(' '))
+      await load()
+    } catch (e) {
+      // El service ya devuelve un mensaje saneado; se muestra en el modal
+      // (antes el error se tragaba y el modal se cerraba como si hubiera salido bien).
+      setDeleteError(e?.message || 'No se pudo eliminar el saldo.')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  function cerrarConfirm() {
+    if (deleting) return
+    setConfirm(null)
+    setDeleteError('')
   }
 
   const fe = (k) => (e) => setEditRow(p => ({ ...p, [k]: e.target.value }))
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
+  const filtered = useMemo(() => allRows.filter(r => {
+    const q = normalizarTexto(search)
     const matchEstado = !filtroEstado || r.estado === filtroEstado
     const matchFrom = !dateFrom || r.fechaFin >= dateFrom
     const matchTo = !dateTo || r.fechaFin <= dateTo
     if (!q) return matchEstado && matchFrom && matchTo
     if (/^\d+$/.test(q)) return String(r.idSaldo) === q && matchEstado && matchFrom && matchTo
-    const matchQ = (r.clienteNombre || '').toLowerCase().includes(q)
+    const matchQ = normalizarTexto(r.clienteNombre || '').includes(q)
     return matchQ && matchEstado && matchFrom && matchTo
-  })
+  }), [allRows, search, filtroEstado, dateFrom, dateTo])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idSaldo === confirm)
 
@@ -960,6 +1199,13 @@ function Saldos() {
         </div>
       </div>
 
+      {resumenOperacion && (
+        <div role="status" aria-live="polite">
+          <InfoBanner message={resumenOperacion} onClose={() => setResumenOperacion('')} />
+        </div>
+      )}
+
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['#', 'Cliente', 'Presup.', 'Monto', 'Vence', 'Estado', '']}
           empty={paged.length === 0 ? 'Sin saldos' : null}>
@@ -974,33 +1220,57 @@ function Saldos() {
               <Td>
                 <div className="flex gap-2 justify-end">
                   <Button variant="ghost" size="sm" icon={Pencil} onClick={() => openEdit(r)} />
-                  <Button variant="ghost" size="sm" icon={Trash2} className="hover:text-red-400" onClick={() => setConfirm(r.idSaldo)} />
+                  <Button variant="ghost" size="sm" icon={Trash2} className="hover:text-red-400" aria-label={`Eliminar saldo #${r.idSaldo}`}
+                    onClick={() => { setDeleteError(''); setConfirm(r.idSaldo) }} />
                 </div>
               </Td>
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
-      <Modal open={modal} onClose={() => setModal(false)} title="Editar saldo">
+      <Modal open={modal} onClose={cerrarEdit} title="Editar saldo">
         {editRow && (
           <div className="space-y-4">
             <p className="text-surface-400 text-xs">Saldo #{editRow.idSaldo} — {editRow.clienteNombre} — {fmt(editRow.monto)}</p>
             <Select label="Estado" value={editRow.estado} onChange={fe('estado')}>
               <option value="pendiente">Pendiente</option>
+              {/* 'parcial' lo genera el motor de pagos; se muestra (no elegible)
+                  para que el select refleje el estado real y no parezca 'Pendiente'. */}
+              {originalEstado === 'parcial' && <option value="parcial" disabled>Parcial</option>}
               <option value="pagado">Pagado</option>
             </Select>
             <Input label="Fecha de pago" type="date" value={editRow.fechaPago || ''} onChange={fe('fechaPago')} />
+
+            {revierteCobros && (
+              <div className="space-y-3">
+                <InfoBanner message={originalEstado === 'pagado'
+                  ? `Al volver a "Pendiente" se revertirá el pago: el presupuesto #${editRow.idPresupuesto} volverá a "Aprobado" (sin fecha de pago), el saldo deberá su monto completo y se eliminarán los cobros registrados contra él (dejan de contarse en Estadísticas y Facturación). No se puede deshacer.`
+                  : `Este saldo tiene cobros parciales. Al volver a "Pendiente" se eliminan esos cobros y el saldo deberá su monto completo (dejan de contarse en Estadísticas y Facturación). No se puede deshacer.`} />
+                <label className="flex items-start gap-2 cursor-pointer select-none">
+                  <input type="checkbox" checked={ackRevertir} onChange={e => setAckRevertir(e.target.checked)} disabled={saving}
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-red-500 focus:outline-none focus:ring-2 focus:ring-red-400" />
+                  <span className="text-surface-200 text-xs font-body leading-relaxed">Entiendo que se revertirá el estado de pago y se eliminarán los cobros asociados</span>
+                </label>
+              </div>
+            )}
+
+            {saveError && <p role="alert" className="text-red-400 text-xs font-body">{saveError}</p>}
             <div className="flex gap-3 pt-2">
-              <Button variant="secondary" className="flex-1" onClick={() => setModal(false)}>Cancelar</Button>
-              <Button className="flex-1" onClick={save}>Guardar</Button>
+              <Button variant="secondary" className="flex-1" onClick={cerrarEdit} disabled={saving}>Cancelar</Button>
+              <Button className="flex-1" onClick={save} disabled={saving || (revierteCobros && !ackRevertir)}>
+                {saving ? 'Guardando…' : 'Guardar'}
+              </Button>
             </div>
           </div>
         )}
       </Modal>
 
-      <ConfirmModal open={!!confirm} onClose={() => setConfirm(null)} onConfirm={() => del(confirm)}
+      <ConfirmModal open={!!confirm} onClose={cerrarConfirm} onConfirm={() => del(confirm)}
+        loading={deleting}
+        error={deleteError}
         details={confirmRow ? [
           ['ID saldo', `#${confirmRow.idSaldo}`],
           ['Presupuesto', `#${confirmRow.idPresupuesto}`],
@@ -1009,6 +1279,9 @@ function Saldos() {
           ['Estado', confirmRow.estado],
         ] : []}
         message="¿Eliminar este saldo?"
+        warning={advertenciaEliminacion(confirmRow)}
+        requireAck={requiereAck(confirmRow)}
+        ackLabel="Entiendo que se revertirá el estado de pago y se eliminarán los cobros asociados"
       />
     </div>
   )
@@ -1018,7 +1291,7 @@ function Saldos() {
 // EGRESOS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const CATEGORIAS_EGRESO = ['ART', 'Comida', 'Envíos', 'Flete', 'Impuesto a las ganancias', 'Ingresos Brutos', 'IVA', 'Mantenimiento', 'Publicidad', 'Seguro de vida', 'Servicios', 'Sueldo', 'Transporte', 'Otro']
+const CATEGORIAS_EGRESO = ['ART', 'Comida', 'Débitos CC', 'Envíos', 'Flete', 'Impuesto a las ganancias', 'Ingresos Brutos', 'IVA', 'Mantenimiento', 'Publicidad', 'Retención de Ingresos Brutos', 'Seguro de vida', 'Servicios', 'Sueldo', 'Transporte', 'Otro']
 const EGRESO_BLANK = { fecha: new Date().toISOString().slice(0, 10), categoria: 'Otro', descripcion: '', monto: '', metodoPago: 'efectivo' }
 
 function Egresos() {
@@ -1034,6 +1307,7 @@ function Egresos() {
   const [filtCat, setFiltCat] = useState('')
   const [filtMetodo, setFiltMetodo] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const load = useCallback(async () => {
     try {
@@ -1078,17 +1352,17 @@ function Egresos() {
   const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }))
   const fn = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value === '' ? '' : Number(e.target.value) }))
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
+  const filtered = useMemo(() => allRows.filter(r => {
+    const q = normalizarTexto(search)
     const matchCat = !filtCat || r.categoria === filtCat
     const matchMetodo = !filtMetodo || r.metodoPago === filtMetodo
     const matchFrom = !dateFrom || r.fecha >= dateFrom
     const matchTo = !dateTo || r.fecha <= dateTo
     if (!q) return matchCat && matchMetodo && matchFrom && matchTo
     if (/^\d+$/.test(q)) return String(r.idEgreso) === q && matchCat && matchMetodo && matchFrom && matchTo
-    const matchQ = r.descripcion.toLowerCase().includes(q) || r.categoria.toLowerCase().includes(q)
+    const matchQ = normalizarTexto(r.descripcion).includes(q) || normalizarTexto(r.categoria).includes(q)
     return matchQ && matchCat && matchMetodo && matchFrom && matchTo
-  })
+  }), [allRows, search, filtCat, filtMetodo, dateFrom, dateTo])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idEgreso === confirm)
 
@@ -1129,6 +1403,7 @@ function Egresos() {
         <Button icon={Plus} onClick={openCreate}>Nuevo egreso</Button>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['Fecha', 'Categoría', 'Descripción', 'Método', 'Monto', '']}
           empty={paged.length === 0 ? 'Sin egresos' : null}>
@@ -1148,8 +1423,9 @@ function Egresos() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar egreso' : 'Nuevo egreso'}>
         <div className="space-y-4">
@@ -1212,6 +1488,7 @@ function Ingresos() {
   const [dateTo, setDateTo] = useState('')
   const [filtCat, setFiltCat] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const load = useCallback(async () => {
     try {
@@ -1256,16 +1533,16 @@ function Ingresos() {
   const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }))
   const fn = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value === '' ? '' : Number(e.target.value) }))
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
+  const filtered = useMemo(() => allRows.filter(r => {
+    const q = normalizarTexto(search)
     const matchCat = !filtCat || r.categoria === filtCat
     const matchFrom = !dateFrom || r.fecha >= dateFrom
     const matchTo = !dateTo || r.fecha <= dateTo
     if (!q) return matchCat && matchFrom && matchTo
     if (/^\d+$/.test(q)) return String(r.idIngreso) === q && matchCat && matchFrom && matchTo
-    const matchQ = r.descripcion.toLowerCase().includes(q) || (r.categoria || '').toLowerCase().includes(q)
+    const matchQ = normalizarTexto(r.descripcion).includes(q) || normalizarTexto(r.categoria || '').includes(q)
     return matchQ && matchCat && matchFrom && matchTo
-  })
+  }), [allRows, search, filtCat, dateFrom, dateTo])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idIngreso === confirm)
 
@@ -1298,6 +1575,7 @@ function Ingresos() {
         <Button icon={Plus} onClick={openCreate}>Nuevo ingreso</Button>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['#', 'Fecha', 'Categoría', 'Descripción', 'Monto', '']}
           empty={paged.length === 0 ? 'Sin ingresos registrados' : null}>
@@ -1317,8 +1595,9 @@ function Ingresos() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar ingreso' : 'Nuevo ingreso'}>
         <div className="space-y-4">
@@ -1375,6 +1654,7 @@ function Inversiones() {
   const [dateTo, setDateTo] = useState('')
   const [filtCat, setFiltCat] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
   const [retirarCat, setRetirarCat] = useState('FCI')
   const [retirarMonto, setRetirarMonto] = useState('')
   const [retirarFecha, setRetirarFecha] = useState(new Date().toISOString().slice(0, 10))
@@ -1491,15 +1771,15 @@ function Inversiones() {
 
   const totalGeneral = totalesPorCat.reduce((a, t) => a + t.neto, 0)
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
+  const filtered = useMemo(() => allRows.filter(r => {
+    const q = normalizarTexto(search)
     const matchCat = !filtCat || r.categoria === filtCat
     const matchFrom = !dateFrom || r.fecha >= dateFrom
     const matchTo = !dateTo || r.fecha <= dateTo
     if (!q) return matchCat && matchFrom && matchTo
     if (/^\d+$/.test(q)) return String(r.idInversion) === q && matchCat && matchFrom && matchTo
-    return (r.descripcion.toLowerCase().includes(q) || r.categoria.toLowerCase().includes(q)) && matchCat && matchFrom && matchTo
-  })
+    return (normalizarTexto(r.descripcion).includes(q) || normalizarTexto(r.categoria).includes(q)) && matchCat && matchFrom && matchTo
+  }), [allRows, search, filtCat, dateFrom, dateTo])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idInversion === confirm)
 
@@ -1557,6 +1837,7 @@ function Inversiones() {
         <Button icon={Plus} onClick={openCreate} className="bg-teal-600/80 hover:bg-teal-500/90 border-teal-500/50 text-white">Nueva inversión</Button>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['#', 'Fecha', 'Categoría', 'Descripción', 'Estado', 'Monto', '']}
           empty={paged.length === 0 ? 'Sin inversiones registradas' : null}>
@@ -1579,8 +1860,9 @@ function Inversiones() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar inversión' : 'Nueva inversión'}>
         <div className="space-y-4">
@@ -1718,6 +2000,7 @@ function Categorias() {
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const load = useCallback(async () => {
     try {
@@ -1766,12 +2049,12 @@ function Categorias() {
 
   const f = (k) => (e) => setForm(p => ({ ...p, [k]: e.target.value }))
 
-  const filtered = allRows.filter(r => {
-    const q = search.trim().toLowerCase()
-    if (!q) return true
-    if (/^\d+$/.test(q)) return String(r.idCategoria) === q
-    return r.nombre.toLowerCase().includes(q)
-  })
+  const filtered = useMemo(() => {
+    const q = normalizarTexto(search)
+    if (!q) return allRows
+    if (/^\d+$/.test(q)) return allRows.filter(r => String(r.idCategoria) === q)
+    return allRows.filter(r => normalizarTexto(r.nombre).includes(q))
+  }, [allRows, search])
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
   const confirmRow = allRows.find(r => r.idCategoria === confirm)
 
@@ -1790,6 +2073,7 @@ function Categorias() {
         <Button icon={Plus} onClick={openCreate}>Nueva categoría</Button>
       </div>
 
+      <div ref={tableAnchorRef}>
       <Card>
         <Table headers={['ID', 'Nombre', 'Productos', '']}
           empty={paged.length === 0 ? 'Sin categorías' : null}>
@@ -1807,8 +2091,9 @@ function Categorias() {
             </Tr>
           ))}
         </Table>
-        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
+        <Pagination page={page} total={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} onNavigate={scrollToStart} />
       </Card>
+      </div>
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar categoría' : 'Nueva categoría'}>
         <div className="space-y-4">

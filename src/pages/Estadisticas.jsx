@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { obtenerMetricas, obtenerTicketPromedioPorCliente } from '../services/estadisticasService'
 import { useDebounce } from '../hooks/useDebounce'
+import { useScrollAnchor, useResetScrollAnchor } from '../hooks/useScrollToTopOnChange'
 import { Card, PageHeader, Button } from '../components/ui'
 import {
   TrendingUp, TrendingDown, Wallet, Clock, Users, Package,
@@ -196,6 +197,7 @@ function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
 
   useLockBodyScroll(open)
   const scrollRef = useAutoFocusScrollable(open)
+  const resetScroll = useResetScrollAnchor(scrollRef)
 
   if (!open) return null
 
@@ -298,12 +300,12 @@ function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
               Página {pagina} de {totalPaginas} · {productosMostrados.length} artículos
             </span>
             <div className="flex items-center gap-1">
-              <button onClick={() => setPagina(1)} disabled={pagina === 1}
+              <button onClick={() => { setPagina(1); resetScroll() }} disabled={pagina === 1}
                 className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 «
               </button>
-              <button onClick={() => setPagina(v => Math.max(1, v - 1))} disabled={pagina === 1}
+              <button onClick={() => { setPagina(v => Math.max(1, v - 1)); resetScroll() }} disabled={pagina === 1}
                 className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 ‹ Ant.
@@ -321,7 +323,7 @@ function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
                   item === '…' ? (
                     <span key={`sep-${idx}`} className="px-2 text-surface-600 text-xs">…</span>
                   ) : (
-                    <button key={item} onClick={() => setPagina(item)}
+                    <button key={item} onClick={() => { setPagina(item); resetScroll() }}
                       className={`w-8 h-8 rounded-lg text-xs font-body font-medium transition-all
                         ${item === pagina
                           ? 'bg-brand-500 text-white'
@@ -331,12 +333,12 @@ function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
                   )
                 )}
 
-              <button onClick={() => setPagina(v => Math.min(totalPaginas, v + 1))} disabled={pagina === totalPaginas}
+              <button onClick={() => { setPagina(v => Math.min(totalPaginas, v + 1)); resetScroll() }} disabled={pagina === totalPaginas}
                 className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 Sig. ›
               </button>
-              <button onClick={() => setPagina(totalPaginas)} disabled={pagina === totalPaginas}
+              <button onClick={() => { setPagina(totalPaginas); resetScroll() }} disabled={pagina === totalPaginas}
                 className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 »
@@ -361,6 +363,7 @@ function ModalProductosIncompletos({ open, onClose, productos }) {
 
   useLockBodyScroll(open)
   const scrollRef = useAutoFocusScrollable(open)
+  const resetScroll = useResetScrollAnchor(scrollRef)
 
   if (!open) return null
 
@@ -451,12 +454,12 @@ function ModalProductosIncompletos({ open, onClose, productos }) {
               Página {pagina} de {totalPaginas} · {productos.length} productos
             </span>
             <div className="flex items-center gap-1">
-              <button onClick={() => setPagina(1)} disabled={pagina === 1}
+              <button onClick={() => { setPagina(1); resetScroll() }} disabled={pagina === 1}
                 className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 «
               </button>
-              <button onClick={() => setPagina(v => Math.max(1, v - 1))} disabled={pagina === 1}
+              <button onClick={() => { setPagina(v => Math.max(1, v - 1)); resetScroll() }} disabled={pagina === 1}
                 className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 ‹ Ant.
@@ -474,7 +477,7 @@ function ModalProductosIncompletos({ open, onClose, productos }) {
                   item === '…' ? (
                     <span key={`sep-${idx}`} className="px-2 text-surface-600 text-xs">…</span>
                   ) : (
-                    <button key={item} onClick={() => setPagina(item)}
+                    <button key={item} onClick={() => { setPagina(item); resetScroll() }}
                       className={`w-8 h-8 rounded-lg text-xs font-body font-medium transition-all
                         ${item === pagina
                           ? 'bg-brand-500 text-white'
@@ -484,12 +487,12 @@ function ModalProductosIncompletos({ open, onClose, productos }) {
                   )
                 )}
 
-              <button onClick={() => setPagina(v => Math.min(totalPaginas, v + 1))} disabled={pagina === totalPaginas}
+              <button onClick={() => { setPagina(v => Math.min(totalPaginas, v + 1)); resetScroll() }} disabled={pagina === totalPaginas}
                 className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 Sig. ›
               </button>
-              <button onClick={() => setPagina(totalPaginas)} disabled={pagina === totalPaginas}
+              <button onClick={() => { setPagina(totalPaginas); resetScroll() }} disabled={pagina === totalPaginas}
                 className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 »
@@ -511,12 +514,14 @@ function RankingProductosPorIngresos({ productos, desde, hasta }) {
 
   // Si cambia el período (nueva lista), volvemos a la página 1.
   useEffect(() => { setPagina(1) }, [productos])
+  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const totalPaginas = Math.max(1, Math.ceil(productos.length / PAGE_SIZE_INGRESOS))
   const inicio       = (pagina - 1) * PAGE_SIZE_INGRESOS
   const pagItems     = productos.slice(inicio, inicio + PAGE_SIZE_INGRESOS)
 
   return (
+    <div ref={tableAnchorRef}>
     <Card className="p-6">
       <h3 className="font-body font-semibold text-white text-sm mb-1 flex items-center gap-2">
         <DollarSign size={15} className="text-brand-500" />
@@ -582,13 +587,13 @@ function RankingProductosPorIngresos({ productos, desde, hasta }) {
                 Página {pagina} de {totalPaginas} · {productos.length} productos
               </span>
               <div className="flex items-center gap-1">
-                <button onClick={() => setPagina(v => Math.max(1, v - 1))} disabled={pagina === 1}
+                <button onClick={() => { setPagina(v => Math.max(1, v - 1)); scrollToStart() }} disabled={pagina === 1}
                   className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
                              hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                   ‹ Ant.
                 </button>
                 <span className="px-2 text-xs font-body text-surface-300">{pagina} / {totalPaginas}</span>
-                <button onClick={() => setPagina(v => Math.min(totalPaginas, v + 1))} disabled={pagina === totalPaginas}
+                <button onClick={() => { setPagina(v => Math.min(totalPaginas, v + 1)); scrollToStart() }} disabled={pagina === totalPaginas}
                   className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
                              hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                   Sig. ›
@@ -599,6 +604,7 @@ function RankingProductosPorIngresos({ productos, desde, hasta }) {
         </>
       )}
     </Card>
+    </div>
   )
 }
 
@@ -714,8 +720,10 @@ function ModalDemoraClientes({ open, onClose, clientes }) {
   const [pagina, setPagina]   = useState(1)
   const [sortKey, setSortKey] = useState('demoraPromedioDias')
   const [sortDir, setSortDir] = useState('desc') // 'asc' | 'desc'
+  const scrollRef = useRef(null)
 
   useEffect(() => { if (open) setPagina(1) }, [open])
+  const resetScroll = useResetScrollAnchor(scrollRef)
 
   if (!open) return null
 
@@ -777,7 +785,7 @@ function ModalDemoraClientes({ open, onClose, clientes }) {
         </div>
 
         {/* Tabla */}
-        <div className="overflow-y-auto flex-1">
+        <div ref={scrollRef} className="overflow-y-auto flex-1">
           {clientes.length === 0 ? (
             <div className="text-center py-16 text-surface-500 font-body text-sm px-6">
               Todavía no hay saldos de Cuenta Corriente cobrados con fecha de vencimiento
@@ -842,12 +850,12 @@ function ModalDemoraClientes({ open, onClose, clientes }) {
               Página {pagina} de {totalPaginas} · {ordenados.length} clientes
             </span>
             <div className="flex items-center gap-1">
-              <button onClick={() => setPagina(1)} disabled={pagina === 1}
+              <button onClick={() => { setPagina(1); resetScroll() }} disabled={pagina === 1}
                 className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 «
               </button>
-              <button onClick={() => setPagina(v => Math.max(1, v - 1))} disabled={pagina === 1}
+              <button onClick={() => { setPagina(v => Math.max(1, v - 1)); resetScroll() }} disabled={pagina === 1}
                 className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 ‹ Ant.
@@ -864,7 +872,7 @@ function ModalDemoraClientes({ open, onClose, clientes }) {
                   item === '…' ? (
                     <span key={`sep-${idx}`} className="px-2 text-surface-600 text-xs">…</span>
                   ) : (
-                    <button key={item} onClick={() => setPagina(item)}
+                    <button key={item} onClick={() => { setPagina(item); resetScroll() }}
                       className={`w-8 h-8 rounded-lg text-xs font-body font-medium transition-all
                         ${item === pagina
                           ? 'bg-brand-500 text-white'
@@ -874,12 +882,12 @@ function ModalDemoraClientes({ open, onClose, clientes }) {
                   )
                 )}
 
-              <button onClick={() => setPagina(v => Math.min(totalPaginas, v + 1))} disabled={pagina === totalPaginas}
+              <button onClick={() => { setPagina(v => Math.min(totalPaginas, v + 1)); resetScroll() }} disabled={pagina === totalPaginas}
                 className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 Sig. ›
               </button>
-              <button onClick={() => setPagina(totalPaginas)} disabled={pagina === totalPaginas}
+              <button onClick={() => { setPagina(totalPaginas); resetScroll() }} disabled={pagina === totalPaginas}
                 className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 »
@@ -940,6 +948,7 @@ function ModalTicketPromedioClientes({ open, onClose, desde, hasta, formatoMonto
 
   useLockBodyScroll(open)
   const scrollRef = useAutoFocusScrollable(open)
+  const resetScroll = useResetScrollAnchor(scrollRef)
 
   const cargarDatos = useCallback((termino) => {
     if (!desde || !hasta) return
@@ -1136,12 +1145,12 @@ function ModalTicketPromedioClientes({ open, onClose, desde, hasta, formatoMonto
               Página {pagina} de {totalPaginas} · {ordenados.length} clientes
             </span>
             <div className="flex items-center gap-1">
-              <button onClick={() => setPagina(1)} disabled={pagina === 1}
+              <button onClick={() => { setPagina(1); resetScroll() }} disabled={pagina === 1}
                 className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 «
               </button>
-              <button onClick={() => setPagina(v => Math.max(1, v - 1))} disabled={pagina === 1}
+              <button onClick={() => { setPagina(v => Math.max(1, v - 1)); resetScroll() }} disabled={pagina === 1}
                 className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 ‹ Ant.
@@ -1158,7 +1167,7 @@ function ModalTicketPromedioClientes({ open, onClose, desde, hasta, formatoMonto
                   item === '…' ? (
                     <span key={`sep-${idx}`} className="px-2 text-surface-600 text-xs">…</span>
                   ) : (
-                    <button key={item} onClick={() => setPagina(item)}
+                    <button key={item} onClick={() => { setPagina(item); resetScroll() }}
                       className={`w-8 h-8 rounded-lg text-xs font-body font-medium transition-all
                         ${item === pagina
                           ? 'bg-brand-500 text-white'
@@ -1168,12 +1177,12 @@ function ModalTicketPromedioClientes({ open, onClose, desde, hasta, formatoMonto
                   )
                 )}
 
-              <button onClick={() => setPagina(v => Math.min(totalPaginas, v + 1))} disabled={pagina === totalPaginas}
+              <button onClick={() => { setPagina(v => Math.min(totalPaginas, v + 1)); resetScroll() }} disabled={pagina === totalPaginas}
                 className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 Sig. ›
               </button>
-              <button onClick={() => setPagina(totalPaginas)} disabled={pagina === totalPaginas}
+              <button onClick={() => { setPagina(totalPaginas); resetScroll() }} disabled={pagina === totalPaginas}
                 className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
                            hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
                 »
@@ -1293,8 +1302,8 @@ export default function Estadisticas() {
 
       {/* ── KPIs principales ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KpiCard icon={TrendingUp}  label="Presupuestado"       value={formatoMonto(m.facturadoTotal)}   color="brand"
-          sub={`${m.totalPresupuestos} presupuesto${m.totalPresupuestos!==1?'s':''}`} />
+        <KpiCard icon={TrendingUp}  label="Presupuestado"       value={formatoMonto(m.totalCotizado)}   color="brand"
+          sub={`${m.cantidadCotizaciones} presupuesto${m.cantidadCotizaciones!==1?'s':''}${m.totalRechazados ? ` · ${m.totalRechazados} rechazado${m.totalRechazados!==1?'s':''}` : ''}`} />
         <KpiCard icon={Wallet}      label="Cobrado real"    value={formatoMonto(m.cobradoReal)}       color="green"
           sub={`${pct(m.cobradoReal, m.facturadoTotal)} del total`} />
         <KpiCard icon={TrendingDown} label="Egresos pagados" value={formatoMonto(m.egresosTotal)} color="red"
