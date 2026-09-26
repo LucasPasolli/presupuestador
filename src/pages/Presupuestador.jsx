@@ -1082,13 +1082,23 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
     setError('')
   }, [])
 
+  // [FIX Escenario 1] Cargar un nuevo producto es una "nueva acción" del
+  // usuario tanto como editar un campo existente. Antes solo `updateItem`
+  // limpiaba `error`, por lo que un mensaje de un intento de guardado
+  // anterior quedaba visible —mezclado con la fila recién agregada— hasta
+  // que el usuario tocara alguno de los campos de un ítem ya existente.
   const addItem = useCallback(() => {
     setItems(prev => [...prev, ITEM_EMPTY()])
+    setError('')
   }, [])
 
+  // Quitar un ítem también es una acción correctiva válida (p. ej. el ítem
+  // eliminado era el que disparó el error de stock/precio original), así
+  // que se limpia el error general por la misma razón que en `addItem`.
   const removeItem = useCallback((uid) => {
     setItems(prev => prev.filter(it => it._uid !== uid))
     setStockErrors(prev => { const n = { ...prev }; delete n[uid]; return n })
+    setError('')
   }, [])
 
   const handleStockError = useCallback((uid, hasError) => {
