@@ -125,13 +125,13 @@ function Pagination({ page, total, pageSize, onChange, onNavigate }) {
     onNavigate?.()
   }
   return (
-    <div className="flex items-center justify-between px-6 py-3 border-t border-surface-700">
-      <p className="text-surface-400 text-xs font-body tabular-nums">
+    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-4 sm:px-6 py-3 border-t border-surface-700">
+      <p className="text-surface-400 text-xs font-body tabular-nums text-center sm:text-left">
         {from}–{to} de {total}
       </p>
       <div className="flex gap-2">
-        <Button size="sm" variant="secondary" onClick={() => goTo(Math.max(1, page - 1))} disabled={page === 1}>← Anterior</Button>
-        <Button size="sm" variant="secondary" onClick={() => goTo(Math.min(totalPages, page + 1))} disabled={page === totalPages}>Siguiente →</Button>
+        <Button size="sm" variant="secondary" className="flex-1 sm:flex-none" onClick={() => goTo(Math.max(1, page - 1))} disabled={page === 1}>← Anterior</Button>
+        <Button size="sm" variant="secondary" className="flex-1 sm:flex-none" onClick={() => goTo(Math.min(totalPages, page + 1))} disabled={page === totalPages}>Siguiente →</Button>
       </div>
     </div>
   )
@@ -307,14 +307,14 @@ function Clientes() {
 
   return (
     <div className="space-y-4">
-      <div className="flex gap-2 items-center w-full">
+      <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:items-center w-full">
         <div className="flex-1">
           <input
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder="Buscar por ID, nombre o apellido…"
-            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
           />
         </div>
         <Button icon={Plus} onClick={openCreate}>Nuevo cliente</Button>
@@ -348,22 +348,22 @@ function Clientes() {
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar cliente' : 'Nuevo cliente'}>
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Input label="Nombre *" value={form.nombre} onChange={f('nombre')} />
             <Input label="Apellido *" value={form.apellido} onChange={f('apellido')} />
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Input label="Apodo" value={form.apodo} onChange={f('apodo')} />
             <Input label="Nombre de comercio" value={form.nombreComercio} onChange={f('nombreComercio')} />
           </div>
           <Input label="CUIT" value={form.cuit} onChange={f('cuit')} type="tel" inputMode="numeric" pattern="[0-9-]*" />
           <Input label="Domicilio" value={form.domicilio} onChange={f('domicilio')} />
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Input label="Teléfono" value={form.telefono} onChange={f('telefono')} type="tel" inputMode="numeric" pattern="[0-9+\-() ]*" />
             <Input label="Mail" value={form.mail} onChange={f('mail')} />
           </div>
           {error && <p className="text-red-400 text-xs">{error}</p>}
-          <div className="flex gap-3 pt-2">
+          <div className="flex gap-3 pt-3 mt-2 -mx-6 -mb-6 px-6 pb-6 sticky bottom-0 bg-surface-800 border-t border-surface-700/60 sm:static sm:mx-0 sm:mb-0 sm:px-0 sm:pb-0 sm:pt-2 sm:mt-0 sm:border-t-0 sm:bg-transparent">
             <Button variant="secondary" className="flex-1" onClick={() => setModal(false)}>Cancelar</Button>
             <Button className="flex-1" onClick={save}>Guardar</Button>
           </div>
@@ -463,14 +463,14 @@ function Proveedores() {
 
   return (
     <div className="space-y-4">
-      <div className="flex gap-2 items-center w-full">
+      <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:items-center w-full">
         <div className="flex-1">
           <input
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder="Buscar por ID, nombre fiscal o comercial…"
-            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
           />
         </div>
         <Button icon={Plus} onClick={openCreate}>Nuevo proveedor</Button>
@@ -506,12 +506,12 @@ function Proveedores() {
           <Input label="Nombre fiscal *" value={form.nombreFiscal} onChange={f('nombreFiscal')} />
           <Input label="Nombre comercial" value={form.nombreComercial} onChange={f('nombreComercial')} />
           <Input label="CUIT / RUT" value={form.identificacionTributaria} onChange={f('identificacionTributaria')} type="tel" inputMode="numeric" pattern="[0-9-]*" />
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Input label="Teléfono" value={form.telefono} onChange={f('telefono')} type="tel" inputMode="numeric" pattern="[0-9+\-() ]*" />
             <Input label="Email" value={form.email} onChange={f('email')} />
           </div>
           {error && <p className="text-red-400 text-xs">{error}</p>}
-          <div className="flex gap-3 pt-2">
+          <div className="flex gap-3 pt-3 mt-2 -mx-6 -mb-6 px-6 pb-6 sticky bottom-0 bg-surface-800 border-t border-surface-700/60 sm:static sm:mx-0 sm:mb-0 sm:px-0 sm:pb-0 sm:pt-2 sm:mt-0 sm:border-t-0 sm:bg-transparent">
             <Button variant="secondary" className="flex-1" onClick={() => setModal(false)}>Cancelar</Button>
             <Button className="flex-1" onClick={save}>Guardar</Button>
           </div>
@@ -709,26 +709,26 @@ function Presupuestos() {
         <InfoBanner message={resumenEliminacion} onClose={() => setResumenEliminacion(null)} />
       )}
 
-      <div className="flex gap-2 items-center w-full">
+      <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:items-center w-full">
         <div className="flex-1">
           <input
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder="Buscar por ID o cliente…"
-            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
           />
         </div>
         <div>
           <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+            className="w-full sm:w-auto bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
         </div>
         <div>
           <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+            className="w-full sm:w-auto bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
         </div>
         <div>
-          <select value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)} className={dropdownClass + ' w-auto'}>
+          <select value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)} className={dropdownClass + ' sm:w-auto'}>
             <option value="">Todos los estados</option>
             {['borrador','aprobado','pagado','rechazado'].map(s => (
               <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>
@@ -796,7 +796,7 @@ function Presupuestos() {
               <option value={0}>No</option>
               <option value={1}>Sí</option>
             </Select>
-            <div className="flex gap-3 pt-2">
+            <div className="flex gap-3 pt-3 mt-2 -mx-6 -mb-6 px-6 pb-6 sticky bottom-0 bg-surface-800 border-t border-surface-700/60 sm:static sm:mx-0 sm:mb-0 sm:px-0 sm:pb-0 sm:pt-2 sm:mt-0 sm:border-t-0 sm:bg-transparent">
               <Button variant="secondary" className="flex-1" onClick={() => setModal(false)}>Cancelar</Button>
               <Button className="flex-1" onClick={save}>Guardar</Button>
             </div>
@@ -905,23 +905,23 @@ function Pedidos() {
 
   return (
     <div className="space-y-4">
-      <div className="flex gap-2 items-center w-full">
+      <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:items-center w-full">
         <div className="flex-1">
           <input
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder="Buscar por ID o proveedor…"
-            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
           />
         </div>
         <div>
           <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+            className="w-full sm:w-auto bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
         </div>
         <div>
           <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+            className="w-full sm:w-auto bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
         </div>
       </div>
 
@@ -955,7 +955,7 @@ function Pedidos() {
         {editRow && (
           <div className="space-y-4">
             <p className="text-surface-400 text-xs">Pedido #{editRow.idPedido} — {fmt(editRow.monto)}</p>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <Select label="Estado pago" value={editRow.estadoPago} onChange={fe('estadoPago')}>
                 <option value="pendiente">Pendiente</option>
                 <option value="pagado">Pagado</option>
@@ -972,7 +972,7 @@ function Pedidos() {
               <Input label="Fecha recepción" type="date" value={editRow.fechaRecepcion || ''} onChange={fe('fechaRecepcion')} />
               <Input label="Fecha pago" type="date" value={editRow.fechaPago || ''} onChange={fe('fechaPago')} />
             </div>
-            <div className="flex gap-3 pt-2">
+            <div className="flex gap-3 pt-3 mt-2 -mx-6 -mb-6 px-6 pb-6 sticky bottom-0 bg-surface-800 border-t border-surface-700/60 sm:static sm:mx-0 sm:mb-0 sm:px-0 sm:pb-0 sm:pt-2 sm:mt-0 sm:border-t-0 sm:bg-transparent">
               <Button variant="secondary" className="flex-1" onClick={() => setModal(false)}>Cancelar</Button>
               <Button className="flex-1" onClick={save}>Guardar</Button>
             </div>
@@ -1172,26 +1172,26 @@ function Saldos() {
 
   return (
     <div className="space-y-4">
-      <div className="flex gap-2 items-center w-full">
+      <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:items-center w-full">
         <div className="flex-1">
           <input
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder="Buscar por ID o nombre de cliente…"
-            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
           />
         </div>
         <div>
           <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+            className="w-full sm:w-auto bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
         </div>
         <div>
           <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+            className="w-full sm:w-auto bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
         </div>
         <div>
-          <select value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)} className={dropdownClass + ' w-auto'}>
+          <select value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)} className={dropdownClass + ' sm:w-auto'}>
             <option value="">Todos los estados</option>
             <option value="pendiente">Pendiente</option>
             <option value="pagado">Pagado</option>
@@ -1258,7 +1258,7 @@ function Saldos() {
             )}
 
             {saveError && <p role="alert" className="text-red-400 text-xs font-body">{saveError}</p>}
-            <div className="flex gap-3 pt-2">
+            <div className="flex gap-3 pt-3 mt-2 -mx-6 -mb-6 px-6 pb-6 sticky bottom-0 bg-surface-800 border-t border-surface-700/60 sm:static sm:mx-0 sm:mb-0 sm:px-0 sm:pb-0 sm:pt-2 sm:mt-0 sm:border-t-0 sm:bg-transparent">
               <Button variant="secondary" className="flex-1" onClick={cerrarEdit} disabled={saving}>Cancelar</Button>
               <Button className="flex-1" onClick={save} disabled={saving || (revierteCobros && !ackRevertir)}>
                 {saving ? 'Guardando…' : 'Guardar'}
@@ -1368,32 +1368,32 @@ function Egresos() {
 
   return (
     <div className="space-y-4">
-      <div className="flex gap-2 items-center w-full flex-wrap">
+      <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:items-center w-full">
         <div className="flex-1 min-w-[160px]">
           <input
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder="Buscar por descripción…"
-            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
           />
         </div>
         <div>
           <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+            className="w-full sm:w-auto bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
         </div>
         <div>
           <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+            className="w-full sm:w-auto bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
         </div>
         <div>
-          <select value={filtCat} onChange={e => setFiltCat(e.target.value)} className={dropdownClass + ' w-auto'}>
+          <select value={filtCat} onChange={e => setFiltCat(e.target.value)} className={dropdownClass + ' sm:w-auto'}>
             <option value="">Todas las categorías</option>
             {CATEGORIAS_EGRESO.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
         </div>
         <div>
-          <select value={filtMetodo} onChange={e => setFiltMetodo(e.target.value)} className={dropdownClass + ' w-auto'}>
+          <select value={filtMetodo} onChange={e => setFiltMetodo(e.target.value)} className={dropdownClass + ' sm:w-auto'}>
             <option value="">Todos los métodos</option>
             <option value="efectivo">Efectivo</option>
             <option value="transferencia">Transferencia</option>
@@ -1429,7 +1429,7 @@ function Egresos() {
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar egreso' : 'Nuevo egreso'}>
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Input label="Fecha *" type="date" value={form.fecha} onChange={f('fecha')} />
             <Select label="Categoría" value={form.categoria} onChange={f('categoria')}>
               {CATEGORIAS_EGRESO.map(c => <option key={c} value={c}>{c}</option>)}
@@ -1437,7 +1437,7 @@ function Egresos() {
           </div>
           <Input label="Descripción *" value={form.descripcion} onChange={f('descripcion')}
             placeholder="Ej: Sueldo Marzo — Empleado X" />
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Input label="Monto *" type="number" min="0" value={form.monto} onChange={fn('monto')}
               placeholder="Ej: 50000"
               className="[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" />
@@ -1448,7 +1448,7 @@ function Egresos() {
             </Select>
           </div>
           {error && <p className="text-red-400 text-xs">{error}</p>}
-          <div className="flex gap-3 pt-2">
+          <div className="flex gap-3 pt-3 mt-2 -mx-6 -mb-6 px-6 pb-6 sticky bottom-0 bg-surface-800 border-t border-surface-700/60 sm:static sm:mx-0 sm:mb-0 sm:px-0 sm:pb-0 sm:pt-2 sm:mt-0 sm:border-t-0 sm:bg-transparent">
             <Button variant="secondary" className="flex-1" onClick={() => setModal(false)}>Cancelar</Button>
             <Button className="flex-1" onClick={save}>Guardar</Button>
           </div>
@@ -1548,26 +1548,26 @@ function Ingresos() {
 
   return (
     <div className="space-y-4">
-      <div className="flex gap-2 items-center w-full flex-wrap">
+      <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:items-center w-full">
         <div className="flex-1 min-w-[160px]">
           <input
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder="Buscar por ID o descripción…"
-            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
           />
         </div>
         <div>
           <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+            className="w-full sm:w-auto bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
         </div>
         <div>
           <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+            className="w-full sm:w-auto bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
         </div>
         <div>
-          <select value={filtCat} onChange={e => setFiltCat(e.target.value)} className={dropdownClass + ' w-auto'}>
+          <select value={filtCat} onChange={e => setFiltCat(e.target.value)} className={dropdownClass + ' sm:w-auto'}>
             <option value="">Todas las categorías</option>
             {CATEGORIAS_INGRESO.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
@@ -1601,7 +1601,7 @@ function Ingresos() {
 
       <Modal open={modal} onClose={() => setModal(false)} title={editId ? 'Editar ingreso' : 'Nuevo ingreso'}>
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Input label="Fecha *" type="date" value={form.fecha} onChange={f('fecha')} />
             <Select label="Categoría" value={form.categoria} onChange={f('categoria')}>
               {CATEGORIAS_INGRESO.map(c => <option key={c} value={c}>{c}</option>)}
@@ -1613,7 +1613,7 @@ function Ingresos() {
             placeholder="Ej: 120000"
             className="[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" />
           {error && <p className="text-red-400 text-xs">{error}</p>}
-          <div className="flex gap-3 pt-2">
+          <div className="flex gap-3 pt-3 mt-2 -mx-6 -mb-6 px-6 pb-6 sticky bottom-0 bg-surface-800 border-t border-surface-700/60 sm:static sm:mx-0 sm:mb-0 sm:px-0 sm:pb-0 sm:pt-2 sm:mt-0 sm:border-t-0 sm:bg-transparent">
             <Button variant="secondary" className="flex-1" onClick={() => setModal(false)}>Cancelar</Button>
             <Button className="flex-1" onClick={save}>Guardar</Button>
           </div>
@@ -1813,22 +1813,22 @@ function Inversiones() {
 
       <div className="border-t border-surface-700/60" />
 
-      <div className="flex gap-2 items-center w-full flex-wrap">
+      <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:items-center w-full">
         <div className="flex-1 min-w-[160px]">
           <input type="text" value={search} onChange={e => setSearch(e.target.value)}
             placeholder="Buscar por ID o descripción…"
-            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500" />
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500" />
         </div>
         <div>
           <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+            className="w-full sm:w-auto bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
         </div>
         <div>
           <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
+            className="w-full sm:w-auto bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
         </div>
         <div>
-          <select value={filtCat} onChange={e => setFiltCat(e.target.value)} className={dropdownClass + ' w-auto'}>
+          <select value={filtCat} onChange={e => setFiltCat(e.target.value)} className={dropdownClass + ' sm:w-auto'}>
             <option value="">Todas las categorías</option>
             {CATEGORIAS_INV.map(c => <option key={c} value={c}>{c}</option>)}
           </select>
@@ -1877,7 +1877,7 @@ function Inversiones() {
               <>
                 {editId ? (
                   <>
-                    <div className="grid grid-cols-2 gap-3 bg-surface-700/40 rounded-xl p-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-surface-700/40 rounded-xl p-3">
                       <div>
                         <p className="text-surface-500 text-xs font-body mb-0.5">Categoría</p>
                         <p className="text-surface-300 text-sm font-body">{form.categoria}</p>
@@ -1907,7 +1907,7 @@ function Inversiones() {
                   </>
                 ) : (
                   <>
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <Input label="Fecha *" type="date" value={form.fecha} onChange={f('fecha')} />
                       <Select label="Categoría" value={form.categoria} onChange={f('categoria')}>
                         {CATEGORIAS_INV.map(c => <option key={c} value={c}>{c}</option>)}
@@ -1926,7 +1926,7 @@ function Inversiones() {
             )
           })()}
           {error && <p className="text-red-400 text-xs">{error}</p>}
-          <div className="flex gap-3 pt-2">
+          <div className="flex gap-3 pt-3 mt-2 -mx-6 -mb-6 px-6 pb-6 sticky bottom-0 bg-surface-800 border-t border-surface-700/60 sm:static sm:mx-0 sm:mb-0 sm:px-0 sm:pb-0 sm:pt-2 sm:mt-0 sm:border-t-0 sm:bg-transparent">
             <Button variant="secondary" className="flex-1" onClick={() => setModal(false)}>Cancelar</Button>
             <Button className="flex-1" onClick={save}>Guardar</Button>
           </div>
@@ -1963,7 +1963,7 @@ function Inversiones() {
             })()}
           </div>
           {errorRetiro && <p className="text-red-400 text-xs">{errorRetiro}</p>}
-          <div className="flex gap-3 pt-2">
+          <div className="flex gap-3 pt-3 mt-2 -mx-6 -mb-6 px-6 pb-6 sticky bottom-0 bg-surface-800 border-t border-surface-700/60 sm:static sm:mx-0 sm:mb-0 sm:px-0 sm:pb-0 sm:pt-2 sm:mt-0 sm:border-t-0 sm:bg-transparent">
             <Button variant="secondary" className="flex-1" onClick={() => setModalRetiro(false)}>Cancelar</Button>
             <Button variant="danger" className="flex-1" onClick={guardarRetiro}>Confirmar retiro</Button>
           </div>
@@ -2060,14 +2060,14 @@ function Categorias() {
 
   return (
     <div className="space-y-4">
-      <div className="flex gap-2 items-center w-full">
+      <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2 sm:items-center w-full">
         <div className="flex-1">
           <input
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder="Buscar por ID o nombre…"
-            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-base sm:text-sm text-white placeholder-surface-500 focus:outline-none focus:border-brand-500"
           />
         </div>
         <Button icon={Plus} onClick={openCreate}>Nueva categoría</Button>
@@ -2100,7 +2100,7 @@ function Categorias() {
           <Input label="Nombre *" value={form.nombre} onChange={f('nombre')}
             placeholder="Ej: Filtros, Frenos, Eléctrico…" />
           {error && <p className="text-red-400 text-xs">{error}</p>}
-          <div className="flex gap-3 pt-2">
+          <div className="flex gap-3 pt-3 mt-2 -mx-6 -mb-6 px-6 pb-6 sticky bottom-0 bg-surface-800 border-t border-surface-700/60 sm:static sm:mx-0 sm:mb-0 sm:px-0 sm:pb-0 sm:pt-2 sm:mt-0 sm:border-t-0 sm:bg-transparent">
             <Button variant="secondary" className="flex-1" onClick={() => setModal(false)}>Cancelar</Button>
             <Button className="flex-1" onClick={save}>Guardar</Button>
           </div>
@@ -2145,7 +2145,9 @@ export default function ABMC() {
       <button
         key={key}
         onClick={() => setActive(key)}
-        className={`flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-sm font-body border transition-all duration-200 flex-1 min-w-0
+        aria-current={active === key ? 'page' : undefined}
+        aria-label={label}
+        className={`flex items-center justify-center gap-2 px-3 py-2.5 min-h-[44px] rounded-xl text-sm font-body border transition-all duration-200 flex-1 min-w-0
           ${active === key
             ? 'bg-surface-700 border-surface-500 text-white shadow-lg'
             : 'bg-surface-800 border-surface-700 text-surface-400 hover:text-white hover:border-surface-600'
@@ -2163,7 +2165,7 @@ export default function ABMC() {
   const row2 = TABS.slice(5)
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
+    <div className="max-w-6xl mx-auto space-y-6 px-3 sm:px-4 md:px-6 lg:px-0">
       <PageHeader title="ABMC" subtitle="Administración" />
 
       <div className="space-y-2">
