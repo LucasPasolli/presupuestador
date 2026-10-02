@@ -322,8 +322,13 @@ export function Card({ children, className = '' }) {
 
 export function PageHeader({ title, subtitle, actions }) {
   return (
-    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4 mb-6 sm:mb-8 animate-slide-up">
-      <div className="min-w-0">
+    <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-start sm:justify-between gap-3 sm:gap-4 mb-6 sm:mb-8 animate-slide-up">
+      {/* `sm:min-w-min`: el título no se comprime por debajo de su palabra más
+            larga. Si junto a las acciones no entra, es la fila de acciones la que
+            pasa a la línea siguiente (`sm:flex-wrap` en el contenedor), en vez de
+            aplastar el título letra por letra. Depende del ancho REAL del
+            contenedor, no del viewport: con sidebar fijo el área útil es menor. */}
+      <div className="min-w-0 sm:min-w-min sm:flex-1">
         <p className="text-brand-500 text-xs font-mono tracking-[0.3em] uppercase mb-1">
           {subtitle}
         </p>
@@ -335,7 +340,7 @@ export function PageHeader({ title, subtitle, actions }) {
           {title.toUpperCase()}
         </h1>
       </div>
-      {actions && <div className="flex items-center gap-2 flex-wrap flex-shrink-0">{actions}</div>}
+      {actions && <div className="flex items-center gap-2 flex-wrap flex-shrink-0 max-w-full">{actions}</div>}
     </div>
   )
 }
@@ -505,20 +510,29 @@ export function Modal({ open, onClose, title, children, width = 'max-w-lg', busy
                     shadow-2xl w-full ${width} animate-slide-up max-h-[92dvh] sm:max-h-[90vh]
                     overflow-y-auto overscroll-contain pb-[env(safe-area-inset-bottom)] sm:pb-0`}
       >
-        <div className="flex items-center justify-between p-6 border-b border-surface-700">
-          <h2 className="font-body font-semibold text-white">{title}</h2>
+        {/* Encabezado `sticky`: en formularios largos el título y el botón de
+            cerrar siguen a la vista al hacer scroll (con teclado virtual
+            abierto el viewport útil puede ser < 400px). El botón de cierre
+            mide 44x44 en mobile (Apple HIG / WCAG 2.5.5) y vuelve al tamaño
+            compacto desde `sm`. */}
+        <div className="sticky top-0 z-10 flex items-center justify-between gap-3 px-4 py-2 sm:p-6
+                        bg-surface-800 border-b border-surface-700">
+          <h2 className="font-body font-semibold text-white min-w-0 break-words">{title}</h2>
           <button
             type="button"
             onClick={onClose}
             disabled={busy}
             aria-label="Cerrar"
-            className="text-surface-400 hover:text-white transition-colors text-xl leading-none
+            className="flex items-center justify-center flex-shrink-0 min-h-[44px] min-w-[44px] -mr-2 sm:mr-0
+                       sm:min-h-0 sm:min-w-0 rounded-lg text-surface-400 hover:text-white transition-colors
+                       text-2xl sm:text-xl leading-none
+                       focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60
                        disabled:opacity-40 disabled:cursor-not-allowed"
           >
             ×
           </button>
         </div>
-        <div className="p-6">{children}</div>
+        <div className="p-4 sm:p-6">{children}</div>
       </div>
     </div>,
     document.body,
