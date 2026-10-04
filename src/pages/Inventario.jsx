@@ -1,5 +1,5 @@
 // src/pages/Inventario.jsx
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useId } from 'react'
 import { usePaginatedList } from '../hooks/usePaginatedList'
 import { useScrollAnchor } from '../hooks/useScrollToTopOnChange'
 import {
@@ -13,8 +13,13 @@ import {
 } from '../services/productosService'
 import { obtenerProveedores, contarProductosDeProveedor, actualizarPrecioPorProveedor } from '../services/proveedoresService'
 import { supabase } from '../lib/supabase'
-import { Button, Card, PageHeader, Modal, Input, Select, Badge, Table, Tr, Td } from '../components/ui'
-import { Plus, Search, Pencil, Trash2, ChevronDown, ChevronUp, PackagePlus, X, CheckCircle2, TrendingUp, FileSpreadsheet, AlertTriangle, Truck, ChevronsUpDown, Check } from 'lucide-react'
+import { Button, Card, PageHeader, Modal, Input, Select, Badge } from '../components/ui'
+import {
+  esBajoStock, estadoStock, etiquetaEstadoStock,
+  SORT_OPCIONES, valorOrden, parseOrden,
+  contarFiltrosAvanzados, hayFiltrosActivos as tieneFiltrosActivos,
+} from '../lib/inventarioUtils'
+import { Plus, Search, Pencil, Trash2, ChevronDown, ChevronUp, PackagePlus, X, CheckCircle2, TrendingUp, FileSpreadsheet, AlertTriangle, Truck, ChevronsUpDown, Check, SlidersHorizontal } from 'lucide-react'
 // NOTA: se usa `exceljs` (y no `xlsx`/SheetJS) porque la edición Community de
 // SheetJS no escribe estilos de celda (negrita, relleno) al generar el
 // archivo: el `.s` que se le asigna a la celda se ignora silenciosamente al
@@ -58,9 +63,13 @@ function Toast({ message, visible, onDone, type = 'success' }) {
   }[type]
 
   return (
-    <div className={`fixed top-5 right-5 z-[9999] transition-all duration-300 pointer-events-none
+    // Mobile: franja con márgenes laterales (nunca se corta en 360px) y por
+    // debajo del notch. Desde `sm` vuelve a ser la píldora flotante a la derecha.
+    <div role="status" aria-live="polite"
+      className={`fixed inset-x-4 top-[max(1rem,env(safe-area-inset-top))] sm:inset-x-auto sm:right-5 sm:top-5
+      z-[9999] transition-all duration-300 pointer-events-none
       ${visible ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2'}`}>
-      <div className={`flex items-center gap-3 border rounded-2xl px-5 py-3 shadow-2xl backdrop-blur-sm max-w-md ${styles.wrap}`}>
+      <div className={`flex items-center gap-3 border rounded-2xl px-4 sm:px-5 py-3 shadow-2xl backdrop-blur-sm w-full sm:w-auto max-w-md ${styles.wrap}`}>
         <styles.Icon size={18} className={`flex-shrink-0 ${styles.icon}`} />
         <span className={`text-sm font-body ${styles.text}`}>{message}</span>
       </div>
@@ -78,16 +87,20 @@ function Toast({ message, visible, onDone, type = 'success' }) {
 function ProveedorMultiSelect({ proveedores, value, onChange, error }) {
   const [open, setOpen] = useState(false)
   const containerRef = useRef(null)
+  const uid = useId()
+  const listId  = `${uid}-lista`
+  const labelId = `${uid}-label`
 
   useEffect(() => {
+    // `pointerdown` cubre mouse Y touch con un único listener.
     function onClickFuera(e) {
       if (containerRef.current && !containerRef.current.contains(e.target)) setOpen(false)
     }
     function onEscape(e) { if (e.key === 'Escape') setOpen(false) }
-    document.addEventListener('mousedown', onClickFuera)
+    document.addEventListener('pointerdown', onClickFuera)
     document.addEventListener('keydown', onEscape)
     return () => {
-      document.removeEventListener('mousedown', onClickFuera)
+      document.removeEventListener('pointerdown', onClickFuera)
       document.removeEventListener('keydown', onEscape)
     }
   }, [])
@@ -101,38 +114,54 @@ function ProveedorMultiSelect({ proveedores, value, onChange, error }) {
     onChange(value.filter((id) => id !== idProveedor))
   }
 
+  const nombreDe = (p) => p.nombreComercial || p.nombreFiscal
   const seleccionados = proveedores.filter((p) => value.includes(p.idProveedor))
+  const n = seleccionados.length
 
   return (
     <div ref={containerRef} className="relative">
-      <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1.5">
+      <span id={labelId} className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1.5">
         Proveedor(es)
-      </label>
+      </span>
 
+      {/* El trigger ya no contiene otros botones (un <button> dentro de un
+          <button> es HTML inválido y en táctil el toque cae en el equivocado).
+          Las etiquetas seleccionadas se muestran debajo, cada una con su propio
+          botón "quitar" de tamaño táctil. */}
       <button type="button" onClick={() => setOpen((o) => !o)}
-        aria-haspopup="listbox" aria-expanded={open}
-        className={`w-full flex items-center justify-between gap-2 bg-surface-700 border rounded-xl px-3 py-2
-          text-left text-sm font-body focus:outline-none focus:border-brand-500 transition-all
+        aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listId : undefined}
+        aria-labelledby={labelId}
+        className={`w-full flex items-center justify-between gap-2 min-h-[44px] bg-surface-700 border rounded-xl px-3 py-2
+          text-left text-base sm:text-sm font-body focus:outline-none focus:border-brand-500 transition-all
           ${error ? 'border-red-500/60' : 'border-surface-600'}`}>
-        <span className="flex flex-wrap gap-1.5 min-h-[1.25rem]">
-          {seleccionados.length === 0 && (
-            <span className="text-surface-500">Sin proveedor asignado (opcional)</span>
-          )}
-          {seleccionados.map((p) => (
-            <span key={p.idProveedor}
-              className="inline-flex items-center gap-1 bg-surface-600/70 border border-surface-500/50 rounded-lg px-2 py-0.5 text-xs text-white">
-              {p.nombreComercial || p.nombreFiscal}
-              <X size={11} className="cursor-pointer hover:text-red-400"
-                onClick={(e) => { e.stopPropagation(); quitar(p.idProveedor) }} />
-            </span>
-          ))}
+        <span className={n === 0 ? 'text-surface-500' : 'text-white'}>
+          {n === 0
+            ? 'Sin proveedor asignado (opcional)'
+            : `${n} proveedor${n === 1 ? '' : 'es'} seleccionado${n === 1 ? '' : 's'}`}
         </span>
-        <ChevronsUpDown size={14} className="flex-shrink-0 text-surface-400" />
+        <ChevronsUpDown size={14} aria-hidden="true" className="flex-shrink-0 text-surface-400" />
       </button>
 
+      {n > 0 && (
+        <ul aria-label="Proveedores seleccionados" className="flex flex-wrap gap-2 mt-2">
+          {seleccionados.map((p) => (
+            <li key={p.idProveedor}
+              className="inline-flex items-center max-w-full bg-surface-600/70 border border-surface-500/50 rounded-lg pl-2.5 text-sm sm:text-xs text-white">
+              <span className="truncate py-1">{nombreDe(p)}</span>
+              <button type="button" onClick={() => quitar(p.idProveedor)}
+                aria-label={`Quitar proveedor ${nombreDe(p)}`}
+                className="flex items-center justify-center flex-shrink-0 w-11 h-11 sm:w-7 sm:h-7 text-surface-300
+                           hover:text-red-400 rounded-r-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60">
+                <X size={13} aria-hidden="true" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
       {open && (
-        <div role="listbox" aria-multiselectable="true"
-          className="absolute z-20 mt-1.5 w-full max-h-56 overflow-y-auto bg-surface-800 border border-surface-600
+        <div id={listId} role="listbox" aria-multiselectable="true" aria-labelledby={labelId}
+          className="absolute z-20 mt-1.5 w-full max-h-60 overflow-y-auto overscroll-contain bg-surface-800 border border-surface-600
                      rounded-xl shadow-2xl py-1.5">
           {proveedores.length === 0 ? (
             <p className="px-3 py-2 text-surface-500 text-xs font-body">
@@ -145,13 +174,13 @@ function ProveedorMultiSelect({ proveedores, value, onChange, error }) {
                 <div key={p.idProveedor} role="option" aria-selected={activo} tabIndex={0}
                   onClick={() => toggle(p.idProveedor)}
                   onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(p.idProveedor) } }}
-                  className="flex items-center gap-2.5 px-3 py-2 cursor-pointer text-sm font-body text-surface-200
-                             hover:bg-surface-700 transition-colors focus:outline-none focus:bg-surface-700">
-                  <span className={`flex-shrink-0 w-4 h-4 rounded border flex items-center justify-center
+                  className="flex items-center gap-3 px-3 py-3 sm:py-2 min-h-[44px] sm:min-h-0 cursor-pointer text-base sm:text-sm font-body text-surface-200
+                             hover:bg-surface-700 active:bg-surface-700 transition-colors focus:outline-none focus:bg-surface-700">
+                  <span className={`flex-shrink-0 w-5 h-5 sm:w-4 sm:h-4 rounded border flex items-center justify-center
                     ${activo ? 'bg-brand-500 border-brand-500' : 'border-surface-500'}`}>
-                    {activo && <Check size={11} className="text-white" />}
+                    {activo && <Check size={11} className="text-white" aria-hidden="true" />}
                   </span>
-                  <span className="truncate">{p.nombreComercial || p.nombreFiscal}</span>
+                  <span className="truncate">{nombreDe(p)}</span>
                 </div>
               )
             })
@@ -236,11 +265,16 @@ function EditarProductoModal({ open, onClose, producto, categorias, proveedores,
   const margenCalculado = ppVal > 0 && puVal > 0 ? (((puVal - ppVal) / ppVal) * 100).toFixed(1) : null
 
   return (
-    <Modal open={open} onClose={onClose} title="Editar Producto" width="max-w-lg">
-      <div className="space-y-4">
-        <Input label="Nombre del Producto *" value={form.nombre}
-          onChange={(e) => set('nombre', e.target.value)} error={errors.nombre}
-          placeholder="Ej: CADENA DE DISTRIBUCIÓN 25H-98L" />
+    <Modal open={open} onClose={onClose} title="Editar Producto" width="max-w-2xl">
+      {/* 1 columna en mobile (orden de lectura y de tabulación lógico);
+          2 columnas desde `sm` para aprovechar tablet/desktop. Los campos
+          largos ocupan el ancho completo. */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="sm:col-span-2">
+          <Input label="Nombre del Producto *" value={form.nombre}
+            onChange={(e) => set('nombre', e.target.value)} error={errors.nombre}
+            placeholder="Ej: CADENA DE DISTRIBUCIÓN 25H-98L" />
+        </div>
 
         <Select label="Categoría" value={form.idCategoria}
           onChange={(e) => set('idCategoria', parseInt(e.target.value))}>
@@ -249,7 +283,11 @@ function EditarProductoModal({ open, onClose, producto, categorias, proveedores,
           ))}
         </Select>
 
-        <Input label="Precio del Proveedor" value={form.precioProveedor}
+        <Input label="Punto de Reposición (stock mínimo)" value={form.puntoReposicion} inputMode="numeric"
+          onChange={(e) => { const v = e.target.value.replace(/\D/g, ''); set('puntoReposicion', v) }}
+          placeholder="Ej: 5" />
+
+        <Input label="Precio del Proveedor" value={form.precioProveedor} inputMode="decimal"
           onChange={(e) => {
             const v = e.target.value.replace(',', '.')
             if (/^\d*\.?\d*$/.test(v)) { set('precioProveedor', v); if (margen) aplicarMargen(margen, v) }
@@ -257,12 +295,12 @@ function EditarProductoModal({ open, onClose, producto, categorias, proveedores,
           error={errors.precioProveedor} placeholder="0.00" />
 
         <div>
-          <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1.5">
+          <label htmlFor="editar-margen" className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1.5">
             Margen de Ganancia (%)
           </label>
           <div className="relative">
             <TrendingUp size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
-            <input type="text" inputMode="decimal" value={margen}
+            <input id="editar-margen" type="text" inputMode="decimal" value={margen}
               onChange={(e) => {
                 const v = e.target.value.replace(',', '.')
                 if (!/^\d*\.?\d*$/.test(v)) return
@@ -275,8 +313,8 @@ function EditarProductoModal({ open, onClose, producto, categorias, proveedores,
                 aplicarMargen(v, form.precioProveedor)
               }}
               placeholder="Ej: 42.5"
-              className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-10 py-2 text-white
-                        text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all" />
+              className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-10 min-h-[44px] py-2 text-white
+                        text-base sm:text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all" />
             <span className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 text-sm font-body">%</span>
           </div>
           {margenCalculado !== null && (
@@ -286,8 +324,8 @@ function EditarProductoModal({ open, onClose, producto, categorias, proveedores,
           )}
         </div>
 
-        <div>
-          <Input label="Precio Unitario de Venta" value={form.precioUnitario}
+        <div className="sm:col-span-2">
+          <Input label="Precio Unitario de Venta" value={form.precioUnitario} inputMode="decimal"
             onChange={(e) => { const v = e.target.value.replace(',', '.'); if (/^\d*\.?\d*$/.test(v)) set('precioUnitario', v) }}
             error={errors.precioUnitario} placeholder="0.00" />
           {ppVal > 0 && puVal > 0 && (
@@ -298,18 +336,16 @@ function EditarProductoModal({ open, onClose, producto, categorias, proveedores,
           )}
         </div>
 
-        <Input label="Punto de Reposición (stock mínimo)" value={form.puntoReposicion}
-          onChange={(e) => { const v = e.target.value.replace(/\D/g, ''); set('puntoReposicion', v) }}
-          placeholder="Ej: 5" />
+        <div className="sm:col-span-2">
+          <ProveedorMultiSelect proveedores={proveedores} value={form.idsProveedores}
+            onChange={(ids) => set('idsProveedores', ids)} />
+        </div>
 
-        <ProveedorMultiSelect proveedores={proveedores} value={form.idsProveedores}
-          onChange={(ids) => set('idsProveedores', ids)} />
+        {errors.general && <p role="alert" className="text-red-400 text-xs font-body sm:col-span-2">{errors.general}</p>}
 
-        {errors.general && <p className="text-red-400 text-xs font-body">{errors.general}</p>}
-
-        <div className="flex gap-2 pt-2">
-          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button className="flex-1" onClick={guardar} disabled={loading}>
+        <div className="flex gap-2 pt-2 sm:col-span-2">
+          <Button variant="secondary" className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={onClose}>Cancelar</Button>
+          <Button className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={guardar} disabled={loading}>
             {loading ? 'Guardando...' : 'Guardar Cambios'}
           </Button>
         </div>
@@ -378,15 +414,15 @@ function NuevoProductoModal({ open, onClose, categorias, proveedores, onSaved })
             <option key={c.idCategoria} value={c.idCategoria} className="font-body">{c.nombre}</option>
           ))}
         </Select>
-        <Input label="Precio Unitario de Venta" value={form.precioUnitario}
+        <Input label="Precio Unitario de Venta" value={form.precioUnitario} inputMode="decimal"
           onChange={(e) => { const v = e.target.value.replace(',', '.'); if (/^\d*\.?\d*$/.test(v)) set('precioUnitario', v) }}
           error={errors.precioUnitario} placeholder="0.00" />
         <ProveedorMultiSelect proveedores={proveedores} value={form.idsProveedores}
           onChange={(ids) => set('idsProveedores', ids)} />
         {errors.general && <p className="text-red-400 text-xs font-body">{errors.general}</p>}
         <div className="flex gap-2 pt-2">
-          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button className="flex-1" onClick={guardar} disabled={loading}>{loading ? 'Creando...' : 'Crear Producto'}</Button>
+          <Button variant="secondary" className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={onClose}>Cancelar</Button>
+          <Button className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={guardar} disabled={loading}>{loading ? 'Creando...' : 'Crear Producto'}</Button>
         </div>
       </div>
     </Modal>
@@ -503,8 +539,8 @@ function StockModal({ open, onClose, producto, onSaved }) {
           <Input label="Nuevo valor de stock" type="text" inputMode="numeric" value={stockNuevo}
             onChange={(e) => setStockNuevo(e.target.value.replace(/\D/g, ''))} placeholder="Ej: 25" />
           <div className="flex gap-2">
-            <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-            <Button className="flex-1" onClick={guardarSinMedidas} disabled={loading}>
+            <Button variant="secondary" className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={onClose}>Cancelar</Button>
+            <Button className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={guardarSinMedidas} disabled={loading}>
               {loading ? 'Aplicando...' : 'Aplicar'}
             </Button>
           </div>
@@ -521,10 +557,11 @@ function StockModal({ open, onClose, producto, onSaved }) {
                 <div key={m.idMedida} className="flex items-center gap-3 bg-surface-700 rounded-xl px-4 py-2.5">
                   <span className="text-white text-sm font-mono flex-1">{m.medida}</span>
                   <input type="text" inputMode="numeric" placeholder="—"
+                    aria-label={`Stock de la medida ${m.medida}`}
                     value={editMedidas[m.idMedida] !== undefined ? editMedidas[m.idMedida] : m.cantidad}
                     onChange={(e) => setEditMedidas((p) => ({ ...p, [m.idMedida]: e.target.value.replace(/\D/g, '') }))}
-                    className="w-20 bg-surface-600 border border-surface-500 rounded-lg px-2 py-1 text-white
-                               text-sm font-mono text-center focus:outline-none focus:border-brand-500 transition-all
+                    className="w-24 min-h-[44px] sm:min-h-0 bg-surface-600 border border-surface-500 rounded-lg px-2 py-1 text-white
+                               text-base sm:text-sm font-mono text-center focus:outline-none focus:border-brand-500 transition-all
                                [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none" />
                   <span className="text-surface-400 text-xs font-body">und.</span>
                 </div>
@@ -532,8 +569,8 @@ function StockModal({ open, onClose, producto, onSaved }) {
             </div>
           )}
           <div className="flex gap-2">
-            <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-            <Button className="flex-1" onClick={guardarConMedidas} disabled={medidasStock.length === 0 || loading}>
+            <Button variant="secondary" className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={onClose}>Cancelar</Button>
+            <Button className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={guardarConMedidas} disabled={medidasStock.length === 0 || loading}>
               {loading ? 'Guardando...' : 'Guardar Stock'}
             </Button>
           </div>
@@ -581,13 +618,13 @@ function ActualizarPreciosModal({ open, onClose, onSaved }) {
           <input type="text" inputMode="decimal" value={margen}
             onChange={(e) => { const v = e.target.value.replace(',', '.'); if (/^\d*\.?\d*$/.test(v)) setMargen(v) }}
             placeholder="Margen de ganancia (%)"
-            className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-10 py-2 text-white
-                       text-sm font-mono focus:outline-none focus:border-brand-500 transition-all" />
+            className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-10 min-h-[44px] py-2 text-white
+                       text-base sm:text-sm font-mono focus:outline-none focus:border-brand-500 transition-all" />
           <span className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 text-sm font-mono">%</span>
         </div>
         <div className="flex gap-2 pt-2">
-          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button className="flex-1" onClick={actualizar} disabled={!margen || loading}>
+          <Button variant="secondary" className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={onClose}>Cancelar</Button>
+          <Button className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={actualizar} disabled={!margen || loading}>
             {loading ? 'Actualizando...' : 'Actualizar'}
           </Button>
         </div>
@@ -730,8 +767,8 @@ function ActualizarPrecioPorProveedorModal({ open, onClose, onSaved, proveedores
                 }}
                 onKeyDown={(e) => { if (e.key === 'Enter') confirmar() }}
                 placeholder="Margen de aumento (%)"
-                className={`w-full bg-surface-700 border rounded-xl pl-9 pr-10 py-2 text-white
-                           text-sm font-mono focus:outline-none focus:border-brand-500 transition-all
+                className={`w-full bg-surface-700 border rounded-xl pl-9 pr-10 min-h-[44px] py-2 text-white
+                           text-base sm:text-sm font-mono focus:outline-none focus:border-brand-500 transition-all
                            ${errorMargen ? 'border-red-500/60' : 'border-surface-600'}`} />
               <span className="absolute right-3 top-1/2 -translate-y-1/2 text-surface-400 text-sm font-mono">%</span>
             </div>
@@ -741,7 +778,7 @@ function ActualizarPrecioPorProveedorModal({ open, onClose, onSaved, proveedores
               <label className="flex items-start gap-2.5 text-sm font-body text-surface-300 cursor-pointer select-none">
                 <input type="checkbox" checked={confirmado} disabled={loading}
                   onChange={(e) => setConfirmado(e.target.checked)}
-                  className="mt-0.5 accent-brand-500 cursor-pointer" />
+                  className="mt-0.5 h-5 w-5 flex-shrink-0 accent-brand-500 cursor-pointer" />
                 <span>
                   Confirmo que quiero aumentar el precio proveedor de <strong>{cantidad}</strong> producto{cantidad === 1 ? '' : 's'} de{' '}
                   <strong>{proveedorSeleccionado?.nombreComercial || proveedorSeleccionado?.nombreFiscal}</strong> en un {margen}%.
@@ -754,8 +791,8 @@ function ActualizarPrecioPorProveedorModal({ open, onClose, onSaved, proveedores
         {error && <p className="text-red-400 text-sm font-body">{error}</p>}
 
         <div className="flex gap-2 pt-2">
-          <Button variant="secondary" className="flex-1" onClick={onClose} disabled={loading}>Cancelar</Button>
-          <Button className="flex-1" onClick={confirmar} disabled={!puedeConfirmar}>
+          <Button variant="secondary" className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={onClose} disabled={loading}>Cancelar</Button>
+          <Button className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={confirmar} disabled={!puedeConfirmar}>
             {loading ? 'Actualizando...' : 'Actualizar precios'}
           </Button>
         </div>
@@ -797,13 +834,159 @@ function CatModal({ open, onClose, onSaved, categorias }) {
           }}
           error={error} placeholder="Ej: Transmisión" />
         <div className="flex gap-2">
-          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button className="flex-1" onClick={guardar} disabled={categoriaExistente || !nombre.trim() || loading}>
+          <Button variant="secondary" className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={onClose}>Cancelar</Button>
+          <Button className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={guardar} disabled={categoriaExistente || !nombre.trim() || loading}>
             {loading ? 'Creando...' : 'Crear'}
           </Button>
         </div>
       </div>
     </Modal>
+  )
+}
+
+// ─── Presentación responsive del listado ──────────────────────────────────
+//
+// PATRÓN: una única fuente de datos (`paginated`) con DOS presentaciones
+// intercambiables por breakpoint — tarjetas por producto (< lg) y tabla
+// (≥ lg). Ambas consumen las mismas funciones puras de inventarioUtils y los
+// mismos handlers, así que buscar, filtrar, ordenar y editar producen
+// exactamente el mismo resultado en cualquier dispositivo (Escenario 6).
+
+const ESTADO_STOCK_CLASE = { sin: 'text-red-400', bajo: 'text-yellow-400', ok: 'text-emerald-400' }
+
+// Campo de filtro: 44px de alto (objetivo táctil), 16px en mobile para que iOS
+// no haga zoom automático al enfocar, y el tamaño compacto original desde `sm`.
+const CAMPO_FILTRO =
+  'w-full min-h-[44px] bg-surface-700 border border-surface-600 rounded-xl py-2 text-white text-base sm:text-sm ' +
+  'font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 ' +
+  'focus-visible:ring-1 focus-visible:ring-brand-500/30 transition-all'
+
+const TD = 'py-3 px-4 text-surface-200 align-middle'
+
+function ProveedoresResumen({ proveedores }) {
+  if (!proveedores?.length) {
+    return <p className="text-surface-500 text-xs font-body mt-1">Sin proveedor asignado</p>
+  }
+  const nombres = proveedores.map((pv) => pv.nombreComercial || pv.nombreFiscal)
+  return (
+    <div className="flex items-center gap-1 mt-1 flex-wrap">
+      <Truck size={11} aria-hidden="true" className="text-surface-500 flex-shrink-0" />
+      <span className="text-surface-400 text-xs font-body break-words">{nombres.slice(0, 2).join(', ')}</span>
+      {nombres.length > 2 && <span className="text-surface-500 text-xs font-body">+{nombres.length - 2}</span>}
+    </div>
+  )
+}
+
+/**
+ * Acciones de un producto. Dos presentaciones del mismo componente:
+ *  - `conEtiquetas` (tarjeta): 3 botones con icono + texto, 44px de alto. Sin
+ *    menús ocultos ni hover: todo visible y alcanzable con el pulgar (Esc. 4).
+ *  - compacta (tabla): solo iconos; crecen a 44x44 en dispositivos táctiles
+ *    (`pointer: coarse`) sin engordar la fila en desktop con mouse.
+ */
+function AccionesProducto({ producto, onStock, onEditar, onEliminar, conEtiquetas = false }) {
+  const acciones = [
+    { clave: 'stock',    label: 'Stock',    titulo: 'Actualizar stock', Icon: PackagePlus, onClick: onStock,
+      tabla: 'hover:text-emerald-400', tarjeta: 'text-surface-100' },
+    { clave: 'editar',   label: 'Editar',   titulo: 'Editar',           Icon: Pencil,      onClick: onEditar,
+      tabla: 'hover:text-brand-400',   tarjeta: 'text-surface-100' },
+    { clave: 'eliminar', label: 'Eliminar', titulo: 'Eliminar',         Icon: Trash2,      onClick: onEliminar,
+      tabla: 'hover:text-red-400',     tarjeta: 'text-red-300 border-red-500/30' },
+  ]
+
+  return (
+    <div className={conEtiquetas ? 'grid grid-cols-3 gap-2' : 'flex items-center gap-1 justify-end'}>
+      {acciones.map(({ clave, label, titulo, Icon, onClick, tabla, tarjeta }) => (
+        <button key={clave} type="button" onClick={() => onClick(producto)}
+          title={titulo} aria-label={`${titulo}: ${producto.nombre}`}
+          className={conEtiquetas
+            ? `flex items-center justify-center gap-1.5 min-h-[44px] rounded-xl border border-surface-600 bg-surface-700
+               text-sm font-body active:bg-surface-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60 ${tarjeta}`
+            : `flex items-center justify-center p-1.5 text-surface-400 transition-colors rounded-lg hover:bg-surface-700
+               [@media(pointer:coarse)]:min-h-[44px] [@media(pointer:coarse)]:min-w-[44px]
+               focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60 ${tabla}`}>
+          <Icon size={conEtiquetas ? 16 : 15} aria-hidden="true" />
+          {conEtiquetas && <span>{label}</span>}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/** Tarjeta de producto para mobile y tablet (< lg). */
+function ProductoCard({ producto: p, onStock, onEditar, onEliminar }) {
+  const estado = estadoStock(p)
+  return (
+    <li className={`flex flex-col gap-3 rounded-2xl border p-4 min-w-0
+      ${esBajoStock(p) ? 'bg-yellow-500/5 border-yellow-500/30' : 'bg-surface-800 border-surface-700'}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="font-mono text-xs text-surface-400">#{p.idProducto}</p>
+          <h3 className="text-white font-body font-medium text-base leading-snug break-words">{p.nombre}</h3>
+        </div>
+        <div className="text-right flex-shrink-0">
+          <p className={`font-mono text-2xl font-medium leading-none ${ESTADO_STOCK_CLASE[estado]}`}>{p.stockTotal}</p>
+          <p className={`text-xs font-body mt-1 ${ESTADO_STOCK_CLASE[estado]}`}>{etiquetaEstadoStock(estado)}</p>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Badge color="gray">{p.categoriaNombre}</Badge>
+        {p.tieneMedidas ? <Badge color="blue">Con medidas</Badge> : <Badge color="gray">General</Badge>}
+      </div>
+
+      <ProveedoresResumen proveedores={p.proveedores} />
+
+      <dl className="grid grid-cols-2 gap-3 border-t border-surface-700/60 pt-3 text-sm font-body">
+        <div>
+          <dt className="text-surface-500 text-xs">Precio de venta</dt>
+          <dd className="font-mono text-white mt-0.5">
+            {p.precioUnitario > 0 ? fmt(p.precioUnitario) : <span className="text-surface-500">—</span>}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-surface-500 text-xs">Precio proveedor</dt>
+          <dd className="font-mono text-surface-300 mt-0.5">
+            {p.precioProveedor > 0 ? fmt(p.precioProveedor) : <span className="text-surface-500">—</span>}
+          </dd>
+        </div>
+      </dl>
+
+      <AccionesProducto conEtiquetas producto={p} onStock={onStock} onEditar={onEditar} onEliminar={onEliminar} />
+    </li>
+  )
+}
+
+/**
+ * Barra de acciones globales de la pantalla. Se renderiza dos veces con la
+ * misma API: dentro de <PageHeader> en desktop (≥ lg, como siempre) y en una
+ * barra propia debajo del título en mobile/tablet. <PageHeader> no permite
+ * que sus acciones envuelvan en anchos intermedios (flex-shrink-0), y con 5
+ * botones eso desbordaba la pantalla en tablet.
+ */
+function AccionesCabecera({ compacta = false, exportando, sinProductos, onNuevo, onCategoria, onPrecios, onPrecioProveedor, onExportar }) {
+  const tactil = 'justify-center text-center min-h-[44px] lg:min-h-0'
+  return (
+    <div role="group" aria-label="Acciones de inventario"
+      className={compacta ? 'grid grid-cols-2 gap-2 sm:flex sm:flex-wrap lg:hidden' : 'hidden lg:flex lg:flex-wrap gap-2'}>
+      <Button variant="secondary" className={tactil} onClick={onCategoria}>+ Categoría</Button>
+      <Button variant="secondary" className={tactil} onClick={onPrecios}>Actualizar Precios de Venta</Button>
+      <Button variant="secondary" icon={Truck} className={tactil} onClick={onPrecioProveedor}>Precio por Proveedor</Button>
+      <Button
+        variant="secondary"
+        icon={FileSpreadsheet}
+        className={tactil}
+        onClick={onExportar}
+        disabled={sinProductos || exportando}
+        title={sinProductos ? 'No hay productos para exportar con los filtros aplicados' : 'Exportar a Excel (Código, Producto, Precio)'}
+      >
+        {exportando ? 'Exportando...' : 'Exportar Lista'}
+      </Button>
+      <Button icon={PackagePlus} onClick={onNuevo}
+        className={`${tactil} ${compacta ? 'order-first col-span-2 sm:col-span-1' : ''}`}>
+        Nuevo Producto
+      </Button>
+    </div>
   )
 }
 
@@ -833,6 +1016,8 @@ export default function Inventario() {
   const [deleteConfirm, setDeleteConfirm] = useState(null)
   const [toast,         setToast]         = useState(null)
   const [exportando,    setExportando]    = useState(false)
+  // Mobile: los filtros secundarios y el orden viven en un panel colapsable.
+  const [filtrosAbiertos, setFiltrosAbiertos] = useState(false)
 
   const showToast = useCallback((message, type = 'success') => setToast({ message, type }), [])
 
@@ -872,7 +1057,7 @@ export default function Inventario() {
       }
       if (cf.filterStock === 'con' && !(p.stockTotal > 0)) return false
       if (cf.filterStock === 'sin' && !(p.stockTotal === 0)) return false
-      if (cf.filterBajoStock && !(p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion)) return false
+      if (cf.filterBajoStock && !esBajoStock(p)) return false
       return true
     },
     sort: (a, b, cf) => {
@@ -888,6 +1073,21 @@ export default function Inventario() {
   const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   const loadSinResetPage = reload
+
+  const filtros = { searchNombre, searchId, filterCat, filterProveedor, filterStock, filterBajoStock }
+  const hayFiltros = tieneFiltrosActivos(filtros)
+  const filtrosAvanzados = contarFiltrosAvanzados(filtros)
+
+  function limpiarFiltros() {
+    setSearchNombre(''); setSearchId(''); setFilterCat('all')
+    setFilterProveedor('all'); setFilterStock('all'); setFilterBajoStock(false)
+  }
+
+  const abrirStock    = (p) => { setSelected(p); setModalStock(true) }
+  const abrirEditar   = (p) => { setSelected(p); setModalEditar(true) }
+  const pedirEliminar = (p) => setDeleteConfirm(p)
+
+  const ariaSort = (col) => sortKey !== col ? 'none' : sortDir === 'asc' ? 'ascending' : 'descending'
 
   function toggleSort(key) {
     if (sortKey === key) setSortDir((d) => d === 'asc' ? 'desc' : 'asc')
@@ -1040,33 +1240,28 @@ export default function Inventario() {
     }
   }
 
+  const accionesProps = {
+    exportando,
+    sinProductos: productos.length === 0,
+    onNuevo:           () => setModalNuevo(true),
+    onCategoria:       () => setModalCat(true),
+    onPrecios:         () => setModalActualizarPrecios(true),
+    onPrecioProveedor: () => setModalActualizarPrecioProveedor(true),
+    onExportar:        exportarExcel,
+  }
+
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
+    <div className="w-full min-w-0 max-w-7xl mx-auto space-y-6">
       <Toast message={toast?.message} type={toast?.type} visible={!!toast} onDone={() => setToast(null)} />
 
       <PageHeader title="Inventario" subtitle="Gestión de productos"
-        actions={
-          <div className="flex gap-2">
-            <Button variant="secondary" onClick={() => setModalCat(true)}>+ Categoría</Button>
-            <Button variant="secondary" onClick={() => setModalActualizarPrecios(true)}>Actualizar Precios de Venta</Button>
-            <Button variant="secondary" icon={Truck} onClick={() => setModalActualizarPrecioProveedor(true)}>Precio por Proveedor</Button>
-            <Button
-              variant="secondary"
-              icon={FileSpreadsheet}
-              onClick={exportarExcel}
-              disabled={productos.length === 0 || exportando}
-              title={productos.length === 0 ? 'No hay productos para exportar con los filtros aplicados' : 'Exportar a Excel (Código, Producto, Precio)'}
-            >
-              {exportando ? 'Exportando...' : 'Exportar Lista'}
-            </Button>
-            <Button icon={PackagePlus} onClick={() => setModalNuevo(true)}>Nuevo Producto</Button>
-          </div>
-        }
+        actions={<AccionesCabecera {...accionesProps} />}
       />
+      <AccionesCabecera compacta {...accionesProps} />
 
       {/* Resumen rápido */}
       {(() => {
-        const hayFiltrosActivos = searchNombre || searchId || filterCat !== 'all' || filterProveedor !== 'all' || filterStock !== 'all' || filterBajoStock
+        const hayFiltrosActivos = tieneFiltrosActivos(filtros)
         // Con filtros activos los contadores reflejan la selección actual;
         // sin filtros muestran los totales reales del catálogo completo.
         const base = hayFiltrosActivos ? productos : allProductos
@@ -1093,12 +1288,12 @@ export default function Inventario() {
                 {base.filter((p) => p.stockTotal === 0).length}
               </p>
             </div>
-            <button onClick={() => setFilterBajoStock((v) => !v)}
+            <button type="button" onClick={() => setFilterBajoStock((v) => !v)} aria-pressed={filterBajoStock}
               className={`rounded-xl p-4 border text-left transition-all
                 ${filterBajoStock ? 'bg-yellow-500/20 border-yellow-400/60' : 'bg-yellow-500/10 border-yellow-500/30 hover:bg-yellow-500/15'}`}>
               <p className="text-yellow-300 text-xs uppercase tracking-widest font-body">Bajo stock</p>
               <p className="font-display text-3xl text-yellow-200 tracking-widest mt-0.5">
-                {base.filter((p) => p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion).length}
+                {base.filter(esBajoStock).length}
               </p>
               <p className="text-yellow-400/70 text-xs mt-1">Click para filtrar</p>
             </button>
@@ -1107,39 +1302,67 @@ export default function Inventario() {
       })()}
 
       {/* Filtros */}
-      <Card className="p-4">
-        {(() => {
-          const hayFiltros = searchNombre || searchId || filterCat !== 'all' || filterProveedor !== 'all' || filterStock !== 'all' || filterBajoStock
-          return (
-            <div className="flex flex-wrap gap-3 items-center">
-              <div className="flex flex-1 gap-3 min-w-[200px]">
-                <div className="relative flex-1">
-                  <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
-                  <input value={searchNombre} onChange={(e) => setSearchNombre(e.target.value)}
-                    placeholder="Buscar por nombre..."
-                    className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2 text-white
-                              text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all" />
-                </div>
-                <div className="relative w-40 flex-shrink-0">
-                  <input value={searchId} onChange={(e) => setSearchId(e.target.value.replace(/\D/g, ''))}
-                    placeholder="ID..."
-                    className="w-full bg-surface-700 border border-surface-600 rounded-xl px-4 py-2 text-white
-                              text-sm font-mono placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all" />
-                </div>
-              </div>
+      {/* 1 columna en mobile · 2 en tablet · una sola fila en desktop.
+          En mobile solo búsqueda por nombre e ID quedan siempre a la vista; el
+          resto (categoría, proveedor, stock, orden) se despliega con un botón
+          que muestra cuántos filtros hay activos. Es el MISMO estado que en
+          desktop: solo cambia cómo se presenta. */}
+      <Card className="p-3 sm:p-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,2.2fr)_7rem_repeat(3,minmax(0,1fr))]">
+          <div className="relative sm:col-span-2 lg:col-span-1">
+            <label htmlFor="inv-buscar-nombre" className="sr-only">Buscar por nombre</label>
+            <Search size={15} aria-hidden="true" className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
+            <input id="inv-buscar-nombre" type="text" inputMode="search" enterKeyHint="search" autoComplete="off"
+              value={searchNombre} onChange={(e) => setSearchNombre(e.target.value)}
+              placeholder="Buscar por nombre..."
+              className={`${CAMPO_FILTRO} pl-9 pr-4`} />
+          </div>
 
-              <select value={filterCat} onChange={(e) => setFilterCat(e.target.value)}
-                className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
-                           font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer">
+          <div>
+            <label htmlFor="inv-buscar-id" className="sr-only">Buscar por ID</label>
+            <input id="inv-buscar-id" type="text" inputMode="numeric" autoComplete="off"
+              value={searchId} onChange={(e) => setSearchId(e.target.value.replace(/\D/g, ''))}
+              placeholder="ID..."
+              className={`${CAMPO_FILTRO} px-4 font-mono`} />
+          </div>
+
+          <button type="button" onClick={() => setFiltrosAbiertos((o) => !o)}
+            aria-expanded={filtrosAbiertos} aria-controls="inv-filtros-avanzados"
+            className="sm:hidden flex items-center justify-between gap-2 w-full min-h-[44px] px-4 rounded-xl border border-surface-600
+                       bg-surface-700 text-surface-100 text-base font-body active:bg-surface-600
+                       focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60">
+            <span className="flex items-center gap-2">
+              <SlidersHorizontal size={16} aria-hidden="true" />
+              Categoría, proveedor, stock y orden
+              {filtrosAvanzados > 0 && (
+                <span aria-label={`${filtrosAvanzados} filtro${filtrosAvanzados === 1 ? '' : 's'} activo${filtrosAvanzados === 1 ? '' : 's'}`}
+                  className="inline-flex items-center justify-center min-w-[1.5rem] h-6 px-1.5 rounded-full bg-brand-500 text-white text-xs font-mono">
+                  {filtrosAvanzados}
+                </span>
+              )}
+            </span>
+            <ChevronDown size={16} aria-hidden="true" className={`flex-shrink-0 transition-transform ${filtrosAbiertos ? 'rotate-180' : ''}`} />
+          </button>
+
+          {/* `sm:contents`: desde tablet el panel desaparece del árbol de layout
+              y sus campos pasan a ser celdas de la grilla superior. */}
+          <div id="inv-filtros-avanzados"
+            className={`${filtrosAbiertos ? 'grid' : 'hidden'} grid-cols-1 gap-3 sm:contents`}>
+            <div>
+              <label htmlFor="inv-filtro-cat" className="sr-only">Categoría</label>
+              <select id="inv-filtro-cat" value={filterCat} onChange={(e) => setFilterCat(e.target.value)}
+                className={`${CAMPO_FILTRO} px-3 cursor-pointer`}>
                 <option value="all" className="font-body">Todas las categorías</option>
                 {categorias.map((c) => (
                   <option key={c.idCategoria} value={c.idCategoria} className="font-body">{c.nombre}</option>
                 ))}
               </select>
+            </div>
 
-              <select value={filterProveedor} onChange={(e) => setFilterProveedor(e.target.value)}
-                className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
-                           font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer">
+            <div>
+              <label htmlFor="inv-filtro-prov" className="sr-only">Proveedor</label>
+              <select id="inv-filtro-prov" value={filterProveedor} onChange={(e) => setFilterProveedor(e.target.value)}
+                className={`${CAMPO_FILTRO} px-3 cursor-pointer`}>
                 <option value="all" className="font-body">Todos los proveedores</option>
                 {proveedores.map((p) => (
                   <option key={p.idProveedor} value={p.idProveedor} className="font-body">
@@ -1147,113 +1370,117 @@ export default function Inventario() {
                   </option>
                 ))}
               </select>
+            </div>
 
-              <select value={filterStock} onChange={(e) => setFilterStock(e.target.value)}
-                className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
-                           font-body focus:outline-none focus:border-brand-500 transition-all cursor-pointer">
+            <div>
+              <label htmlFor="inv-filtro-stock" className="sr-only">Stock</label>
+              <select id="inv-filtro-stock" value={filterStock} onChange={(e) => setFilterStock(e.target.value)}
+                className={`${CAMPO_FILTRO} px-3 cursor-pointer`}>
                 <option value="all" className="font-body">Todo el stock</option>
                 <option value="con" className="font-body">Con stock</option>
                 <option value="sin" className="font-body">Sin stock</option>
               </select>
-
-              {hayFiltros && (
-                <button
-                  onClick={() => { setSearchNombre(''); setSearchId(''); setFilterCat('all'); setFilterProveedor('all'); setFilterStock('all'); setFilterBajoStock(false) }}
-                  className="flex items-center gap-2 bg-surface-700 border border-surface-600 rounded-xl px-3 py-2
-                             text-surface-300 text-sm font-body hover:border-red-500/50 hover:text-red-400
-                             hover:bg-red-500/10 transition-all cursor-pointer whitespace-nowrap">
-                  <X size={13} /> Limpiar filtros
-                </button>
-              )}
             </div>
-          )
-        })()}
+
+            {/* En tarjetas no hay encabezados donde hacer clic para ordenar:
+                este selector escribe en el mismo sortKey/sortDir que la tabla. */}
+            <div className="sm:col-span-2 lg:hidden">
+              <label htmlFor="inv-orden" className="sr-only">Ordenar por</label>
+              <select id="inv-orden" value={valorOrden(sortKey, sortDir)}
+                onChange={(e) => { const o = parseOrden(e.target.value); setSortKey(o.sortKey); setSortDir(o.sortDir) }}
+                className={`${CAMPO_FILTRO} px-3 cursor-pointer`}>
+                {SORT_OPCIONES.map((o) => (
+                  <option key={o.value} value={o.value} className="font-body">Ordenar: {o.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-3 flex items-center justify-between gap-3 min-h-[44px] sm:min-h-[36px]">
+          <p role="status" aria-live="polite" className="text-surface-400 text-xs font-body">
+            {productos.length} de {allProductos.length} producto{allProductos.length === 1 ? '' : 's'}
+          </p>
+          {hayFiltros && (
+            <button type="button" onClick={limpiarFiltros}
+              className="flex items-center gap-2 min-h-[44px] sm:min-h-0 bg-surface-700 border border-surface-600 rounded-xl px-3 py-2
+                         text-surface-300 text-sm font-body hover:border-red-500/50 hover:text-red-400
+                         hover:bg-red-500/10 transition-all cursor-pointer whitespace-nowrap
+                         focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60">
+              <X size={13} aria-hidden="true" /> Limpiar filtros
+            </button>
+          )}
+        </div>
       </Card>
 
-      {/* Tabla */}
+      {/* Listado: tarjetas por producto (< lg) · tabla (≥ lg) */}
       <div ref={tableAnchorRef}>
       <Card className="overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full table-fixed text-sm font-body">
+        <ul aria-label="Listado de productos" className="grid grid-cols-1 md:grid-cols-2 gap-3 p-3 sm:p-4 lg:hidden">
+          {paginated.map((p) => (
+            <ProductoCard key={p.idProducto} producto={p}
+              onStock={abrirStock} onEditar={abrirEditar} onEliminar={pedirEliminar} />
+          ))}
+        </ul>
+
+        {/* Columnas secundarias colapsables: Categoría y P. Proveedor desde xl,
+            Tipo desde 2xl. Por debajo, su información se integra en la celda
+            del nombre para no forzar scroll horizontal. */}
+        <div className="hidden lg:block overflow-x-auto">
+          <table className="w-full text-sm font-body">
             <thead>
               <tr className="border-b border-surface-700">
-                <th className="w-16 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">ID</th>
-                <th className="w-[32%] text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
-                  onClick={() => toggleSort('nombre')}>
-                  <div className="flex items-center gap-1"><span>NOMBRE</span><SortIcon col="nombre" /></div>
+                <th scope="col" className="w-16 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">ID</th>
+                <th scope="col" aria-sort={ariaSort('nombre')} className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">
+                  <button type="button" onClick={() => toggleSort('nombre')} className="flex items-center gap-1 uppercase tracking-widest hover:text-white transition-colors">
+                    <span>NOMBRE</span><SortIcon col="nombre" />
+                  </button>
                 </th>
-                <th className="w-44 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">CATEGORÍA</th>
-                <th className="w-36 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">P. PROVEEDOR</th>
-                <th className="w-36 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
-                  onClick={() => toggleSort('precio')}>
-                  <div className="flex items-center gap-1"><span>P. VENTA</span><SortIcon col="precio" /></div>
+                <th scope="col" className="hidden xl:table-cell w-44 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">CATEGORÍA</th>
+                <th scope="col" className="hidden xl:table-cell w-36 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">P. PROVEEDOR</th>
+                <th scope="col" aria-sort={ariaSort('precio')} className="w-36 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">
+                  <button type="button" onClick={() => toggleSort('precio')} className="flex items-center gap-1 uppercase tracking-widest hover:text-white transition-colors">
+                    <span>P. VENTA</span><SortIcon col="precio" />
+                  </button>
                 </th>
-                <th className="w-24 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body cursor-pointer hover:text-white transition-colors"
-                  onClick={() => toggleSort('stock')}>
-                  <div className="flex items-center gap-1"><span>STOCK</span><SortIcon col="stock" /></div>
+                <th scope="col" aria-sort={ariaSort('stock')} className="w-24 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">
+                  <button type="button" onClick={() => toggleSort('stock')} className="flex items-center gap-1 uppercase tracking-widest hover:text-white transition-colors">
+                    <span>STOCK</span><SortIcon col="stock" />
+                  </button>
                 </th>
-                <th className="w-32 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">TIPO</th>
-                <th className="w-28 py-3 px-4"></th>
+                <th scope="col" className="hidden 2xl:table-cell w-32 text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">TIPO</th>
+                <th scope="col" className="w-28 py-3 px-4"><span className="sr-only">Acciones</span></th>
               </tr>
             </thead>
             <tbody>
               {paginated.map((p) => (
                 <tr key={p.idProducto}
                   className={`border-b border-surface-700/50 hover:bg-surface-700/30 transition-colors
-                    ${p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion ? 'bg-yellow-500/5' : ''}`}>
-                  <Td className="font-mono text-surface-400 whitespace-nowrap">#{p.idProducto}</Td>
-                  <Td>
+                    ${esBajoStock(p) ? 'bg-yellow-500/5' : ''}`}>
+                  <td className={`${TD} font-mono text-surface-400 whitespace-nowrap`}>#{p.idProducto}</td>
+                  <td className={`${TD} min-w-[14rem]`}>
                     <span className="text-white font-body">{p.nombre}</span>
-                    {p.proveedores?.length > 0 ? (
-                      <div className="flex items-center gap-1 mt-1 flex-wrap">
-                        <Truck size={11} className="text-surface-500 flex-shrink-0" />
-                        {p.proveedores.slice(0, 2).map((pv) => (
-                          <span key={pv.idProveedor} className="text-surface-400 text-xs font-body truncate">
-                            {pv.nombreComercial || pv.nombreFiscal}
-                            {p.proveedores.indexOf(pv) < Math.min(1, p.proveedores.length - 1) ? ',' : ''}
-                          </span>
-                        ))}
-                        {p.proveedores.length > 2 && (
-                          <span className="text-surface-500 text-xs font-body">+{p.proveedores.length - 2}</span>
-                        )}
-                      </div>
-                    ) : (
-                      <p className="text-surface-600 text-xs font-body mt-1">Sin proveedor asignado</p>
-                    )}
-                  </Td>
-                  <Td><div className="truncate"><Badge color="gray">{p.categoriaNombre}</Badge></div></Td>
-                  <Td className="font-mono text-surface-400 whitespace-nowrap">
-                    {p.precioProveedor > 0 ? fmt(p.precioProveedor) : <span className="text-surface-600">—</span>}
-                  </Td>
-                  <Td className="font-mono whitespace-nowrap">
-                    {p.precioUnitario > 0 ? fmt(p.precioUnitario) : <span className="text-surface-500">—</span>}
-                  </Td>
-                  <Td>
-                    <span className={`font-mono font-medium ${
-                      p.stockTotal === 0 ? 'text-red-400'
-                      : p.puntoReposicion > 0 && p.stockTotal <= p.puntoReposicion ? 'text-yellow-400'
-                      : 'text-emerald-400'}`}>
-                      {p.stockTotal}
-                    </span>
-                  </Td>
-                  <Td>
-                    {p.tieneMedidas ? <Badge color="blue">Con medidas</Badge> : <Badge color="gray">General</Badge>}
-                  </Td>
-                  <td className="py-2 px-4">
-                    <div className="flex items-center gap-1 justify-end">
-                      <button onClick={() => { setSelected(p); setModalStock(true) }} title="Actualizar stock"
-                        className="p-1.5 text-surface-400 hover:text-emerald-400 transition-colors rounded-lg hover:bg-surface-700">
-                        <PackagePlus size={15} />
-                      </button>
-                      <button onClick={() => { setSelected(p); setModalEditar(true) }} title="Editar"
-                        className="p-1.5 text-surface-400 hover:text-brand-400 transition-colors rounded-lg hover:bg-surface-700">
-                        <Pencil size={15} />
-                      </button>
-                      <button onClick={() => setDeleteConfirm(p)} title="Eliminar"
-                        className="p-1.5 text-surface-400 hover:text-red-400 transition-colors rounded-lg hover:bg-surface-700">
-                        <Trash2 size={15} />
-                      </button>
+                    <ProveedoresResumen proveedores={p.proveedores} />
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      <span className="xl:hidden"><Badge color="gray">{p.categoriaNombre}</Badge></span>
+                      {p.tieneMedidas ? <span className="2xl:hidden"><Badge color="blue">Con medidas</Badge></span> : null}
                     </div>
+                  </td>
+                  <td className={`hidden xl:table-cell ${TD}`}><div className="truncate"><Badge color="gray">{p.categoriaNombre}</Badge></div></td>
+                  <td className={`hidden xl:table-cell ${TD} font-mono text-surface-400 whitespace-nowrap`}>
+                    {p.precioProveedor > 0 ? fmt(p.precioProveedor) : <span className="text-surface-500">—</span>}
+                  </td>
+                  <td className={`${TD} font-mono whitespace-nowrap`}>
+                    {p.precioUnitario > 0 ? fmt(p.precioUnitario) : <span className="text-surface-500">—</span>}
+                  </td>
+                  <td className={TD}>
+                    <span className={`font-mono font-medium ${ESTADO_STOCK_CLASE[estadoStock(p)]}`}>{p.stockTotal}</span>
+                  </td>
+                  <td className={`hidden 2xl:table-cell ${TD}`}>
+                    {p.tieneMedidas ? <Badge color="blue">Con medidas</Badge> : <Badge color="gray">General</Badge>}
+                  </td>
+                  <td className="py-2 px-4">
+                    <AccionesProducto producto={p} onStock={abrirStock} onEditar={abrirEditar} onEliminar={pedirEliminar} />
                   </td>
                 </tr>
               ))}
@@ -1262,17 +1489,24 @@ export default function Inventario() {
         </div>
 
         {productos.length === 0 && (
-          <div className="text-center py-16 text-surface-500 font-body text-sm">Sin resultados para la búsqueda actual.</div>
+          <div className="flex flex-col items-center gap-3 text-center py-12 sm:py-16 px-4 text-surface-500 font-body text-sm">
+            <p>Sin resultados para la búsqueda actual.</p>
+            {hayFiltros && (
+              <Button variant="secondary" className="justify-center min-h-[44px] sm:min-h-0" onClick={limpiarFiltros}>
+                Limpiar filtros
+              </Button>
+            )}
+          </div>
         )}
 
         {totalPages > 1 && (
-          <div className="flex items-center justify-between px-6 py-3 border-t border-surface-700">
-            <p className="text-surface-400 text-xs font-body">
+          <div className="flex flex-col gap-3 px-4 sm:px-6 py-3 border-t border-surface-700 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-surface-400 text-xs font-body text-center sm:text-left">
               {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, productos.length)} de {productos.length}
             </p>
-            <div className="flex gap-2">
-              <Button size="sm" variant="secondary" onClick={() => { setPage((p) => Math.max(1, p - 1)); scrollToStart() }} disabled={page === 1}>← Anterior</Button>
-              <Button size="sm" variant="secondary" onClick={() => { setPage((p) => Math.min(totalPages, p + 1)); scrollToStart() }} disabled={page === totalPages}>Siguiente →</Button>
+            <div className="grid grid-cols-2 gap-2 sm:flex">
+              <Button variant="secondary" className="justify-center min-h-[44px] sm:min-h-0" onClick={() => { setPage((p) => Math.max(1, p - 1)); scrollToStart() }} disabled={page === 1}>← Anterior</Button>
+              <Button variant="secondary" className="justify-center min-h-[44px] sm:min-h-0" onClick={() => { setPage((p) => Math.min(totalPages, p + 1)); scrollToStart() }} disabled={page === totalPages}>Siguiente →</Button>
             </div>
           </div>
         )}
@@ -1303,8 +1537,8 @@ export default function Inventario() {
           Esta acción no se puede deshacer y el producto dejará de aparecer en el catálogo.
         </p>
         <div className="flex gap-2">
-          <Button variant="secondary" className="flex-1" onClick={() => setDeleteConfirm(null)}>Cancelar</Button>
-          <Button variant="danger" className="flex-1" onClick={() => eliminar(deleteConfirm)}>Eliminar</Button>
+          <Button variant="secondary" className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={() => setDeleteConfirm(null)}>Cancelar</Button>
+          <Button variant="danger" className="flex-1 justify-center min-h-[44px] sm:min-h-0" onClick={() => eliminar(deleteConfirm)}>Eliminar</Button>
         </div>
       </Modal>
     </div>

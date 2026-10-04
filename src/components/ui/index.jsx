@@ -13,7 +13,7 @@
 // que es el lugar correcto según DRY y el principio Open/Closed: las páginas
 // no se modifican, el comportamiento se extiende desde afuera.
 import { createPortal } from 'react-dom'
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { Children, cloneElement, isValidElement, useCallback, useEffect, useId, useRef, useState } from 'react'
 import { esPromesa, MIN_PENDING_MS, DEFAULT_TIMEOUT_MS } from '../../hooks/useAsyncAction'
 import { logger } from '../../lib/logger'
 
@@ -101,6 +101,12 @@ export function Button({
 
   const ocupado   = guard ? (loading || pending) : loading
   const bloqueado = ocupado || disabled
+  // Botones "solo ícono" (Editar/Eliminar en filas de tabla, tabs, etc.) son
+  // el caso de mayor riesgo de fallar el tamaño de toque en mobile: con
+  // size="sm" el área clickeable ronda los 30px. Se amplía a 44x44 (mínimo
+  // recomendado por Apple HIG / Material Design) SOLO en mobile — desde `sm`
+  // se respeta el tamaño compacto original pensado para densidad de escritorio.
+  const soloIcono = !children && !!Icon
 
   const handleClick = useCallback(
     (evento) => {
@@ -180,6 +186,7 @@ export function Button({
           transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed
           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60 focus-visible:ring-offset-2 focus-visible:ring-offset-surface-900
           ${ocupado ? 'opacity-60 cursor-progress pointer-events-auto' : ''}
+          ${soloIcono ? 'min-h-[44px] min-w-[44px] justify-center md:min-h-0 md:min-w-0' : ''}
           ${variants[variant]} ${sizes[size]} ${className}
         `}
         {...props}
@@ -226,7 +233,7 @@ export function Input({ label, error, id, className = '', ...props }) {
         aria-invalid={error ? true : undefined}
         aria-describedby={error ? errorId : undefined}
         className={`
-          w-full bg-surface-700 border rounded-xl px-4 py-2.5 text-white text-sm
+          w-full bg-surface-700 border rounded-xl px-4 py-2.5 text-white text-base sm:text-sm
           font-body placeholder-surface-500
           focus:outline-none focus:ring-1 transition-all duration-200
           ${error
@@ -264,7 +271,7 @@ export function Select({ label, error, children, id, className = '', ...props })
         aria-invalid={error ? true : undefined}
         aria-describedby={error ? errorId : undefined}
         className={`
-          w-full bg-surface-700 border rounded-xl px-4 py-2.5 text-white text-sm
+          w-full bg-surface-700 border rounded-xl px-4 py-2.5 text-white text-base sm:text-sm
           font-body focus:outline-none focus:ring-1 transition-all duration-200 cursor-pointer
           ${error
             ? 'border-red-500 focus:border-red-500 focus:ring-red-500/30'
@@ -315,27 +322,64 @@ export function Card({ children, className = '' }) {
 
 export function PageHeader({ title, subtitle, actions }) {
   return (
-    <div className="flex items-start justify-between gap-4 mb-8 animate-slide-up">
-      <div>
+    <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-start sm:justify-between gap-3 sm:gap-4 mb-6 sm:mb-8 animate-slide-up">
+      {/* `sm:min-w-min`: el título no se comprime por debajo de su palabra más
+            larga. Si junto a las acciones no entra, es la fila de acciones la que
+            pasa a la línea siguiente (`sm:flex-wrap` en el contenedor), en vez de
+            aplastar el título letra por letra. Depende del ancho REAL del
+            contenedor, no del viewport: con sidebar fijo el área útil es menor. */}
+      <div className="min-w-0 sm:min-w-min sm:flex-1">
         <p className="text-brand-500 text-xs font-mono tracking-[0.3em] uppercase mb-1">
           {subtitle}
         </p>
-        <h1 className="font-display text-4xl text-white tracking-widest">
+        {/* text-2xl→text-4xl: en 320px de ancho, "text-4xl tracking-widest" en
+            mayúsculas puede exceder el viewport y forzar scroll horizontal de
+            toda la página. `break-words` es la red de seguridad si aun así
+            un título es más largo de lo esperado. */}
+        <h1 className="font-display text-2xl sm:text-3xl md:text-4xl text-white tracking-wide sm:tracking-widest break-words">
           {title.toUpperCase()}
         </h1>
       </div>
-      {actions && <div className="flex items-center gap-2 flex-shrink-0">{actions}</div>}
+      {actions && <div className="flex items-center gap-2 flex-wrap flex-shrink-0 max-w-full">{actions}</div>}
     </div>
   )
 }
 
 // ─── Table ────────────────────────────────────────────────────────────────
 
+/**
+ * DECISIÓN DE ARQUITECTURA (Escenario 3 — listados en mobile):
+ * en vez de crear un componente <MobileCardList> paralelo que cada una de
+ * las 9 pantallas ABMC tendría que aprender a usar además de <Table>, la
+ * transformación tabla→tarjetas vive DENTRO de <Table>, igual que la
+ * protección de doble-clic vive dentro de <Button>. `headers` ya es la
+ * fuente de verdad de qué representa cada columna; acá se usa además para
+ * inyectar la etiqueta de cada celda vía `Children.map` + `cloneElement`
+ * (Decorator sobre la salida de cada fila), así que:
+ *   - los ~40 usos de <Table>/<Tr>/<Td> del proyecto no cambian una línea.
+ *   - un desarrollador nuevo que agregue una pantalla ABMC #10 obtiene el
+ *     comportamiento responsive gratis, sin tener que saberlo.
+ * Por debajo de `md` (768px) cada <Tr> se renderiza como card con sus <Td>
+ * apilados "etiqueta: valor"; desde `md` el layout vuelve a ser una tabla
+ * HTML real e idéntica a la original (cero regresión visual en desktop).
+ */
 export function Table({ headers, children, empty }) {
+  const rows = Children.map(children, (row) => {
+    if (!isValidElement(row)) return row
+    const cells = Children.map(row.props.children, (cell, i) => {
+      // Las celdas con `colSpan` (p. ej. la fila de "Cargando…") ocupan
+      // toda la fila y no corresponden a una columna puntual: no reciben
+      // etiqueta, para no mostrar "#: Cargando…" en mobile.
+      if (!isValidElement(cell) || cell.props.colSpan) return cell
+      return cloneElement(cell, { 'data-label': headers[i] })
+    })
+    return cloneElement(row, {}, cells)
+  })
+
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm font-body">
-        <thead>
+    <div className="md:overflow-x-auto">
+      <table className="w-full text-sm font-body block md:table">
+        <thead className="hidden md:table-header-group">
           <tr className="border-b border-surface-700">
             {headers.map((h) => (
               <th
@@ -348,12 +392,12 @@ export function Table({ headers, children, empty }) {
             ))}
           </tr>
         </thead>
-        <tbody>
-          {children}
+        <tbody className="block md:table-row-group space-y-3 md:space-y-0 p-3 md:p-0">
+          {rows}
         </tbody>
       </table>
       {empty && (
-        <div className="text-center py-16 text-surface-500 font-body">
+        <div className="text-center py-16 text-surface-500 font-body px-4">
           {empty}
         </div>
       )}
@@ -365,8 +409,11 @@ export function Tr({ children, onClick, className = '' }) {
   return (
     <tr
       onClick={onClick}
-      className={`border-b border-surface-700/50 transition-colors duration-150
-                  ${onClick ? 'cursor-pointer hover:bg-surface-700/40' : ''}
+      className={`block md:table-row rounded-xl md:rounded-none
+                  bg-surface-700/40 md:bg-transparent
+                  border border-surface-700 md:border-0 md:border-b md:border-surface-700/50
+                  transition-colors duration-150
+                  ${onClick ? 'cursor-pointer active:bg-surface-700/70 md:hover:bg-surface-700/40' : ''}
                   ${className}`}
     >
       {children}
@@ -374,9 +421,29 @@ export function Tr({ children, onClick, className = '' }) {
   )
 }
 
-export function Td({ children, className = '' }) {
+export function Td({ children, className = '', 'data-label': dataLabel, ...rest }) {
+  // Celda "plana" (colSpan, o sin columna asociada): se respeta el layout
+  // original (ej. `text-center` para el mensaje de "Cargando…").
+  if (!dataLabel) {
+    return (
+      <td className={`block md:table-cell py-1.5 md:py-3 px-3 md:px-4 text-surface-200 ${className}`} {...rest}>
+        {children}
+      </td>
+    )
+  }
   return (
-    <td className={`py-3 px-4 text-surface-200 ${className}`}>{children}</td>
+    <td
+      className={`flex md:table-cell items-center md:items-normal justify-between gap-3
+                  py-1.5 md:py-3 px-3 md:px-4 text-surface-200 ${className}`}
+      {...rest}
+    >
+      <span className="md:hidden shrink-0 text-surface-500 text-[10px] tracking-widest uppercase font-body">
+        {dataLabel}
+      </span>
+      <span className="min-w-0 text-right md:text-left [&>div]:justify-end md:[&>div]:justify-start">
+        {children}
+      </span>
+    </td>
   )
 }
 
@@ -422,7 +489,13 @@ export function Modal({ open, onClose, title, children, width = 'max-w-lg', busy
   if (!open) return null
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    // items-end en mobile: modal tipo "bottom sheet", anclado al borde
+    // inferior de la pantalla. Es el patrón más usado en apps nativas para
+    // formularios en mobile porque queda más cerca del pulgar y, combinado
+    // con `dvh` (dynamic viewport height) más abajo, se recalcula solo
+    // cuando el teclado virtual reduce el viewport visual — sin JS extra
+    // para "esquivar" el teclado (Escenario 4).
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
       <div
         className="absolute inset-0 bg-black/70"
         onClick={busy ? undefined : onClose}
@@ -433,23 +506,33 @@ export function Modal({ open, onClose, title, children, width = 'max-w-lg', busy
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className={`relative bg-surface-800 border border-surface-700 rounded-2xl
-                    shadow-2xl w-full ${width} animate-slide-up max-h-[90vh] overflow-y-auto`}
+        className={`relative bg-surface-800 border border-surface-700 rounded-t-3xl sm:rounded-2xl
+                    shadow-2xl w-full ${width} animate-slide-up max-h-[92dvh] sm:max-h-[90vh]
+                    overflow-y-auto overscroll-contain pb-[env(safe-area-inset-bottom)] sm:pb-0`}
       >
-        <div className="flex items-center justify-between p-6 border-b border-surface-700">
-          <h2 className="font-body font-semibold text-white">{title}</h2>
+        {/* Encabezado `sticky`: en formularios largos el título y el botón de
+            cerrar siguen a la vista al hacer scroll (con teclado virtual
+            abierto el viewport útil puede ser < 400px). El botón de cierre
+            mide 44x44 en mobile (Apple HIG / WCAG 2.5.5) y vuelve al tamaño
+            compacto desde `sm`. */}
+        <div className="sticky top-0 z-10 flex items-center justify-between gap-3 px-4 py-2 sm:p-6
+                        bg-surface-800 border-b border-surface-700">
+          <h2 className="font-body font-semibold text-white min-w-0 break-words">{title}</h2>
           <button
             type="button"
             onClick={onClose}
             disabled={busy}
             aria-label="Cerrar"
-            className="text-surface-400 hover:text-white transition-colors text-xl leading-none
+            className="flex items-center justify-center flex-shrink-0 min-h-[44px] min-w-[44px] -mr-2 sm:mr-0
+                       sm:min-h-0 sm:min-w-0 rounded-lg text-surface-400 hover:text-white transition-colors
+                       text-2xl sm:text-xl leading-none
+                       focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60
                        disabled:opacity-40 disabled:cursor-not-allowed"
           >
             ×
           </button>
         </div>
-        <div className="p-6">{children}</div>
+        <div className="p-4 sm:p-6">{children}</div>
       </div>
     </div>,
     document.body,
