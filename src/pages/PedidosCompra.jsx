@@ -9,7 +9,7 @@ import {
   Plus, Trash2, Search, CheckCircle2, AlertCircle,
   ArrowLeft, ShoppingCart, Package, Clock, BadgeCheck,
   Pencil, Truck, RotateCcw, UserPlus, Building2, CalendarCheck,
-  Layers, Landmark, Lock, Printer,
+  Layers, Landmark, Lock,
 } from 'lucide-react'
 import {
   obtenerPedidos,
@@ -31,7 +31,9 @@ import {
   validarEdicionPlanCuotas,
 } from '../services/pedidosCuotasService'
 import PlanCuotasCC, { CUOTA_EMPTY } from '../components/pedidos/PlanCuotasCC'
-import { generarPDFPedidoCompra } from '../lib/pdfPedidoCompra'
+import { generarPDFPedidoCompra, MENSAJE_SIN_SELECCION } from '../lib/pdfPedidoCompra'
+import ExportarHojaToolbar from '../components/pedidos/ExportarHojaToolbar'
+import { useSeleccionItems } from '../hooks/useSeleccionItems'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -602,6 +604,8 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
   const [loadingCuota,  setLoadingCuota]  = useState(false)
   const [generandoPDF,  setGenerandoPDF]  = useState(false)
   const [pdfError,      setPdfError]      = useState('')
+  const [listarCantidad, setListarCantidad] = useState(false) // 'Listar cantidad' desactivada por defecto
+  const sel = useSeleccionItems(detalles)
 
   const reload = useCallback(async () => {
     // Pedido actualizado
@@ -675,14 +679,31 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
     }
   }
 
+  // Limpia el aviso de "sin selección" apenas el usuario marca algo.
+  useEffect(() => { if (sel.cantidad > 0) setPdfError('') }, [sel.cantidad])
+
   async function descargarHojaRecepcion() {
+    if (generandoPDF) return
+    // Bloqueo en UI (criterio: sin selección no se exporta). El generador valida también.
+    if (sel.cantidad === 0) {
+      setPdfError(MENSAJE_SIN_SELECCION)
+      return
+    }
     setPdfError('')
     setGenerandoPDF(true)
     try {
-      await generarPDFPedidoCompra(pedido.idPedido)
+      // La configuración se lee en el momento del clic: el PDF refleja exactamente lo definido.
+      await generarPDFPedidoCompra(pedido.idPedido, {
+        idsDetalle: sel.idsSeleccionados,
+        listarCantidad,
+      })
     } catch (err) {
-      console.error(err)
-      setPdfError('No se pudo generar el PDF. Intentá nuevamente.')
+      if (err?.code === 'SIN_SELECCION') {
+        setPdfError(MENSAJE_SIN_SELECCION)
+      } else {
+        console.error('[PedidoDetalle] Error generando PDF', { idPedido: pedido.idPedido, err })
+        setPdfError('No se pudo generar el PDF. Intentá nuevamente.')
+      }
     } finally {
       setGenerandoPDF(false)
     }
@@ -881,31 +902,28 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
 
       {/* Tabla de ítems */}
       <Card className="overflow-hidden">
-        <div className="px-6 py-4 border-b border-surface-700 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <h3 className="font-body font-semibold text-white text-sm">Productos</h3>
-            <span className="text-surface-400 text-xs font-mono">{detalles.length} ítem{detalles.length !== 1 ? 's' : ''}</span>
-          </div>
-          <Button
-            size="sm"
-            variant="secondary"
-            icon={Printer}
-            disabled={generandoPDF || detalles.length === 0}
-            onClick={descargarHojaRecepcion}
-          >
-            {generandoPDF ? 'Generando…' : 'Hoja de recepción (PDF)'}
-          </Button>
+        <div className="px-6 py-4 border-b border-surface-700 flex items-center gap-3">
+          <h3 className="font-body font-semibold text-white text-sm">Productos</h3>
+          <span className="text-surface-400 text-xs font-mono">{detalles.length} ítem{detalles.length !== 1 ? 's' : ''}</span>
         </div>
-        {pdfError && (
-          <div className="mx-6 mt-4 flex items-center gap-2 text-red-400 text-sm bg-red-500/10 border border-red-500/20
-                          rounded-xl px-4 py-2.5 font-body">
-            <AlertCircle size={15} className="flex-shrink-0" />{pdfError}
-          </div>
+        {detalles.length > 0 && (
+          <ExportarHojaToolbar
+            total={sel.total}
+            seleccionados={sel.cantidad}
+            todos={sel.todos}
+            listarCantidad={listarCantidad}
+            generando={generandoPDF}
+            error={pdfError}
+            onToggleTodos={sel.toggleTodos}
+            onCambiarCantidad={setListarCantidad}
+            onExportar={descargarHojaRecepcion}
+          />
         )}
         <div className="overflow-x-auto">
           <table className="w-full text-sm font-body">
             <thead>
               <tr className="border-b border-surface-700">
+                <th className="py-3 px-4 w-10"><span className="sr-only">Incluir en la exportación</span></th>
                 {['#','ID Prod.','Producto','Medida','Cant.','Precio Proveedor','Subtotal'].map(h => (
                   <th key={h} className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">{h}</th>
                 ))}
@@ -913,7 +931,18 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
             </thead>
             <tbody>
               {detalles.map((d, idx) => (
-                <tr key={d.idDetallePedido} className="border-b border-surface-700/50">
+                <tr key={d.idDetallePedido}
+                  className={`border-b border-surface-700/50 ${sel.estaSeleccionado(d.idDetallePedido) ? 'bg-brand-500/5' : ''}`}>
+                  <td className="py-3 px-4">
+                    <input
+                      type="checkbox"
+                      checked={sel.estaSeleccionado(d.idDetallePedido)}
+                      onChange={() => sel.toggle(d.idDetallePedido)}
+                      aria-label={`Incluir en la exportación: ${d.nombreProducto ?? 'producto #' + d.idProducto}${d.medida ? ' ' + d.medida : ''}`}
+                      className="h-4 w-4 rounded accent-brand-500 cursor-pointer
+                                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400"
+                    />
+                  </td>
                   <td className="py-3 px-4 text-surface-500 text-xs font-mono">{idx + 1}</td>
                   <td className="py-3 px-4 text-surface-400 font-mono text-xs">#{d.idProducto}</td>
                   <td className="py-3 px-4 text-white font-body">{d.nombreProducto ?? `#${d.idProducto}`}</td>
