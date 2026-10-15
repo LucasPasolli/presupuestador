@@ -12,6 +12,10 @@ import {
   obtenerMedidasDeProducto,
 } from '../services/productosService'
 import { obtenerProveedores, contarProductosDeProveedor, actualizarPrecioPorProveedor } from '../services/proveedoresService'
+import { obtenerPromocionesVigentes } from '../services/promocionesService'
+import {
+  construirFilasListaPrecios, generarListaPreciosXlsx, descargarArchivo, fechaLocalISO,
+} from '../lib/listaPreciosExport'
 import { supabase } from '../lib/supabase'
 import { Button, Card, PageHeader, Modal, Input, Select, Badge } from '../components/ui'
 import {
@@ -28,7 +32,8 @@ import { Plus, Search, Pencil, Trash2, ChevronDown, ChevronUp, PackagePlus, X, C
 // fondo pese a estar seteados en el código. `exceljs` sí soporta estilos de
 // escritura de forma nativa y es la librería estándar de facto para este caso.
 //
-// `exceljs` se importa de forma DINÁMICA (ver exportarExcel) y no acá arriba
+// `exceljs` se importa de forma DINÁMICA (ver generarListaPreciosXlsx en
+// lib/listaPreciosExport.js) y no acá arriba
 // a propósito: es una librería pesada que solo hace falta cuando el usuario
 // hace clic en "Exportar Lista". Con un import estático, Vite la incluiría
 // en el bundle inicial de toda la pantalla de Inventario aunque nadie llegue
@@ -978,7 +983,7 @@ function AccionesCabecera({ compacta = false, exportando, sinProductos, onNuevo,
         className={tactil}
         onClick={onExportar}
         disabled={sinProductos || exportando}
-        title={sinProductos ? 'No hay productos para exportar con los filtros aplicados' : 'Exportar a Excel (Código, Producto, Precio)'}
+        title={sinProductos ? 'No hay productos para exportar con los filtros aplicados' : 'Exportar a Excel (con precios promocionales vigentes)'}
       >
         {exportando ? 'Exportando...' : 'Exportar Lista'}
       </Button>
@@ -1118,25 +1123,23 @@ export default function Inventario() {
     }
   }
 
-  // Exporta el listado de productos a Excel con formato prolijo:
-  // solo Código / Producto / Precio de venta, encabezados destacados,
-  // precio con formato moneda y columnas ajustadas al contenido.
+  // Exporta el listado de productos a Excel: Código / Producto / Precio original /
+  // Precio final / Promoción. Los artículos con promoción VIGENTE a la fecha de
+  // exportación salen con el precio promocional aplicado, el original tachado y un
+  // tag "EN PROMO". Los demás salen con su precio de venta regular.
+  //
   // Usa `productos` (filtrado + ordenado por el hook), nunca `allProductos`,
   // para que el archivo respete cualquier búsqueda/filtro activo en pantalla.
   //
-  // Seguridad (uso de exceljs): esta función solo ESCRIBE un workbook nuevo
-  // a partir de datos propios del sistema; nunca lee un .xlsx externo/subido
-  // por el usuario ni usa workbook.addImage() o comentarios/notas de celda.
-  // Esos son justamente los vectores de las vulnerabilidades conocidas de
-  // exceljs (parseo de archivos maliciosos, path traversal en addImage,
-  // notas con __proto__), por lo que no aplican a este flujo. Además se
-  // sanea el texto exportado (ver `sanitizarTexto`) para evitar que un
-  // nombre de producto se interprete como fórmula al abrir el archivo.
+  // La lógica (cálculo de precios, armado del .xlsx, descarga) vive en
+  // lib/listaPreciosExport.js; acá solo se orquesta y se informa al usuario.
+  //
+  // Fail-closed: si no se pueden consultar las promociones NO se exporta con
+  // precios regulares en silencio, porque justamente se generaría una lista que
+  // difiere de lo que se cobra. Se avisa y el usuario reintenta.
   async function exportarExcel() {
-    // Escenario 6: sin resultados no se genera un archivo vacío y confuso;
-    // se avisa al usuario para que ajuste los filtros. Se resuelve ANTES de
-    // tocar el estado de carga o descargar el chunk de exceljs, para no
-    // gastar red ni parpadear el botón cuando no hay nada que exportar.
+    // Sin resultados no se genera un archivo vacío y confuso. Se resuelve ANTES de
+    // tocar el estado de carga o la red.
     if (productos.length === 0) {
       showToast('No hay productos para exportar con los filtros aplicados', 'error')
       return
@@ -1144,95 +1147,19 @@ export default function Inventario() {
 
     setExportando(true)
     try {
-      // Mitigación de "Formula Injection": si el nombre de un producto
-      // empezara con =, +, -, @, TAB o retorno de carro, Excel podría
-      // interpretarlo como el inicio de una fórmula al abrir el archivo.
-      // Se antepone un apóstrofo para forzarlo a texto plano.
-      const sanitizarTexto = (valor) => {
-        const texto = String(valor ?? '').trim()
-        return /^[=+\-@\t\r]/.test(texto) ? `'${texto}` : texto
-      }
+      const fecha = fechaLocalISO() // fecha local (no UTC) de exportación
+      const promosVigentes = await obtenerPromocionesVigentes(fecha)
+      const filas = construirFilasListaPrecios(productos, promosVigentes)
+      const buffer = await generarListaPreciosXlsx(filas)
+      descargarArchivo(buffer, `Lista_Productos_${fecha}.xlsx`)
 
-      // Carga diferida (code-splitting): exceljs recién se descarga acá,
-      // en el momento del clic, y no al entrar a la pantalla de Inventario.
-      const { default: ExcelJS } = await import('exceljs')
-
-      // Precio de VENTA (precioUnitario). El precio de proveedor/compra
-      // (precioProveedor) es un dato interno y nunca debe exportarse aquí.
-      const filas = productos.map((p) => ({
-        codigo: p.idProducto,
-        producto: sanitizarTexto(p.nombre),
-        precio: Number(p.precioUnitario) || 0,
-      }))
-
-      // Escenario 4: ancho de columna calculado a partir del contenido más
-      // largo (encabezado incluido), con piso/techo para evitar columnas
-      // ilegibles o desmesuradas.
-      const anchoAutomatico = (valores, min, max) => {
-        const largoMax = Math.max(...valores.map((v) => String(v ?? '').length))
-        return Math.min(Math.max(largoMax + 2, min), max)
-      }
-
-      const workbook = new ExcelJS.Workbook()
-      workbook.creator = 'Sistema de Inventario'
-      workbook.created = new Date()
-
-      const worksheet = workbook.addWorksheet('Lista Productos', {
-        views: [{ state: 'frozen', ySplit: 1 }], // encabezado siempre visible al scrollear
-      })
-
-      worksheet.columns = [
-        { header: 'Código',   key: 'codigo',   width: anchoAutomatico([6, ...filas.map((f) => f.codigo)], 8, 14) },
-        { header: 'Producto', key: 'producto', width: anchoAutomatico(['Producto', ...filas.map((f) => f.producto)], 20, 60) },
-        { header: 'Precio',   key: 'precio',   width: anchoAutomatico(['Precio', ...filas.map((f) => fmt(f.precio))], 12, 20) },
-      ]
-      worksheet.addRows(filas)
-
-      // Escenario 2: encabezados con formato diferenciado (negrita + fondo).
-      const headerRow = worksheet.getRow(1)
-      headerRow.eachCell((cell) => {
-        cell.font = { bold: true, color: { argb: 'FFFFFFFF' } }
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F2937' } }
-        cell.alignment = { horizontal: 'center', vertical: 'middle' }
-        cell.border = {
-          top:    { style: 'thin', color: { argb: 'FFD1D5DB' } },
-          bottom: { style: 'thin', color: { argb: 'FFD1D5DB' } },
-        }
-      })
-      headerRow.height = 20
-
-      // Escenario 3: columna Precio con formato numérico/moneda real
-      // (no texto), con separador de miles y dos decimales.
-      worksheet.getColumn('precio').numFmt = '$ #,##0.00'
-      worksheet.getColumn('precio').alignment = { horizontal: 'right' }
-
-      // Bordes suaves en las filas de datos, para un acabado prolijo.
-      for (let r = 2; r <= worksheet.rowCount; r++) {
-        worksheet.getRow(r).eachCell((cell) => {
-          cell.border = { bottom: { style: 'hair', color: { argb: 'FFE5E7EB' } } }
-        })
-      }
-
-      // exceljs no tiene un "writeFile" de navegador: se genera el buffer y
-      // se dispara la descarga manualmente mediante un Blob temporal.
-      const buffer = await workbook.xlsx.writeBuffer()
-      const blob = new Blob([buffer], {
-        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      })
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = `Lista_Productos_${new Date().toISOString().slice(0, 10)}.xlsx`
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      URL.revokeObjectURL(url)
-
-      showToast(`Excel exportado: ${productos.length} producto${productos.length === 1 ? '' : 's'}`)
+      const enPromo = filas.filter((f) => f.enPromo).length
+      showToast(
+        `Excel exportado: ${filas.length} producto${filas.length === 1 ? '' : 's'}` +
+        (enPromo > 0 ? ` (${enPromo} con precio promocional)` : '')
+      )
     } catch (err) {
-      // No se expone el detalle técnico (stack, versión de librería, etc.)
-      // al usuario final; solo un aviso genérico, siguiendo el mismo patrón
-      // de manejo de errores que el resto de la pantalla.
+      // No se expone el detalle técnico al usuario final.
       console.error('[Inventario] Error exportando a Excel:', err)
       showToast('No se pudo generar el archivo Excel. Intentá nuevamente.', 'error')
     } finally {
