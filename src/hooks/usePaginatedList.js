@@ -98,24 +98,29 @@ export function usePaginatedList({
   const fetcherRef      = useRef(fetcher);      fetcherRef.current      = fetcher
   const clientFilterRef = useRef(clientFilter); clientFilterRef.current = clientFilter
   const sortRef         = useRef(sort);         sortRef.current         = sort
+  const reqIdRef        = useRef(0) // descarta respuestas de requests anteriores
 
   const load = useCallback(async () => {
+    const reqId = ++reqIdRef.current
     setLoading(true)
     setError(null)
     try {
       if (mode === 'server') {
         const { data, count: total } = await fetcherRef.current({ ...serverFilters, page, pageSize })
+        if (reqId !== reqIdRef.current) return
         setItems(data)
         setCount(total ?? data.length)
       } else {
         const data = await fetcherRef.current(serverFilters)
+        if (reqId !== reqIdRef.current) return
         setRawItems(data)
       }
     } catch (err) {
+      if (reqId !== reqIdRef.current) return
       console.error('[usePaginatedList] Error cargando datos:', err)
       setError(err)
     } finally {
-      setLoading(false)
+      if (reqId === reqIdRef.current) setLoading(false)
     }
     // `page` solo debe formar parte de la identidad de `load` en mode
     // 'server' (ahí sí hay que refetchear al cambiar de página). En mode
