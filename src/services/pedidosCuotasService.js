@@ -23,7 +23,7 @@ function manejarError(operacion, error) {
   throw new Error(error.message)
 }
 
-function mapCuota(row) {
+export function mapCuota(row) {
   if (!row) return null
   return {
     idCuota:          row.id_cuota,

@@ -9,27 +9,28 @@ import {
   Plus, Trash2, Search, CheckCircle2, AlertCircle,
   ArrowLeft, ShoppingCart, Package, Clock, BadgeCheck,
   Pencil, Truck, RotateCcw, UserPlus, Building2, CalendarCheck,
-  Layers, Landmark, Lock,
+  Layers, Landmark, Lock, Loader2,
 } from 'lucide-react'
 import {
   obtenerPedidos,
   obtenerPedidoPorId,
   obtenerDetallesDePedido,
-  crearPedido,
-  actualizarPedido,
   marcarPedidoPagado,
   recibirPedido,
 } from '../services/pedidosService'
 import {
-  calcularPlanCuotas,
   validarPlanCuotas,
-  crearPedidoConCuotas,
   obtenerCuotasDePedido,
   obtenerResumenCuotasPorPedidos,
   marcarCuotaPagada,
-  actualizarPlanCuotas,
   validarEdicionPlanCuotas,
 } from '../services/pedidosCuotasService'
+// Guardado transaccional en lote (1 RPC) + carga con joins (1 query).
+import {
+  guardarPedido,
+  obtenerPedidoParaEdicion,
+  crearGestorIdempotencia,
+} from '../services/pedidosGuardadoService'
 import PlanCuotasCC, { CUOTA_EMPTY } from '../components/pedidos/PlanCuotasCC'
 import { generarPDFPedidoCompra, MENSAJE_SIN_SELECCION } from '../lib/pdfPedidoCompra'
 import ExportarHojaToolbar from '../components/pedidos/ExportarHojaToolbar'
@@ -346,6 +347,14 @@ function ItemRow({ item, index, onUpdate, onRemove, disabled = false }) {
   const [showDrop,       setShowDrop]       = useState(false)
   const [dropPos,        setDropPos]        = useState({ top: 0, left: 0, width: 0 })
   const [medidas,        setMedidas]        = useState([])
+  // En edición el padre ya trajo las medidas con el JOIN de carga del pedido:
+  // se usan tal cual y NO se consulta nada por ítem. Se indexan por producto para
+  // que, si el usuario cambia el producto de la fila, se vuelva a consultar.
+  const precargadas = useRef(
+    Array.isArray(item.medidasPrecargadas)
+      ? { idProducto: String(item.idProducto), medidas: item.medidasPrecargadas }
+      : null
+  )
   const inputRef = useRef(null)
   const wrapRef  = useRef(null)
   const dropRef  = useRef(null)
@@ -383,25 +392,28 @@ function ItemRow({ item, index, onUpdate, onRemove, disabled = false }) {
   // Cargar medidas si el producto las tiene
   useEffect(() => {
     if (!item.idProducto) { setMedidas([]); return }
+
+    const pre = precargadas.current
+    if (pre && pre.idProducto === String(item.idProducto)) { setMedidas(pre.medidas); return }
+
+    let cancelado = false
     async function fetchMedidas() {
+      // UNA consulta con relación (antes: 2 consultas secuenciales por ítem).
       const { data: prod } = await supabase
         .from('producto')
-        .select('tiene_medidas')
+        .select('tiene_medidas, producto_medida ( medida )')
         .eq('id_producto', parseInt(item.idProducto))
         .single()
+      if (cancelado) return
       if (prod?.tiene_medidas) {
-        const { data: ms } = await supabase
-          .from('producto_medida')
-          .select('medida')
-          .eq('id_producto', parseInt(item.idProducto))
-          .order('medida')
-        setMedidas((ms ?? []).map(r => r.medida))
+        setMedidas((prod.producto_medida ?? []).map(r => r.medida).sort())
       } else {
         setMedidas([])
         onUpdate(index, 'medida', null)
       }
     }
     fetchMedidas()
+    return () => { cancelado = true }
   }, [item.idProducto])
 
   async function buscarPorNombre(text) {
@@ -1070,6 +1082,11 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
 
 // ─── Formulario nuevo / editar pedido ──────────────────────────────────────
 
+// Ícono giratorio para el botón de guardar (Button recibe el ícono como componente).
+function IconoGuardando({ className = '', ...rest }) {
+  return <Loader2 {...rest} className={`${className} animate-spin`} aria-hidden="true" />
+}
+
 const ITEM_EMPTY = () => ({ idProducto: '', nombreProducto: '', cantidad: 1, precioUnitario: '', medida: null })
 
 const METODOS_PAGO = [
@@ -1092,7 +1109,13 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
   const [error,      setError]      = useState('')
   const [saving,     setSaving]     = useState(false)
   const savingRef                   = useRef(false)   // guardia síncrona contra doble-click
+  const [guardandoLento, setGuardandoLento] = useState(false) // feedback si el guardado tarda > 1 s
+  // Clave de idempotencia ligada al contenido: reintento = misma clave (no duplica);
+  // contenido corregido = clave nueva.
+  const idemRef = useRef(crearGestorIdempotencia())
   const [loadingInit, setLoadingInit] = useState(esEdicion)
+  const [errorCarga,   setErrorCarga]   = useState('')
+  const [reintentoCarga, setReintentoCarga] = useState(0)
 
   // ── Cuenta Corriente: fraccionamiento en cuotas ──────────────────────────
   // conFraccion=false  → CC simple, pago único a `diasVencimientoCC` días.
@@ -1104,7 +1127,7 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
   // puede editar es el PLAN dentro de una modalidad de cuotas ya elegida:
   // las cuotas 'pendiente' son reformulables (%, días, agregar/quitar); las
   // 'pagada' son inmutables porque representan dinero ya entregado — ver
-  // cuotasPagadas / hayCuotaPagada más abajo y actualizarPlanCuotas() en
+  // cuotasPagadas / hayCuotaPagada más abajo y el RPC guardarPedido() en
   // guardar().
   const [conFraccion,       setConFraccion]       = useState(
     esEdicion ? !!pedidoEditando.tieneCuotas : false
@@ -1122,53 +1145,52 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
   // editable libremente, igual que antes.
   const hayCuotaPagada = esEdicion && cuotasPagadas.length > 0
 
-  // En edición: cargar detalles y proveedor desde el service
+  // En edición: UNA sola consulta con relaciones trae pedido + proveedor + ítems
+  // (con las medidas disponibles de cada producto) + plan de cuotas.
+  // Antes: 3 consultas fijas + 2 por ítem (medidas) → crecía con N.
   useEffect(() => {
     if (!esEdicion) return
+    let cancelado = false
     async function init() {
       try {
-        // Detalles del pedido
-        const detalles = await obtenerDetallesDePedido(pedidoEditando.idPedido)
+        const { detalles, proveedor: prov, cuotas: todas } =
+          await obtenerPedidoParaEdicion(pedidoEditando.idPedido)
+        if (cancelado) return
+
         if (detalles.length > 0) {
           setItems(detalles.map(d => ({
-            idProducto:     d.idProducto,
-            nombreProducto: d.nombreProducto || '',
-            cantidad:       d.cantidad,
-            precioUnitario: d.precioUnitario,
-            medida:         d.medida || null,
+            idDetallePedido:    d.idDetallePedido,          // habilita el diff en lote
+            idProducto:         d.idProducto,
+            nombreProducto:     d.nombreProducto || '',
+            cantidad:           d.cantidad,
+            precioUnitario:     d.precioUnitario,
+            medida:             d.medida || null,
+            medidasPrecargadas: d.medidasDisponibles,       // evita fetch por ítem en ItemRow
           })))
         }
-        // Proveedor
-        if (pedidoEditando.idProveedor) {
-          const { data: prov } = await supabase
-            .from('proveedor')
-            .select('*')
-            .eq('id_proveedor', pedidoEditando.idProveedor)
-            .single()
-          if (prov) {
-            setProveedor({
-              idProveedor:    prov.id_proveedor,
-              nombreFiscal:   prov.nombre_fiscal,
-              nombreComercial: prov.nombre_comercial,
-            })
-          }
-        }
-        // Plan de cuotas: separar pagadas (bloqueadas, sólo lectura) de
-        // pendientes (borrador editable que se manda a actualizarPlanCuotas).
+        if (prov) setProveedor(prov)
+
+        // Plan de cuotas: pagadas (bloqueadas, sólo lectura) vs pendientes (borrador editable).
         if (pedidoEditando.tieneCuotas) {
-          const todas = await obtenerCuotasDePedido(pedidoEditando.idPedido)
           setCuotasPagadas(todas.filter(c => c.estado === 'pagada'))
           const pendientes = todas.filter(c => c.estado !== 'pagada')
           setCuotas(pendientes.length
             ? pendientes.map(c => ({ porcentaje: String(c.porcentaje), diasVencimiento: String(c.diasVencimiento) }))
             : [CUOTA_EMPTY()])
         }
-      } finally {
         setLoadingInit(false)
+      } catch (err) {
+        // IMPORTANTE: no mostrar el formulario vacío si la carga falló — guardarlo
+        // con la tabla en blanco eliminaría los ítems existentes.
+        if (!cancelado) {
+          setErrorCarga(err.message || 'No se pudo cargar el pedido.')
+          setLoadingInit(false)
+        }
       }
     }
     init()
-  }, [esEdicion])
+    return () => { cancelado = true }
+  }, [esEdicion, reintentoCarga])
 
   const totalItems = items.reduce((acc, it) =>
     acc + (parseInt(it.cantidad) || 0) * (parseFloat(String(it.precioUnitario).replace(',', '.')) || 0), 0)
@@ -1193,17 +1215,23 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
     savingRef.current = true
     setSaving(true)
     setError('')
+    // Si tarda más de 1 s se muestra un mensaje de progreso (aria-live) además del spinner.
+    const temporizadorLento = setTimeout(() => setGuardandoLento(true), 1000)
 
     try {
+      // ── Validaciones SIN red (feedback inmediato) ──────────────────────────
+      // La existencia de productos y la obligatoriedad de medida se validan en
+      // el servidor dentro de la misma transacción (antes: 1 SELECT por ítem).
       if (!proveedor) { setError('Seleccioná un proveedor antes de guardar el pedido.'); return }
       const validItems = items.filter(it => it.idProducto && parseInt(it.cantidad) > 0)
       if (!validItems.length) { setError('Agregá al menos un producto con ID válido.'); return }
 
-      // Validación del plan de cuotas: en creación, el borrador completo
-      // debe sumar 100%; en edición, sólo las PENDIENTES son editables y
-      // deben sumar 100% menos lo ya bloqueado por cuotas pagadas.
+      // Plan de cuotas: en creación el borrador completo debe sumar 100%; en
+      // edición sólo las PENDIENTES son editables y deben sumar 100% menos lo
+      // ya bloqueado por cuotas pagadas. El servidor revalida (fuente de verdad).
       const esCCFraccionada = metodoPago === 'cuenta_corriente' && conFraccion
-      if (esCCFraccionada) {
+      const llevaCuotas     = esEdicion ? !!pedidoEditando.tieneCuotas : esCCFraccionada
+      if (llevaCuotas) {
         const cuotasErr = esEdicion
           ? validarEdicionPlanCuotas(cuotasPagadas, cuotas)
           : validarPlanCuotas(cuotas)
@@ -1214,91 +1242,53 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
         return
       }
 
-      // Validaciones previas: precio, existencia, medida
+      const detallesPayload = []
       for (const it of validItems) {
         const precio = parseFloat(String(it.precioUnitario).replace(',', '.')) || 0
         if (precio <= 0) { setError(`Ingresá el precio del proveedor para "${it.nombreProducto || `ID ${it.idProducto}`}".`); return }
-
-        const { data: existe } = await supabase
-          .from('producto')
-          .select('id_producto, tiene_medidas')
-          .eq('id_producto', parseInt(it.idProducto))
-          .single()
-        if (!existe) { setError(`El producto ID ${it.idProducto} no existe en el inventario.`); return }
-        if (existe.tiene_medidas && !it.medida) { setError(`Seleccioná una medida para el producto ID ${it.idProducto}.`); return }
+        detallesPayload.push({
+          idDetallePedido: it.idDetallePedido ?? null,   // presente = ítem existente (diff)
+          idProducto:      parseInt(it.idProducto),
+          nombreProducto:  it.nombreProducto || null,
+          medida:          it.medida || null,
+          cantidad:        parseInt(it.cantidad),
+          precioUnitario:  precio,
+        })
       }
 
-      const detallesPayload = validItems.map(it => ({
-        idProducto:     parseInt(it.idProducto),
-        nombreProducto: it.nombreProducto || null,
-        medida:         it.medida || null,
-        cantidad:       parseInt(it.cantidad),
-        precioUnitario: parseFloat(String(it.precioUnitario).replace(',', '.')) || 0,
-        subtotal:       (parseInt(it.cantidad)) * (parseFloat(String(it.precioUnitario).replace(',', '.')) || 0),
-      }))
+      // Días de vencimiento de la CC simple (mismas reglas que antes).
+      const diasVencimiento = esEdicion
+        ? (metodoPago === 'cuenta_corriente' && !pedidoEditando.tieneCuotas
+            ? (parseInt(diasVencimientoCC, 10) || null)
+            : pedidoEditando.diasVencimientoCC ?? null)
+        : (metodoPago === 'cuenta_corriente' && !esCCFraccionada
+            ? (parseInt(diasVencimientoCC, 10) || null)
+            : null)
 
-      if (esEdicion) {
-        // Actualizar — preserva estado logístico y de pago actuales.
-        // Si el pedido tiene plan de cuotas, `monto` ya viene congelado en
-        // `total` cuando hayCuotaPagada (ver cálculo de `total` más arriba).
-        const pedidoPayload = {
-          fecha:              pedidoEditando.fecha,
-          monto:              total,
-          estadoPago:         pedidoEditando.estadoPago,
-          estadoLogistico:    pedidoEditando.estadoLogistico,
-          fechaRecepcion:     pedidoEditando.fechaRecepcion ?? null,
-          fechaPago:          pedidoEditando.fechaPago      ?? null,
-          metodoPago:         metodoPago,
-          idProveedor:        proveedor?.idProveedor ?? null,
-          nombreProveedor:    proveedor?.nombreComercial || proveedor?.nombreFiscal || null,
-          diasVencimientoCC:  metodoPago === 'cuenta_corriente' && !pedidoEditando.tieneCuotas
-                                 ? (parseInt(diasVencimientoCC, 10) || null)
-                                 : pedidoEditando.diasVencimientoCC ?? null,
-        }
-        await actualizarPedido(pedidoEditando.idPedido, pedidoPayload, detallesPayload)
-
-        // Plan de cuotas: se edita en un paso aparte vía el RPC atómico
-        // editar_plan_cuotas_pedido, que revalida Σ% == 100% del lado del
-        // servidor y protege las cuotas ya pagadas sin importar lo que
-        // haya validado (o no) el cliente. Es idempotente — si falla acá,
-        // la cabecera ya quedó guardada y se puede reintentar sólo esta
-        // parte sin duplicar nada.
-        if (pedidoEditando.tieneCuotas) {
-          await actualizarPlanCuotas(pedidoEditando.idPedido, cuotas)
-        }
-
-        onGuardado(pedidoEditando.idPedido)
-      } else {
-        const pedidoPayload = {
-          fecha:              today(),
-          monto:              total,
-          estadoPago:         'pendiente',
-          estadoLogistico:    'encargado',
-          metodoPago:         metodoPago,
-          idProveedor:        proveedor?.idProveedor ?? null,
-          nombreProveedor:    proveedor?.nombreComercial || proveedor?.nombreFiscal || null,
-          diasVencimientoCC:  metodoPago === 'cuenta_corriente' && !esCCFraccionada
-                                 ? (parseInt(diasVencimientoCC, 10) || null)
-                                 : null,
-        }
-
-        let creado
-        if (esCCFraccionada) {
-          // Plan de N cuotas → creación atómica vía RPC (pedido + detalle + cuotas)
-          const planCuotas = calcularPlanCuotas(
-            total,
-            cuotas.map(c => ({ porcentaje: Number(c.porcentaje), diasVencimiento: Number(c.diasVencimiento) }))
-          )
-          creado = await crearPedidoConCuotas(pedidoPayload, detallesPayload, planCuotas)
-        } else {
-          // Resto de métodos (incluida CC simple) → flujo existente, sin cambios
-          creado = await crearPedido(pedidoPayload, detallesPayload)
-        }
-        onGuardado(creado.idPedido)
+      // monto, subtotales y nombre del proveedor los calcula el servidor; el
+      // estado de pago/logística y la fecha del pedido existente no se tocan.
+      const args = {
+        idPedido: esEdicion ? pedidoEditando.idPedido : null,
+        pedido: {
+          metodoPago,
+          idProveedor:       proveedor.idProveedor,
+          diasVencimientoCC: diasVencimiento,
+        },
+        detalles: detallesPayload,
+        cuotas:   llevaCuotas ? cuotas : null,
       }
+
+      // UNA llamada, UNA transacción (cabecera + ítems + stock + cuotas).
+      const idempotencyKey = idemRef.current.obtener(JSON.stringify(args))
+      const guardado = await guardarPedido({ ...args, idempotencyKey })
+      onGuardado(guardado.idPedido)
     } catch (err) {
+      // Mensaje ya traducido y seguro (GuardadoPedidoError). El formulario
+      // conserva todos los datos cargados para poder reintentar.
       setError(err.message || 'Ocurrió un error al guardar el pedido.')
     } finally {
+      clearTimeout(temporizadorLento)
+      setGuardandoLento(false)
       savingRef.current = false
       setSaving(false)
     }
@@ -1306,8 +1296,26 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
 
   if (loadingInit) {
     return (
-      <div className="max-w-5xl mx-auto flex items-center justify-center py-24">
+      <div className="max-w-5xl mx-auto flex items-center justify-center py-24" role="status" aria-live="polite">
         <p className="text-surface-400 text-sm font-body">Cargando pedido...</p>
+      </div>
+    )
+  }
+
+  if (errorCarga) {
+    return (
+      <div className="max-w-5xl mx-auto py-24 flex flex-col items-center gap-4" role="alert">
+        <AlertCircle size={20} className="text-red-400" />
+        <p className="text-red-400 text-sm font-body text-center max-w-md">{errorCarga}</p>
+        <div className="flex items-center gap-3">
+          <Button onClick={() => { setErrorCarga(''); setLoadingInit(true); setReintentoCarga(n => n + 1) }}>
+            Reintentar
+          </Button>
+          <button onClick={onCancelar}
+            className="text-surface-400 hover:text-white text-sm font-body transition-colors">
+            Volver a pedidos
+          </button>
+        </div>
       </div>
     )
   }
@@ -1454,7 +1462,7 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
       <Card className="overflow-visible">
         <div className="px-6 py-4 border-b border-surface-700 flex items-center justify-between">
           <h2 className="font-body font-semibold text-white text-sm">Productos</h2>
-          <Button size="sm" icon={Plus} onClick={addItem} disabled={hayCuotaPagada}>Agregar ítem</Button>
+          <Button size="sm" icon={Plus} onClick={addItem} disabled={hayCuotaPagada || saving}>Agregar ítem</Button>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -1467,7 +1475,7 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
             </thead>
             <tbody>
               {items.map((item, idx) => (
-                <ItemRow key={idx} item={item} index={idx} onUpdate={updateItem} onRemove={removeItem} disabled={hayCuotaPagada} />
+                <ItemRow key={idx} item={item} index={idx} onUpdate={updateItem} onRemove={removeItem} disabled={hayCuotaPagada || saving} />
               ))}
             </tbody>
           </table>
@@ -1476,7 +1484,7 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
           <div className="px-4 py-3 border-t border-surface-700/50">
             <button
               onClick={addItem}
-              disabled={hayCuotaPagada}
+              disabled={hayCuotaPagada || saving}
               className="flex items-center gap-2 text-brand-400 hover:text-brand-300 text-sm font-body transition-colors
                          disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-brand-400">
               <Plus size={15} />
@@ -1502,14 +1510,20 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
           </div>
           <div className="flex flex-col items-end gap-2">
             {error && (
-              <div className="flex items-center gap-2 text-red-400 text-xs bg-red-500/10 border border-red-500/30
+              <div role="alert"
+                   className="flex items-center gap-2 text-red-400 text-xs bg-red-500/10 border border-red-500/30
                               rounded-xl px-3 py-2 max-w-xs text-right">
                 <AlertCircle size={14} className="flex-shrink-0" />{error}
               </div>
             )}
-            <Button size="lg" icon={esEdicion ? Pencil : ShoppingCart} onClick={guardar} disabled={saving}>
+            <Button size="lg" icon={saving ? IconoGuardando : (esEdicion ? Pencil : ShoppingCart)}
+                    onClick={guardar} disabled={saving} aria-busy={saving}>
               {saving ? 'Guardando...' : (esEdicion ? 'Guardar cambios' : 'Guardar Pedido')}
             </Button>
+            {/* Región en vivo: anuncia el progreso a lectores de pantalla y a la vista */}
+            <p role="status" aria-live="polite" className="text-surface-400 text-xs font-body min-h-[1rem] text-right">
+              {saving && guardandoLento ? 'Guardando el pedido… puede demorar unos segundos. No cierres esta pantalla.' : ''}
+            </p>
           </div>
         </div>
       </Card>
