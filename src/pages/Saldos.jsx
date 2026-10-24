@@ -1,8 +1,10 @@
 // src/pages/Saldos.jsx
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useLocation } from 'react-router-dom'
 import { usePaginatedList } from '../hooks/usePaginatedList'
 import { useScrollAnchor } from '../hooks/useScrollToTopOnChange'
+import { useDebounce } from '../hooks/useDebounce'
+import { useOnlineStatus } from '../hooks/useOnlineStatus'
 import {
   obtenerSaldos,
   obtenerKPIsSaldos,
@@ -22,7 +24,7 @@ import { Card, PageHeader, Button, Badge, Modal } from '../components/ui'
 import {
   ArrowLeft, Wallet, Clock, CheckCircle2, AlertTriangle,
   CalendarClock, User, FileText, BadgeCheck, Search, ChevronDown, ChevronUp,
-  Coins, Loader2, X, History,
+  Coins, Loader2, X, History, Eye, SlidersHorizontal, WifiOff,
 } from 'lucide-react'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -78,9 +80,10 @@ function Toast({ message, onDone }) {
     return () => clearTimeout(t)
   }, [onDone])
   return (
-    <div className="fixed top-5 right-5 z-[9999] pointer-events-none">
+    <div role="status" aria-live="polite"
+         className="fixed inset-x-4 top-[max(1rem,env(safe-area-inset-top))] sm:inset-x-auto sm:right-5 sm:top-5 z-[9999] pointer-events-none">
       <div className="flex items-center gap-3 bg-emerald-900/95 border border-emerald-500/50
-                      rounded-2xl px-5 py-3 shadow-2xl animate-slide-up">
+                      rounded-2xl px-4 sm:px-5 py-3 shadow-2xl animate-slide-up">
         <CheckCircle2 size={18} className="text-emerald-400 flex-shrink-0" />
         <span className="text-emerald-100 text-sm font-body">{message}</span>
       </div>
@@ -230,7 +233,7 @@ function PagoParcialModal({ open, onClose, onSuccess }) {
             </div>
           )}
 
-          <Button className="w-full" onClick={finalizar}>Listo</Button>
+          <Button className="w-full min-h-[44px]" onClick={finalizar}>Listo</Button>
         </div>
       ) : !cliente ? (
         // ── Paso 1: selección de cliente ───────────────────────────────
@@ -242,8 +245,8 @@ function PagoParcialModal({ open, onClose, onSuccess }) {
               value={query}
               onChange={e => setQuery(e.target.value)}
               placeholder="Buscar cliente por nombre o ID..."
-              className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2.5 text-white
-                         text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
+              className="w-full min-h-[44px] bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2.5 text-white
+                         text-base sm:text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
             />
           </div>
 
@@ -260,10 +263,10 @@ function PagoParcialModal({ open, onClose, onSuccess }) {
             )}
             {!buscando && resultados.map(c => (
               <button key={c.idCliente} onClick={() => seleccionarCliente(c)}
-                className="w-full flex items-center justify-between bg-surface-700 hover:bg-surface-600
+                className="w-full min-h-[44px] flex items-center justify-between gap-3 bg-surface-700 hover:bg-surface-600
                            border border-surface-600 rounded-xl px-4 py-3 text-left transition-colors">
-                <div>
-                  <p className="text-white text-sm font-body font-medium">{c.nombre} {c.apellido}</p>
+                <div className="min-w-0">
+                  <p className="text-white text-sm font-body font-medium break-words">{c.nombre} {c.apellido}</p>
                   <p className="text-surface-400 text-xs font-mono">
                     ID #{c.idCliente} · {c.cantSaldos} saldo{c.cantSaldos !== 1 ? 's' : ''} pendiente{c.cantSaldos !== 1 ? 's' : ''}
                   </p>
@@ -288,22 +291,22 @@ function PagoParcialModal({ open, onClose, onSuccess }) {
             </button>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1 block">Monto</label>
               <input
-                type="number" min="0" step="0.01" autoFocus
+                type="number" inputMode="decimal" min="0" step="0.01" autoFocus
                 value={monto} onChange={e => setMonto(e.target.value)}
                 placeholder="0.00"
-                className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-white
-                           text-sm font-mono focus:outline-none focus:border-brand-500 transition-all"
+                className="w-full min-h-[44px] bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-white
+                           text-base sm:text-sm font-mono focus:outline-none focus:border-brand-500 transition-all"
               />
             </div>
             <div>
               <label className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1 block">Método</label>
               <select value={metodoPago} onChange={e => setMetodoPago(e.target.value)}
-                className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-white
-                           text-sm font-body focus:outline-none focus:border-brand-500 transition-all">
+                className="w-full min-h-[44px] bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-white
+                           text-base sm:text-sm font-body focus:outline-none focus:border-brand-500 transition-all">
                 <option value="efectivo">Efectivo</option>
                 <option value="transferencia">Transferencia</option>
                 <option value="cheque">Cheque</option>
@@ -315,8 +318,9 @@ function PagoParcialModal({ open, onClose, onSuccess }) {
           <div>
             <label className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1 block">Fecha</label>
             <input type="date" value={fecha} onChange={e => setFecha(e.target.value)}
-              className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-white
-                         text-sm font-mono focus:outline-none focus:border-brand-500 transition-all" />
+              className="w-full min-w-0 min-h-[44px] bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-white
+                         text-base sm:text-sm font-mono text-left [color-scheme:dark] [&::-webkit-date-and-time-value]:text-left
+                         focus:outline-none focus:border-brand-500 transition-all" />
           </div>
 
           {cargandoSaldos ? (
@@ -350,8 +354,8 @@ function PagoParcialModal({ open, onClose, onSuccess }) {
           {error && <p className="text-red-400 text-xs font-body">{error}</p>}
 
           <div className="flex gap-2 pt-1">
-            <Button variant="secondary" className="flex-1" onClick={onClose} disabled={enviando}>Cancelar</Button>
-            <Button className="flex-1" icon={Coins} onClick={confirmar} disabled={enviando}>
+            <Button variant="secondary" className="flex-1 min-h-[44px]" onClick={onClose} disabled={enviando}>Cancelar</Button>
+            <Button className="flex-1 min-h-[44px]" icon={Coins} onClick={confirmar} disabled={enviando}>
               {enviando ? 'Aplicando...' : 'Confirmar pago'}
             </Button>
           </div>
@@ -410,11 +414,11 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
   const metodoLabel  = { efectivo: 'Efectivo', transferencia: 'Transferencia', cc15: 'CC 15 días', cc30: 'CC 30 días' }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6 animate-slide-up">
+    <div className="w-full min-w-0 max-w-4xl mx-auto space-y-4 sm:space-y-6 animate-slide-up">
       {/* Breadcrumb */}
       <div className="flex items-center gap-3">
         <button onClick={onBack}
-          className="flex items-center gap-2 text-surface-400 hover:text-white text-sm font-body transition-colors">
+          className="flex items-center gap-2 min-h-[44px] pr-2 text-surface-400 hover:text-white text-sm font-body transition-colors">
           <ArrowLeft size={16} />Volver a saldos
         </button>
         <span className="text-surface-600">/</span>
@@ -424,16 +428,16 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
       </div>
 
       {/* Cabecera */}
-      <Card className="p-6">
+      <Card className="p-4 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
           <div>
             <p className="text-surface-400 text-xs tracking-widest uppercase font-body mb-1">Saldo</p>
             <h2 className="font-display text-4xl text-white tracking-widest">#{saldo.idSaldo}</h2>
           </div>
-          <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-3 flex-wrap w-full sm:w-auto">
             <Badge color={info.color}>{info.label}</Badge>
             {!estaSaldado && (
-              <Button icon={BadgeCheck} onClick={() => setConfirmPago(true)}>
+              <Button icon={BadgeCheck} className="w-full sm:w-auto min-h-[44px]" onClick={() => setConfirmPago(true)}>
                 {esParcial ? 'Cancelar remanente' : 'Marcar como pagado'}
               </Button>
             )}
@@ -442,7 +446,7 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
 
         {/* Días restantes — banner prominente, visible mientras haya deuda activa */}
         {!estaSaldado && (
-          <div className={`flex items-center gap-3 rounded-xl px-5 py-3 border mb-6 ${colores.bg}`}>
+          <div className={`flex items-center gap-3 rounded-xl px-4 sm:px-5 py-3 border mb-6 ${colores.bg}`}>
             <CalendarClock size={18} className={colores.text + ' flex-shrink-0'} />
             <div>
               <p className={`font-body font-semibold text-sm ${colores.text}`}>{labelDias(dias)}</p>
@@ -484,7 +488,7 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
 
           {/* Cliente */}
           {/* CORRECCIÓN #7: usar campos extra del cliente disponibles en el service */}
-          <div className={`bg-surface-700 rounded-xl p-4 ${!estaSaldado ? 'col-span-2' : ''}`}>
+          <div className={`bg-surface-700 rounded-xl p-4 min-w-0 ${!estaSaldado ? 'col-span-2' : ''}`}>
             <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1 flex items-center gap-1">
               <User size={11} />Cliente
             </p>
@@ -493,7 +497,7 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
                 <p className="text-white text-sm font-body font-medium">
                   {cliente.nombre} {cliente.apellido}
                 </p>
-                <p className="text-surface-400 text-xs font-mono mt-0.5">
+                <p className="text-surface-400 text-xs font-mono mt-0.5 break-all">
                   ID #{cliente.idCliente}
                   {cliente.telefono ? ` · ${cliente.telefono}` : ''}
                   {cliente.mail     ? ` · ${cliente.mail}`     : ''}
@@ -521,7 +525,7 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
 
       {/* Detalle de productos del presupuesto */}
       <Card className="overflow-hidden">
-        <div className="px-6 py-4 border-b border-surface-700 flex items-center justify-between">
+        <div className="px-4 sm:px-6 py-4 border-b border-surface-700 flex items-center justify-between gap-3">
           <h3 className="font-body font-semibold text-white text-sm">
             Productos del presupuesto #{saldo.idPresupuesto}
           </h3>
@@ -537,24 +541,31 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
             <table className="w-full text-sm font-body">
               <thead>
                 <tr className="border-b border-surface-700">
-                  {['#', 'Producto', 'Medida', 'Cant.', 'Precio Unit.', 'Subtotal'].map(h => (
-                    <th key={h} className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">{h}</th>
+                  {[
+                    { h: '#',           cls: 'hidden sm:table-cell' },
+                    { h: 'Producto' },
+                    { h: 'Medida' },
+                    { h: 'Cant.' },
+                    { h: 'Precio Unit.', cls: 'hidden sm:table-cell' },
+                    { h: 'Subtotal' },
+                  ].map(({ h, cls = '' }) => (
+                    <th key={h} scope="col" className={`text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-3 sm:px-4 font-body ${cls}`}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {detalles.map((d, idx) => (
                   <tr key={d.idDetalle} className="border-b border-surface-700/50">
-                    <td className="py-3 px-4 text-surface-500 font-mono text-xs">{idx + 1}</td>
-                    <td className="py-3 px-4 text-white font-body">{d.nombreProducto ?? `#${d.idProducto}`}</td>
-                    <td className="py-3 px-4">
+                    <td className="hidden sm:table-cell py-3 px-4 text-surface-500 font-mono text-xs">{idx + 1}</td>
+                    <td className="py-3 px-3 sm:px-4 text-white font-body">{d.nombreProducto ?? `#${d.idProducto}`}</td>
+                    <td className="py-3 px-3 sm:px-4">
                       {d.medida
                         ? <Badge color="blue">{d.medida}</Badge>
                         : <span className="text-surface-500 text-xs">—</span>}
                     </td>
-                    <td className="py-3 px-4 text-surface-200 font-mono text-center">{d.cantidad}</td>
-                    <td className="py-3 px-4 text-surface-200 font-mono">{fmt(d.precioUnitario)}</td>
-                    <td className="py-3 px-4 text-surface-200 font-mono font-medium">{fmt(d.subtotal)}</td>
+                    <td className="py-3 px-3 sm:px-4 text-surface-200 font-mono text-center">{d.cantidad}</td>
+                    <td className="hidden sm:table-cell py-3 px-4 text-surface-200 font-mono">{fmt(d.precioUnitario)}</td>
+                    <td className="py-3 px-3 sm:px-4 text-surface-200 font-mono font-medium">{fmt(d.subtotal)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -566,7 +577,7 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
       {/* Historial de pagos aplicados — CORRECCIÓN #8: solo aparece si hubo imputaciones */}
       {aplicaciones.length > 0 && (
         <Card className="overflow-hidden">
-          <div className="px-6 py-4 border-b border-surface-700 flex items-center gap-2">
+          <div className="px-4 sm:px-6 py-4 border-b border-surface-700 flex items-center gap-2">
             <History size={14} className="text-surface-400" />
             <h3 className="font-body font-semibold text-white text-sm">Historial de pagos aplicados</h3>
           </div>
@@ -574,19 +585,25 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
             <table className="w-full text-sm font-body">
               <thead>
                 <tr className="border-b border-surface-700">
-                  {['Fecha', 'Método', 'Aplicado', 'Remanente anterior', 'Remanente resultante'].map(h => (
-                    <th key={h} className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">{h}</th>
+                  {[
+                    { h: 'Fecha' },
+                    { h: 'Método' },
+                    { h: 'Aplicado' },
+                    { h: 'Remanente anterior', cls: 'hidden sm:table-cell' },
+                    { h: 'Remanente resultante' },
+                  ].map(({ h, cls = '' }) => (
+                    <th key={h} scope="col" className={`text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-3 sm:px-4 font-body ${cls}`}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {aplicaciones.map(a => (
                   <tr key={a.idAplicacion} className="border-b border-surface-700/50">
-                    <td className="py-3 px-4 text-surface-300 font-mono text-xs">{fmtFecha(a.fecha)}</td>
-                    <td className="py-3 px-4 text-surface-300 font-body text-xs capitalize">{a.metodoPago ?? '—'}</td>
-                    <td className="py-3 px-4 text-emerald-400 font-mono font-medium">{fmt(a.montoAplicado)}</td>
-                    <td className="py-3 px-4 text-surface-400 font-mono text-xs">{fmt(a.saldoAnterior)}</td>
-                    <td className="py-3 px-4 text-white font-mono text-xs">{fmt(a.saldoResultante)}</td>
+                    <td className="py-3 px-3 sm:px-4 text-surface-300 font-mono text-xs">{fmtFecha(a.fecha)}</td>
+                    <td className="py-3 px-3 sm:px-4 text-surface-300 font-body text-xs capitalize">{a.metodoPago ?? '—'}</td>
+                    <td className="py-3 px-3 sm:px-4 text-emerald-400 font-mono font-medium">{fmt(a.montoAplicado)}</td>
+                    <td className="hidden sm:table-cell py-3 px-4 text-surface-400 font-mono text-xs">{fmt(a.saldoAnterior)}</td>
+                    <td className="py-3 px-3 sm:px-4 text-white font-mono text-xs">{fmt(a.saldoResultante)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -596,26 +613,26 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
       )}
 
       {/* Monto final */}
-      <Card className="p-6">
+      <Card className="p-4 sm:p-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="space-y-1 text-sm font-body">
-            <div className="flex justify-between gap-16">
+          <div className="space-y-1 text-sm font-body w-full sm:w-auto">
+            <div className="flex justify-between gap-4 sm:gap-16">
               <span className="text-surface-400">Monto original (lista):</span>
               <span className="text-surface-300 font-mono">
                 {presupuesto ? fmt(presupuesto.montoOriginal) : '—'}
               </span>
             </div>
-            <div className="flex justify-between gap-16">
+            <div className="flex justify-between gap-4 sm:gap-16">
               <span className="text-surface-400">Monto total del saldo:</span>
               <span className="text-surface-300 font-mono">{fmt(saldo.monto)}</span>
             </div>
             {yaCobrado > 0 && (
-              <div className="flex justify-between gap-16">
+              <div className="flex justify-between gap-4 sm:gap-16">
                 <span className="text-emerald-400">Ya cobrado:</span>
                 <span className="text-emerald-400 font-mono">{fmt(yaCobrado)}</span>
               </div>
             )}
-            <div className="border-t border-surface-700 pt-2 flex justify-between gap-16">
+            <div className="border-t border-surface-700 pt-2 flex justify-between items-baseline gap-4 sm:gap-16">
               <span className="text-white font-semibold">
                 {estaSaldado ? 'Monto cobrado:' : 'Remanente a cobrar:'}
               </span>
@@ -655,8 +672,8 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
               Método de cobro del remanente
             </label>
             <select value={metodoCierre} onChange={e => setMetodoCierre(e.target.value)}
-              className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-white
-                         text-sm font-body focus:outline-none focus:border-brand-500 transition-all">
+              className="w-full min-h-[44px] bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5 text-white
+                         text-base sm:text-sm font-body focus:outline-none focus:border-brand-500 transition-all">
               <option value="efectivo">Efectivo</option>
               <option value="transferencia">Transferencia</option>
               <option value="cheque">Cheque</option>
@@ -666,8 +683,8 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
         )}
 
         <div className="flex gap-2">
-          <Button variant="secondary" className="flex-1" onClick={() => setConfirmPago(false)}>Cancelar</Button>
-          <Button className="flex-1" icon={BadgeCheck} onClick={marcarPagado}>Confirmar cobro</Button>
+          <Button variant="secondary" className="flex-1 min-h-[44px]" onClick={() => setConfirmPago(false)}>Cancelar</Button>
+          <Button className="flex-1 min-h-[44px]" icon={BadgeCheck} onClick={marcarPagado}>Confirmar cobro</Button>
         </div>
       </Modal>
     </div>
@@ -675,14 +692,414 @@ function SaldoDetalle({ saldo, onBack, onUpdated }) {
 }
 
 // ─── Lista de saldos ────────────────────────────────────────────────────────
+//
+// Arquitectura de la vista (mobile-first):
+//
+//   Saldos (contenedor: estado de filtros, datos, paginación)
+//    ├─ KpiCard ×4
+//    ├─ SaldosFilters      1 columna en <640px · wrap fluido en ≥640px
+//    └─ Card
+//        ├─ SaldosCardList  (<768px)  una tarjeta por saldo
+//        └─ SaldosTable     (≥768px)  en tablet se colapsan columnas secundarias
+//
+// Ambos layouts consumen el MISMO array `paginated` y el MISMO `onOpen`, y el
+// filtrado ocurre en el fetcher (una sola vez, antes de paginar). Por eso el
+// comportamiento y los resultados son idénticos en cualquier dispositivo
+// (Escenario 6). Breakpoints Tailwind: sm 640 · md 768 · lg 1024.
+
+const ESTADOS = [
+  { value: 'pendiente', label: 'Pendientes' },
+  { value: 'parcial',   label: 'Parciales'  },
+  { value: 'pagado',    label: 'Cobrados'   },
+  { value: 'all',       label: 'Todos'      },
+]
+
+const ESTADO_DEFAULT = 'pendiente'
+
+const FILTROS_INICIALES = Object.freeze({
+  search:     '',
+  estado:     ESTADO_DEFAULT,
+  sortDias:   'asc',
+})
+
+/** Cantidad de filtros distintos del valor por defecto (alimenta el badge de «Filtros» en mobile). */
+function contarFiltrosActivos({ search, estado }) {
+  return (search.trim() ? 1 : 0) + (estado !== ESTADO_DEFAULT ? 1 : 0)
+}
+
+// Controles táctiles: alto mínimo 44px (WCAG 2.5.5 / HIG) y 16px de fuente en
+// mobile para que iOS Safari no haga zoom automático al enfocar el campo.
+const FIELD_CLASS =
+  'w-full min-w-0 min-h-[44px] bg-surface-700 border border-surface-600 rounded-xl px-3 text-white ' +
+  'text-base sm:text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 ' +
+  'focus-visible:ring-2 focus-visible:ring-brand-500/40 transition-all'
+
+const LABEL_CLASS = 'text-surface-400 text-xs uppercase tracking-widest font-body mb-1 block'
+
+/** Deriva todo lo que la fila y la tarjeta necesitan, en un solo lugar (DRY). */
+function derivarSaldo(s) {
+  const dias        = diasRestantes(s.fechaVto)
+  const estaSaldado = s.estado === 'pagado'
+  const nombre      = `${s.clienteNombre ?? ''} ${s.clienteApellido ?? ''}`.trim()
+  return {
+    dias,
+    cols:         colorDias(dias),
+    estaSaldado,
+    esParcial:    s.estado === 'parcial',
+    info:         estadoInfo(s.estado),
+    montoVisible: estaSaldado ? s.monto : s.montoPendiente,
+    nombre:       nombre || `Cliente #${s.idCliente}`,
+  }
+}
+
+// ── KPIs ────────────────────────────────────────────────────────────────────
+
+const KPI_SURFACE = {
+  neutral: { box: 'bg-surface-800 border-surface-700', label: 'text-surface-400' },
+  red:     { box: 'bg-red-500/8 border-red-500/25',    label: 'text-red-400'     },
+  blue:    { box: 'bg-blue-500/8 border-blue-500/25',  label: 'text-blue-400'    },
+}
+
+function KpiCard({ label, value, hint, surface = 'neutral', valueClass, icon: Icon }) {
+  const s = KPI_SURFACE[surface]
+  return (
+    <div className={`${s.box} border rounded-xl p-3 sm:p-5 min-w-0`}>
+      <p className={`${s.label} text-xs uppercase tracking-widest font-body flex items-center gap-1`}>
+        {Icon && <Icon size={11} aria-hidden="true" />}{label}
+      </p>
+      <p className={`font-display text-2xl sm:text-3xl tracking-widest mt-1 truncate ${valueClass}`} title={value}>
+        {value}
+      </p>
+      <p className="text-surface-500 text-xs font-body mt-1">{hint}</p>
+    </div>
+  )
+}
+
+// ── Estados transversales ───────────────────────────────────────────────────
+
+function OfflineBanner() {
+  return (
+    <div role="status"
+      className="flex items-center gap-2 bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3">
+      <WifiOff size={16} className="text-yellow-400 flex-shrink-0" aria-hidden="true" />
+      <p className="text-yellow-300 text-xs font-body">
+        Sin conexión. Los saldos que ves pueden estar desactualizados.
+      </p>
+    </div>
+  )
+}
+
+function ListSkeleton() {
+  return (
+    <div role="status" className="p-3 grid gap-3 sm:grid-cols-2 md:grid-cols-1">
+      <span className="sr-only">Cargando saldos…</span>
+      {Array.from({ length: 4 }, (_, i) => (
+        <div key={i} aria-hidden="true" className="h-28 md:h-14 rounded-xl bg-surface-700/50 animate-pulse" />
+      ))}
+    </div>
+  )
+}
+
+function ListError({ onRetry }) {
+  return (
+    <div role="alert" className="flex flex-col items-center py-12 px-4 gap-3 text-center">
+      <AlertTriangle size={28} className="text-red-400" aria-hidden="true" />
+      <p className="text-surface-300 text-sm font-body">No pudimos cargar los saldos. Revisá tu conexión e intentá de nuevo.</p>
+      <Button variant="secondary" className="min-h-[44px]" onClick={onRetry}>Reintentar</Button>
+    </div>
+  )
+}
+
+function EmptyState({ estado, hayFiltros, onClear }) {
+  return (
+    <div className="flex flex-col items-center py-16 px-4 gap-3 text-surface-500 text-center">
+      <Wallet size={32} className="opacity-30" aria-hidden="true" />
+      <p className="font-body text-sm">
+        {!hayFiltros && estado === 'pendiente' ? 'No hay saldos pendientes.' : 'Sin saldos que coincidan.'}
+      </p>
+      {hayFiltros && (
+        <Button variant="secondary" className="min-h-[44px]" onClick={onClear}>Limpiar filtros</Button>
+      )}
+    </div>
+  )
+}
+
+// ── Filtros ─────────────────────────────────────────────────────────────────
+//
+// Mobile (<640px): una sola columna; el panel se puede plegar con «Filtros»
+// (queda abierto por defecto para que nada esté oculto). ≥768px siempre visible.
+// ≥640px: flex-wrap, así los campos se acomodan solos aunque el contenedor sea
+// más angosto que el viewport (p. ej. por un sidebar).
+
+function SaldosFilters({ filters, onChange, onClear, filtrosActivos, total }) {
+  const [abierto, setAbierto] = useState(true)
+  const { search, estado, sortDias } = filters
+
+  // En ≥768px todo vive en UNA sola fila: buscador (flexible) + estados + orden.
+  // En mobile se mantiene el layout apilado con el panel plegable.
+  const FOCUS = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40'
+
+  return (
+    <Card className="p-3 sm:p-4">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:gap-2.5">
+
+        {/* Buscador (+ botón «Filtros» solo en mobile) */}
+        <div className="flex gap-2 min-w-0 md:flex-1">
+          <div className="relative flex-1 min-w-0">
+            <Search size={14} aria-hidden="true"
+              className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
+            <input
+              type="search" inputMode="search" enterKeyHint="search" autoComplete="off"
+              aria-label="Buscar por cliente o ID"
+              value={search} onChange={e => onChange('search', e.target.value)}
+              placeholder="Buscar por cliente o ID..."
+              className={`${FIELD_CLASS} md:min-h-[38px] pl-9 pr-3`} />
+          </div>
+
+          <button type="button" onClick={() => setAbierto(a => !a)}
+            aria-expanded={abierto} aria-controls="saldos-filtros"
+            className={`md:hidden flex items-center gap-2 min-h-[44px] px-3 rounded-xl border border-surface-600
+                       bg-surface-700 text-white text-sm font-body active:bg-surface-600 transition-colors ${FOCUS}`}>
+            <SlidersHorizontal size={16} aria-hidden="true" />
+            Filtros
+            {filtrosActivos > 0 && (
+              <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-brand-500 text-white text-xs
+                               font-mono flex items-center justify-center"
+                aria-label={`${filtrosActivos} filtro${filtrosActivos !== 1 ? 's' : ''} activo${filtrosActivos !== 1 ? 's' : ''}`}>
+                {filtrosActivos}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {/* Estados + orden (misma fila que el buscador en desktop) */}
+        <div id="saldos-filtros"
+          className={`${abierto ? 'flex' : 'hidden'} md:flex flex-col gap-3 md:flex-row md:items-center md:gap-2.5 md:flex-shrink-0`}>
+
+          <div>
+            <span id="saldos-estado-label" className={`${LABEL_CLASS} md:sr-only`}>Estado</span>
+            <div role="group" aria-labelledby="saldos-estado-label"
+              className="grid grid-cols-2 gap-2 sm:grid-cols-4 md:flex md:flex-nowrap md:gap-2.5">
+              {ESTADOS.map(({ value, label }) => {
+                const activo = estado === value
+                return (
+                  <button key={value} type="button" aria-pressed={activo} onClick={() => onChange('estado', value)}
+                    className={`min-h-[44px] md:min-h-[38px] px-4 rounded-xl text-sm font-body border transition-all whitespace-nowrap ${FOCUS}
+                      ${activo
+                        ? 'bg-brand-500/15 border-brand-500/50 text-white'
+                        : 'bg-surface-700/60 border-surface-600/70 text-surface-500 hover:border-surface-500 active:bg-surface-600'}`}>
+                    {label}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-2.5">
+            {estado !== 'pagado' && (
+              <button type="button" onClick={() => onChange('sortDias', sortDias === 'asc' ? 'desc' : 'asc')}
+                className={`flex items-center justify-center gap-2 min-h-[44px] md:min-h-[38px] px-4 bg-surface-700/60 border border-surface-600/70
+                           hover:border-surface-500 active:bg-surface-600 rounded-xl text-white text-sm font-body
+                           transition-all whitespace-nowrap ${FOCUS}`}>
+                {sortDias === 'asc'
+                  ? <><ChevronUp size={14} aria-hidden="true" />Más urgentes</>
+                  : <><ChevronDown size={14} aria-hidden="true" />Menos urgentes</>}
+              </button>
+            )}
+
+            {/* Solo aparece cuando hay filtros distintos al valor por defecto */}
+            {filtrosActivos > 0 && (
+              <button type="button" onClick={onClear}
+                className={`flex items-center justify-center gap-2 min-h-[44px] md:min-h-[38px] px-4 rounded-xl border border-surface-600
+                           text-surface-300 hover:text-white text-sm font-body transition-all whitespace-nowrap ${FOCUS}`}>
+                <X size={14} aria-hidden="true" />Limpiar
+              </button>
+            )}
+
+            {/* El contador se mantiene para lectores de pantalla; en desktop no se muestra */}
+            <p role="status" aria-live="polite"
+              className="text-surface-400 text-xs font-body text-center md:sr-only">
+              {total} resultado{total !== 1 ? 's' : ''}
+            </p>
+          </div>
+        </div>
+      </div>
+    </Card>
+  )
+}
+
+// ── Piezas de listado ───────────────────────────────────────────────────────
+
+function EstadoBadge({ info }) {
+  return (
+    <Badge color={info.color}>
+      {info.color === 'green'
+        ? <CheckCircle2 size={10} className="inline mr-1" aria-hidden="true" />
+        : <Clock size={10} className="inline mr-1" aria-hidden="true" />}
+      {info.label}
+    </Badge>
+  )
+}
+
+/** Vista de tarjeta (<768px): toda la información clave + acción explícita. */
+function SaldoCard({ saldo, onOpen }) {
+  const v = derivarSaldo(saldo)
+  return (
+    <article onClick={() => onOpen(saldo)}
+      className="h-full flex flex-col gap-3 bg-surface-700/40 border border-surface-700 rounded-xl p-4
+                 cursor-pointer active:bg-surface-700/70 transition-colors">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-white text-sm font-body font-medium leading-tight break-words">{v.nombre}</p>
+          <p className="text-surface-400 text-xs font-mono mt-1">
+            <span className="text-brand-400 font-bold">#{saldo.idSaldo}</span> · Presupuesto #{saldo.idPresupuesto}
+          </p>
+        </div>
+        <div className="flex-shrink-0"><EstadoBadge info={v.info} /></div>
+      </div>
+
+      <div>
+        <p className="text-white font-mono font-medium text-xl">{fmt(v.montoVisible)}</p>
+        {v.esParcial && <p className="text-surface-500 text-xs font-mono">de {fmt(saldo.monto)}</p>}
+      </div>
+
+      <dl className="grid grid-cols-2 gap-3 text-xs font-body">
+        <div>
+          <dt className="text-surface-500">Emisión</dt>
+          <dd className="text-surface-300 font-mono mt-0.5">{fmtFecha(saldo.fechaInicio)}</dd>
+        </div>
+        <div>
+          <dt className="text-surface-500">Vencimiento</dt>
+          <dd className="text-surface-300 font-mono mt-0.5">{fmtFecha(saldo.fechaVto)}</dd>
+        </div>
+      </dl>
+
+      {!v.estaSaldado && (
+        <p className={`self-start inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-body ${v.cols.bg} ${v.cols.text}`}>
+          <CalendarClock size={12} aria-hidden="true" />{labelDias(v.dias)}
+        </p>
+      )}
+
+      <Button variant="secondary" icon={Eye} className="w-full min-h-[44px] mt-auto"
+        onClick={(e) => { e.stopPropagation(); onOpen(saldo) }}>
+        Ver detalle
+      </Button>
+    </article>
+  )
+}
+
+function SaldosCardList({ items, onOpen }) {
+  return (
+    <ul className="md:hidden grid grid-cols-1 sm:grid-cols-2 gap-3 p-3">
+      {items.map(s => (
+        <li key={s.idSaldo}><SaldoCard saldo={s} onOpen={onOpen} /></li>
+      ))}
+    </ul>
+  )
+}
+
+// Columnas de la tabla. En tablet (768–1023px) se colapsan las secundarias
+// (`hidden lg:table-cell`); su información se reubica bajo otra celda.
+const COLUMNAS = [
+  { key: 'saldo',       label: 'Saldo' },
+  { key: 'presupuesto', label: 'Presupuesto', cls: 'hidden lg:table-cell' },
+  { key: 'cliente',     label: 'Cliente' },
+  { key: 'emision',     label: 'Emisión',     cls: 'hidden lg:table-cell' },
+  { key: 'vencimiento', label: 'Vencimiento' },
+  { key: 'dias',        label: 'Días',        cls: 'hidden lg:table-cell' },
+  { key: 'monto',       label: 'Monto' },
+  { key: 'estado',      label: 'Estado' },
+  { key: 'accion',      label: '', sr: 'Acciones' },
+]
+
+function SaldoRow({ saldo, onOpen }) {
+  const v = derivarSaldo(saldo)
+  const diasTxt = v.dias < 0 ? `−${Math.abs(v.dias)}` : v.dias
+  return (
+    <tr onClick={() => onOpen(saldo)}
+      className="border-b border-surface-700/50 hover:bg-surface-700/40 active:bg-surface-700/60 cursor-pointer transition-colors">
+      <td className="py-1 px-3">
+        {/* Botón real: da acceso por teclado y lectores de pantalla (la fila sola no lo tiene) */}
+        <button type="button" aria-label={`Ver detalle del saldo #${saldo.idSaldo}`}
+          onClick={(e) => { e.stopPropagation(); onOpen(saldo) }}
+          className="min-h-[44px] min-w-[44px] text-left text-brand-400 font-mono text-sm font-bold rounded
+                     focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60">
+          #{saldo.idSaldo}
+        </button>
+        <span className="block lg:hidden text-surface-500 text-xs font-mono">Pres. #{saldo.idPresupuesto}</span>
+      </td>
+      <td className="hidden lg:table-cell py-3 px-3 text-surface-400 font-mono text-xs">#{saldo.idPresupuesto}</td>
+      <td className="py-3 px-3">
+        <p className="text-white text-sm font-body leading-tight">{v.nombre}</p>
+      </td>
+      <td className="hidden lg:table-cell py-3 px-3 text-surface-400 font-mono text-xs">{fmtFecha(saldo.fechaInicio)}</td>
+      <td className="py-3 px-3 text-surface-300 font-mono text-xs">
+        {fmtFecha(saldo.fechaVto)}
+        {/* En tablet los «Días» viajan bajo el vencimiento */}
+        {!v.estaSaldado && (
+          <span className={`block lg:hidden font-bold mt-0.5 ${v.cols.text}`}>{diasTxt}d</span>
+        )}
+      </td>
+      <td className="hidden lg:table-cell py-3 px-3">
+        {!v.estaSaldado
+          ? <span className={`text-xs font-mono font-bold ${v.cols.text}`}>{diasTxt}d</span>
+          : <span className="text-surface-600 text-xs">—</span>}
+      </td>
+      <td className="py-3 px-3">
+        <p className="text-white font-mono font-medium">{fmt(v.montoVisible)}</p>
+        {v.esParcial && <p className="text-surface-500 text-xs font-mono">de {fmt(saldo.monto)}</p>}
+      </td>
+      <td className="py-3 px-3"><EstadoBadge info={v.info} /></td>
+      <td className="py-3 px-3 text-surface-500"><Wallet size={14} aria-hidden="true" /></td>
+    </tr>
+  )
+}
+
+function SaldosTable({ items, onOpen }) {
+  return (
+    <div className="hidden md:block overflow-x-auto">
+      <table className="w-full text-sm font-body">
+        <caption className="sr-only">Listado de saldos</caption>
+        <thead>
+          <tr className="border-b border-surface-700">
+            {COLUMNAS.map(c => (
+              <th key={c.key} scope="col"
+                className={`text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-3 font-body ${c.cls ?? ''}`}>
+                {c.label}{c.sr && <span className="sr-only">{c.sr}</span>}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {items.map(s => <SaldoRow key={s.idSaldo} saldo={s} onOpen={onOpen} />)}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function Pagination({ page, totalPages, total, onPrev, onNext }) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-4 sm:px-5 py-3 border-t border-surface-700">
+      <p className="text-surface-400 text-xs font-body">
+        {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} de {total}
+      </p>
+      <div className="flex gap-2">
+        <Button size="sm" variant="secondary" className="min-h-[44px]" onClick={onPrev} disabled={page === 1}>← Ant.</Button>
+        <Button size="sm" variant="secondary" className="min-h-[44px]" onClick={onNext} disabled={page === totalPages}>Sig. →</Button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Contenedor ─────────────────────────────────────────────────────────────
 
 export default function Saldos() {
   const location = useLocation()
-  const [selected,     setSelected]     = useState(null)
-  const [filterEst,    setFilterEst]    = useState('pendiente')
-  const [search,       setSearch]       = useState('')
-  const [sortDias,     setSortDias]     = useState('asc')
-  const [toast,        setToast]        = useState('')
+  const online   = useOnlineStatus()
+  const [selected,      setSelected]      = useState(null)
+  const [filters,       setFilters]       = useState(FILTROS_INICIALES)
+  const [toast,         setToast]         = useState('')
   const [pagoModalOpen, setPagoModalOpen] = useState(false)
   // CORRECCIÓN #3: KPIs en estado propio, calculados por el service
   const [kpis, setKpis] = useState({
@@ -695,6 +1112,20 @@ export default function Saldos() {
     totalEnParcial: 0,
   })
 
+  const setFilter = useCallback(
+    (campo, valor) => setFilters(f => ({ ...f, [campo]: valor })),
+    [],
+  )
+  // «Limpiar» conserva el orden elegido: es una preferencia, no un filtro.
+  const clearFilters = useCallback(
+    () => setFilters(f => ({ ...FILTROS_INICIALES, sortDias: f.sortDias })),
+    [],
+  )
+
+  const cargarKpis = useCallback(() => {
+    obtenerKPIsSaldos().then(setKpis).catch(e => console.error('[Saldos] No se pudieron cargar los KPIs', e))
+  }, [])
+
   // Si venimos desde Historial con un saldo pre-seleccionado, abrirlo directo
   useEffect(() => {
     if (location.state?.saldoInicial) {
@@ -704,35 +1135,41 @@ export default function Saldos() {
   }, [location.state])
 
   // CORRECCIÓN #3: cargar KPIs independientemente de los filtros de la tabla
-  useEffect(() => {
-    obtenerKPIsSaldos().then(setKpis)
-  }, [])
+  useEffect(() => { cargarKpis() }, [cargarKpis])
+
+  // ── Filtros derivados ─────────────────────────────────────────────────
+  const searchDebounced = useDebounce(filters.search)
+  const filtrosActivos  = contarFiltrosActivos(filters)
 
   // ── Datos + paginación ────────────────────────────────────────────────
-  // Filtro, búsqueda y orden se delegan al service (CORRECCIONES #5 y #6),
-  // así que van como `serverFilters`: cambiar cualquiera refetchea y
-  // resetea la página. `reload()` (usado en handleUpdated/onBack tras
-  // marcar un pago) nunca resetea la página.
+  // Estado, búsqueda y orden los resuelve el service (serverFilters): cambiar
+  // cualquiera refetchea y resetea la página. Desktop y mobile paginan el
+  // mismo conjunto porque ambos layouts leen el mismo `paginated`.
+  // `reload()` nunca resetea la página (se usa tras marcar/imputar un pago).
   const {
     pageItems: paginated,
     items:     saldos,
     page, setPage, totalPages,
-    reload: load,
+    loading:   isLoading,
+    error,
+    reload:    load,
   } = usePaginatedList({
     fetcher: (f) => obtenerSaldos({
       estado: f.filterEst !== 'all' ? f.filterEst : null,
       orden:  f.sortDias,
       search: f.search,
     }),
-    serverFilters: { filterEst, search, sortDias },
+    serverFilters: { filterEst: filters.estado, search: searchDebounced, sortDias: filters.sortDias },
     pageSize: PAGE_SIZE,
   })
+  const hasError = Boolean(error)
+
   const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
 
   function handleUpdated(msg) {
     setToast(msg)
     // Refrescar también los KPIs después de marcar/imputar un pago
-    obtenerKPIsSaldos().then(setKpis)
+    cargarKpis()
     load()
   }
 
@@ -746,9 +1183,14 @@ export default function Saldos() {
     )
   }
 
+  const fmtCompactoARS = (n) =>
+    new Intl.NumberFormat('es-AR', { notation: 'compact', style: 'currency', currency: 'ARS' }).format(n ?? 0)
+  const plural = (n, uno, varios) => (n !== 1 ? varios : uno)
+
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
+    <div className="w-full min-w-0 max-w-5xl mx-auto space-y-4 sm:space-y-6">
       {toast && <Toast message={toast} onDone={() => setToast('')} />}
+      {!online && <OfflineBanner />}
 
       <PagoParcialModal
         open={pagoModalOpen}
@@ -756,191 +1198,67 @@ export default function Saldos() {
         onSuccess={handleUpdated}
       />
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <PageHeader title="Saldos" subtitle="Cobros por cuenta corriente" />
-        <Button icon={Coins} onClick={() => setPagoModalOpen(true)}>
+        <Button icon={Coins} className="w-full sm:w-auto min-h-[44px]" onClick={() => setPagoModalOpen(true)}>
           Registrar Pago Parcial
         </Button>
       </div>
 
       {/* KPIs globales */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div className="bg-surface-800 border border-surface-700 rounded-xl p-5">
-          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">Pendiente de cobro</p>
-          <p className="font-display text-3xl text-yellow-400 tracking-widest mt-1">
-            {new Intl.NumberFormat('es-AR', { notation: 'compact', style: 'currency', currency: 'ARS' }).format(kpis.totalPendiente)}
-          </p>
-          <p className="text-surface-500 text-xs font-body mt-1">{kpis.cantPendientes} saldo{kpis.cantPendientes !== 1 ? 's' : ''}</p>
-        </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
+        <KpiCard label="Pendiente de cobro" value={fmtCompactoARS(kpis.totalPendiente)}
+          valueClass="text-yellow-400"
+          hint={`${kpis.cantPendientes} ${plural(kpis.cantPendientes, 'saldo', 'saldos')}`} />
 
         {kpis.cantVencidos > 0 ? (
-          <div className="bg-red-500/8 border border-red-500/25 rounded-xl p-5">
-            <p className="text-red-400 text-xs uppercase tracking-widest font-body flex items-center gap-1">
-              <AlertTriangle size={11} />Vencidos
-            </p>
-            <p className="font-display text-3xl text-red-400 tracking-widest mt-1">
-              {new Intl.NumberFormat('es-AR', { notation: 'compact', style: 'currency', currency: 'ARS' }).format(kpis.vencidos)}
-            </p>
-            <p className="text-surface-500 text-xs font-body mt-1">{kpis.cantVencidos} saldo{kpis.cantVencidos !== 1 ? 's' : ''} vencido{kpis.cantVencidos !== 1 ? 's' : ''}</p>
-          </div>
+          <KpiCard label="Vencidos" icon={AlertTriangle} surface="red" value={fmtCompactoARS(kpis.vencidos)}
+            valueClass="text-red-400"
+            hint={`${kpis.cantVencidos} ${plural(kpis.cantVencidos, 'saldo vencido', 'saldos vencidos')}`} />
         ) : (
-          <div className="bg-surface-800 border border-surface-700 rounded-xl p-5">
-            <p className="text-surface-400 text-xs uppercase tracking-widest font-body">Vencidos</p>
-            <p className="font-display text-3xl text-emerald-400 tracking-widest mt-1">$0</p>
-            <p className="text-surface-500 text-xs font-body mt-1">Sin saldos vencidos</p>
-          </div>
+          <KpiCard label="Vencidos" value="$0" valueClass="text-emerald-400" hint="Sin saldos vencidos" />
         )}
 
-        <div className="bg-blue-500/8 border border-blue-500/25 rounded-xl p-5">
-          <p className="text-blue-400 text-xs uppercase tracking-widest font-body">Pagos parciales pendientes</p>
-          <p className="font-display text-3xl text-blue-400 tracking-widest mt-1">
-            {new Intl.NumberFormat('es-AR', { notation: 'compact', style: 'currency', currency: 'ARS' }).format(kpis.totalEnParcial)}
-          </p>
-          <p className="text-surface-500 text-xs font-body mt-1">
-            {kpis.cantParciales} saldo{kpis.cantParciales !== 1 ? 's' : ''} con abono
-          </p>
-        </div>
+        <KpiCard label="Pagos parciales pendientes" surface="blue" value={fmtCompactoARS(kpis.totalEnParcial)}
+          valueClass="text-blue-400"
+          hint={`${kpis.cantParciales} ${plural(kpis.cantParciales, 'saldo con abono', 'saldos con abono')}`} />
 
-        <div className="bg-surface-800 border border-surface-700 rounded-xl p-5">
-          <p className="text-surface-400 text-xs uppercase tracking-widest font-body">Total cobrado</p>
-          <p className="font-display text-3xl text-emerald-400 tracking-widest mt-1">
-            {new Intl.NumberFormat('es-AR', { notation: 'compact', style: 'currency', currency: 'ARS' }).format(kpis.totalCobrado)}
-          </p>
-          <p className="text-surface-500 text-xs font-body mt-1">ingresado al sistema</p>
-        </div>
+        <KpiCard label="Total cobrado" value={fmtCompactoARS(kpis.totalCobrado)}
+          valueClass="text-emerald-400" hint="ingresado al sistema" />
       </div>
 
-      {/* Filtros */}
-      <Card className="p-4">
-        <div className="flex flex-wrap gap-3 items-center">
-          {/* Búsqueda */}
-          <div className="relative flex-1 min-w-[180px]">
-            <Search size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
-            <input value={search} onChange={e => setSearch(e.target.value)}
-              placeholder="Buscar por cliente o ID..."
-              className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2 text-white
-                         text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all" />
-          </div>
+      <SaldosFilters
+        filters={filters}
+        onChange={setFilter}
+        onClear={clearFilters}
+        filtrosActivos={filtrosActivos}
+        total={saldos.length}
+      />
 
-          {/* Estado */}
-          {[
-            { value: 'pendiente', label: 'Pendientes' },
-            { value: 'parcial',   label: 'Parciales'  },
-            { value: 'pagado',    label: 'Cobrados'   },
-            { value: 'all',       label: 'Todos'      },
-          ].map(({ value, label }) => (
-            <button key={value} onClick={() => setFilterEst(value)}
-              className={`px-4 py-2 rounded-xl text-sm font-body border transition-all
-                ${filterEst === value
-                  ? 'bg-brand-500/15 border-brand-500/40 text-white'
-                  : 'bg-surface-700 border-surface-600 text-surface-400 hover:border-surface-500'}`}>
-              {label}
-            </button>
-          ))}
-
-          {/* Ordenar por urgencia */}
-          {filterEst !== 'pagado' && (
-            <button onClick={() => setSortDias(d => d === 'asc' ? 'desc' : 'asc')}
-              className="flex items-center gap-2 bg-surface-700 border border-surface-600 hover:border-surface-500
-                         rounded-xl px-3 py-2 text-white text-sm font-body transition-all">
-              {sortDias === 'asc'
-                ? <><ChevronUp size={14} />Más urgentes</>
-                : <><ChevronDown size={14} />Menos urgentes</>}
-            </button>
-          )}
-        </div>
-      </Card>
-
-      {/* Tabla */}
+      {/* Listado: tarjetas en mobile, tabla desde tablet */}
       <div ref={tableAnchorRef}>
-      <Card className="overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm font-body">
-            <thead>
-              <tr className="border-b border-surface-700">
-                {['Saldo', 'Presupuesto', 'Cliente', 'Emisión', 'Vencimiento', 'Días', 'Monto', 'Estado', ''].map(h => (
-                  <th key={h} className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-3 font-body">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {paginated.map(s => {
-                // CORRECCIÓN #1: usar fechaVto en lugar de fechaFin
-                const dias        = diasRestantes(s.fechaVto)
-                const cols        = colorDias(dias)
-                const estaSaldado = s.estado === 'pagado'
-                const info        = estadoInfo(s.estado)
-                return (
-                  <tr key={s.idSaldo} onClick={() => setSelected(s)}
-                    className="border-b border-surface-700/50 hover:bg-surface-700/40 cursor-pointer transition-colors">
-                    <td className="py-3 px-3 text-brand-400 font-mono text-sm font-bold">#{s.idSaldo}</td>
-                    <td className="py-3 px-3 text-surface-400 font-mono text-xs">#{s.idPresupuesto}</td>
-                    <td className="py-3 px-3">
-                      {/* CORRECCIÓN #2: usar clienteNombre / clienteApellido */}
-                      <p className="text-white text-sm font-body leading-tight">
-                        {s.clienteNombre} {s.clienteApellido}
-                      </p>
-                    </td>
-                    <td className="py-3 px-3 text-surface-400 font-mono text-xs">{fmtFecha(s.fechaInicio)}</td>
-                    {/* CORRECCIÓN #1: usar fechaVto */}
-                    <td className="py-3 px-3 text-surface-300 font-mono text-xs">{fmtFecha(s.fechaVto)}</td>
-                    <td className="py-3 px-3">
-                      {!estaSaldado ? (
-                        <span className={`text-xs font-mono font-bold ${cols.text}`}>
-                          {dias < 0 ? `−${Math.abs(dias)}` : dias}d
-                        </span>
-                      ) : (
-                        <span className="text-surface-600 text-xs">—</span>
-                      )}
-                    </td>
-                    <td className="py-3 px-3">
-                      {/* CORRECCIÓN #8: si hay pago parcial, mostrar el remanente y el total original debajo */}
-                      <p className="text-white font-mono font-medium">
-                        {fmt(estaSaldado ? s.monto : s.montoPendiente)}
-                      </p>
-                      {s.estado === 'parcial' && (
-                        <p className="text-surface-500 text-xs font-mono">de {fmt(s.monto)}</p>
-                      )}
-                    </td>
-                    <td className="py-3 px-3">
-                      <Badge color={info.color}>
-                        {info.color === 'green'
-                          ? <CheckCircle2 size={10} className="inline mr-1" />
-                          : <Clock size={10} className="inline mr-1" />}
-                        {info.label}
-                      </Badge>
-                    </td>
-                    <td className="py-3 px-3 text-surface-500">
-                      <Wallet size={14} />
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
+        <Card className="overflow-hidden">
+          {hasError ? (
+            <ListError onRetry={load} />
+          ) : isLoading && saldos.length === 0 ? (
+            <ListSkeleton />
+          ) : saldos.length === 0 ? (
+            <EmptyState estado={filters.estado} hayFiltros={filtrosActivos > 0} onClear={clearFilters} />
+          ) : (
+            <>
+              <SaldosCardList items={paginated} onOpen={setSelected} />
+              <SaldosTable items={paginated} onOpen={setSelected} />
+            </>
+          )}
 
-        {saldos.length === 0 && (
-          <div className="flex flex-col items-center py-16 gap-3 text-surface-500">
-            <Wallet size={32} className="opacity-30" />
-            <p className="font-body text-sm">
-              {filterEst === 'pendiente' ? 'No hay saldos pendientes.' : 'Sin saldos que coincidan.'}
-            </p>
-          </div>
-        )}
-
-        {totalPages > 1 && (
-          <div className="flex items-center justify-between px-5 py-3 border-t border-surface-700">
-            <p className="text-surface-400 text-xs font-body">
-              {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, saldos.length)} de {saldos.length}
-            </p>
-            <div className="flex gap-2">
-              <Button size="sm" variant="secondary" onClick={() => { setPage(p => Math.max(1, p - 1)); scrollToStart() }} disabled={page === 1}>← Ant.</Button>
-              <Button size="sm" variant="secondary" onClick={() => { setPage(p => Math.min(totalPages, p + 1)); scrollToStart() }} disabled={page === totalPages}>Sig. →</Button>
-            </div>
-          </div>
-        )}
-      </Card>
+          {totalPages > 1 && !hasError && (
+            <Pagination
+              page={page} totalPages={totalPages} total={saldos.length}
+              onPrev={() => { setPage(p => Math.max(1, p - 1)); scrollToStart() }}
+              onNext={() => { setPage(p => Math.min(totalPages, p + 1)); scrollToStart() }}
+            />
+          )}
+        </Card>
       </div>
     </div>
   )
