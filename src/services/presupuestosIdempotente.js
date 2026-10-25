@@ -248,4 +248,104 @@ export async function actualizarPresupuestoIdempotente({ clave, idPresupuesto, c
   return resultado
 }
 
+/**
+ * @typedef {'aprobado'|'pagado'|'rechazado'} EstadoDestino
+ */
+
+/**
+ * @typedef {object} ItemSinStock
+ * @property {number}      idProducto
+ * @property {string|null} nombreProducto
+ * @property {string|null} medida
+ * @property {'medida_inexistente'} motivo
+ */
+
+/**
+ * @typedef {object} ResultadoCambioEstado
+ * @property {number}          idPresupuesto
+ * @property {string}          estadoAnterior
+ * @property {EstadoDestino}   estadoNuevo
+ * @property {boolean}         yaAplicado       `true` si el presupuesto YA estaba en
+ *   `estadoNuevo` (otra pestaña, o reintento con clave nueva): éxito sin efectos.
+ * @property {string|null}     fechaPago        'YYYY-MM-DD' (solo al pagar Efectivo/Transferencia).
+ * @property {boolean}         stockDescontado  `true` si en ESTA operación se descontó stock.
+ * @property {boolean}         stockReintegrado `true` si en ESTA operación se devolvió stock
+ *   (rechazo de un presupuesto 'aprobado', que ya había descontado).
+ * @property {number}          productosActualizados
+ * @property {ItemSinStock[]}  itemsSinStock    Ítems con medida que ya no existe en el
+ *   catálogo: no bloquean la operación pero dejan una discrepancia de stock a revisar.
+ * @property {boolean}         saldoCreado      Se generó el saldo de Cuenta Corriente.
+ * @property {boolean}         saldoEliminado   Se eliminó el saldo (rechazo).
+ * @property {boolean}         idempotente      `true` si la respuesta vino de una
+ *   solicitud anterior con la misma clave.
+ */
+
+/**
+ * Cambia el estado de un presupuesto (aprobar / pagar / rechazar) en UNA llamada.
+ *
+ * Reemplaza la secuencia que vivía en Historial.jsx:
+ * `actualizarEstadoPresupuesto` → `descontarStock` × N (2–5 queries por ítem) →
+ * `regenerarSaldoDePresupuesto` / `eliminarSaldoPorPresupuesto`. Esa secuencia
+ * crecía linealmente con la cantidad de ítems y no era atómica. Aquí estado,
+ * fecha de pago, stock y saldo ocurren dentro de la misma transacción de
+ * Postgres (`cambiar_estado_presupuesto`): o se aplica todo o no se aplica nada.
+ *
+ * @param {object} args
+ * @param {string}        args.clave          UUID de `useClaveIdempotencia()`. Una por
+ *   intento de confirmación (rotar al abrir el modal y tras éxito).
+ * @param {number}        args.idPresupuesto
+ * @param {EstadoDestino} args.nuevoEstado
+ * @param {string|null}   [args.fechaPago]    'YYYY-MM-DD'. Obligatoria al pagar un
+ *   presupuesto Efectivo/Transferencia; se ignora en el resto.
+ * @returns {Promise<ResultadoCambioEstado>}
+ * @throws {import('./idempotencia').ErrorOperacion} Error ya saneado para la UI.
+ */
+export async function cambiarEstadoPresupuestoIdempotente({ clave, idPresupuesto, nuevoEstado, fechaPago = null }) {
+  if (!idPresupuesto) {
+    throw new Error('idPresupuesto es requerido.')
+  }
+  if (!clave) {
+    throw new Error('Falta la clave de idempotencia.')
+  }
+  if (!ESTADOS_DESTINO.includes(nuevoEstado)) {
+    throw new Error(`Estado destino inválido: ${nuevoEstado}`)
+  }
+
+  const resultado = /** @type {ResultadoCambioEstado} */ (
+    await ejecutarIdempotente(
+      'cambiar_estado_presupuesto',
+      {
+        p_id_presupuesto: Number(idPresupuesto),
+        p_nuevo_estado:   nuevoEstado,
+        // `null` explícito (no `undefined`): la huella del payload debe ser
+        // estable entre el intento original y sus reintentos.
+        p_fecha_pago:     nuevoEstado === 'pagado' ? (fechaPago ?? null) : null,
+      },
+      { clave },
+    )
+  )
+
+  if (resultado.idempotente) {
+    logger.warn('presupuesto.cambio_estado_duplicado_absorbido', {
+      idPresupuesto: resultado.idPresupuesto,
+      estadoNuevo:   resultado.estadoNuevo,
+      clave,
+    })
+  }
+
+  if (resultado.itemsSinStock?.length) {
+    // Observabilidad: la operación se completó, pero hay ítems cuya medida ya
+    // no existe en `producto_medida`; su stock NO se descontó. Revisar a mano.
+    logger.warn('presupuesto.stock_parcial', {
+      idPresupuesto: resultado.idPresupuesto,
+      itemsSinStock: resultado.itemsSinStock,
+    })
+  }
+
+  return resultado
+}
+
+/** Estados a los que se puede transicionar con `cambiarEstadoPresupuestoIdempotente`. */
+const ESTADOS_DESTINO = /** @type {const} */ (['aprobado', 'pagado', 'rechazado'])
+
 export default crearPresupuestoIdempotente

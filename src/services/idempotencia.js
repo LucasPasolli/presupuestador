@@ -45,6 +45,11 @@ export const CODIGOS = /** @type {const} */ ({
   // estado ya no admite la operación (p. ej. se aprobó desde otra pestaña mientras
   // se editaba). Genérico para que otras RPC con máquina de estados lo reutilicen.
   ESTADO_NO_EDITABLE:    'P0EST',
+  // AGREGADO (feature: cambio de estado de presupuesto vía RPC): la transición
+  // pedida no es válida desde el estado actual (p. ej. se rechazó desde otra
+  // pestaña mientras este modal seguía abierto). Genérico para cualquier RPC
+  // con máquina de estados que no sea de "edición".
+  TRANSICION_INVALIDA:   'P0TRN',
 })
 
 const REINTENTOS_MAX   = 2
@@ -97,6 +102,8 @@ export function mapearErrorSeguro(error) {
       return { mensaje: 'Este registro ya no existe. Es posible que se haya eliminado desde otra pestaña o dispositivo — actualizá la pantalla.', codigo, reintentable: false }
     case CODIGOS.ESTADO_NO_EDITABLE:
       return { mensaje: 'Este presupuesto ya no se puede editar porque cambió de estado (por ejemplo, fue aprobado desde otra pestaña). Actualizá la pantalla.', codigo, reintentable: false }
+    case CODIGOS.TRANSICION_INVALIDA:
+      return { mensaje: 'Este presupuesto cambió de estado (por ejemplo, desde otra pestaña) y esta acción ya no corresponde. Actualizá la pantalla.', codigo, reintentable: false }
     case 'TIMEOUT':
       return { mensaje: 'El servidor tardó demasiado en responder. Verificá si la operación se completó antes de reintentar.', codigo, reintentable: true }
     default:
