@@ -9,6 +9,7 @@
 
 import { obtenerPresupuestoPorId, obtenerDetallesConNombreDePresupuesto } from '../services/presupuestosService'
 import { obtenerClientePorId } from '../services/clientesService'
+import { separarSubtotales } from './calculoPresupuesto'
 
 // ─── Métodos de pago (fuente de verdad compartida con Presupuestador) ───────
 export const METODOS_BASE_PDF = [
@@ -64,12 +65,13 @@ export function sanitizarNombreArchivo(s) {
 }
 
 /** "(5% descuento)" / "(10.5% recargo)" / null. Para excepciones calcula el % real. */
-export function pctMetodoPago(metodoPago, esExcepcion, montoFinal, subtotalConPromo) {
+export function pctMetodoPago(metodoPago, esExcepcion, montoFinal, subtotalConPromo, baseAjustable = subtotalConPromo) {
   if (esExcepcion) {
-    if (!subtotalConPromo) return null
+    // [FIX Ajuste vs Promo] el % real se calcula sobre los ítems SIN promoción (los únicos ajustados)
+    if (!subtotalConPromo || !baseAjustable) return null
     const ajuste = montoFinal - subtotalConPromo
     if (Math.abs(ajuste) < 0.01) return null
-    const pct = Math.abs((ajuste / subtotalConPromo) * 100)
+    const pct = Math.abs((ajuste / baseAjustable) * 100)
     const pctStr = Number.isInteger(pct) ? String(pct) : pct.toFixed(2).replace(/\.?0+$/, '')
     return ajuste < 0 ? `(${pctStr}% descuento)` : `(${pctStr}% recargo)`
   }
@@ -117,7 +119,7 @@ export function alturaBloqueTotales(cantLineas, hayPromos) {
 // ─── Dibujo ─────────────────────────────────────────────────────────────────
 function dibujarBloqueTotales(doc, y, lineas, totalStr, hayPromos) {
   const { PAGE_W, ML, TOTALS_SEP_H, TOTALS_LINE_H } = LAYOUT
-  const xLabel = PAGE_W - ML - 70
+  const xLabel = PAGE_W - ML - 90 // más ancho: la etiqueta de ajuste puede aclarar "sin promo"
   let cur = y
 
   doc.setDrawColor(...GRIS_LINEA)
@@ -141,7 +143,7 @@ function dibujarBloqueTotales(doc, y, lineas, totalStr, hayPromos) {
 
   if (hayPromos) {
     doc.setFontSize(7); doc.setFont('helvetica', 'italic'); doc.setTextColor(...GRIS_NOTA)
-    doc.text('* Precio con descuento promocional aplicado.', ML, cur + 20)
+    doc.text('* Precio con descuento promocional. Los ítems con promoción no reciben ajuste por método de pago.', ML, cur + 20)
   }
 }
 
@@ -200,11 +202,13 @@ export async function generarPDFPresupuesto(idPresupuesto) {
 
   const nombresMetodo = { efectivo: 'Efectivo', transferencia: 'Transferencia', cc15: 'CC 15 días', cc30: 'CC 30 días' }
   const metodoNombre = nombresMetodo[pres.metodoPago] ?? pres.metodoPago
-  const pctSufijo = pctMetodoPago(pres.metodoPago, esExcepcion, montoFinal, subtotalConPromo)
-  const ajusteLabel = `Ajuste${pctSufijo ? ' ' + pctSufijo : ''}:`
+  const { subtotalAjustable } = separarSubtotales(detalles)
+  const hayPromos = detalles.some(d => d.precioConPromo != null)
+  const pctSufijo = pctMetodoPago(pres.metodoPago, esExcepcion, montoFinal, subtotalConPromo, subtotalAjustable)
+  // [FIX Ajuste vs Promo] con promociones, el ajuste aplica solo a los ítems sin promoción
+  const ajusteLabel = `Ajuste${hayPromos ? ' productos sin promoción' : ''}${pctSufijo ? ' ' + pctSufijo : ''}:`
 
   const lineas = construirLineasTotales({ montoOriginal, subtotalConPromo, ajusteMetodo, ajusteLabel })
-  const hayPromos = detalles.some(d => d.precioConPromo != null)
 
   // ── Documento ────────────────────────────────────────────────────────────
   const { PAGE_W, ML, FIRST_TABLE_Y, CONT_TABLE_Y, GAP_AFTER_TABLE } = LAYOUT

@@ -5,15 +5,17 @@ import { useNavigate } from 'react-router-dom'
 
 // ─── Services ────────────────────────────────────────────────────────────────
 import { crearCliente, buscarClientes, obtenerClientePorId } from '../services/clientesService'
-import { actualizarPresupuesto, obtenerPresupuestoPorId, obtenerDetallesDePresupuesto } from '../services/presupuestosService'
-// [ANTI-DUPLICACIÓN] El alta ahora pasa por el RPC idempotente (escenario 3
-// de la historia de usuario). `actualizarPresupuesto` sigue igual: la edición
-// de un presupuesto ya existente no puede "duplicarse" de la misma manera
-// que un alta, así que no requiere este cableado.
-import { crearPresupuestoIdempotente } from '../services/presupuestosIdempotente'
+import { obtenerPresupuestoPorId, obtenerDetallesDePresupuesto } from '../services/presupuestosService'
+// [ANTI-DUPLICACIÓN] El alta pasa por el RPC idempotente (escenario 3 de la
+// historia de usuario). [EDICIÓN VÍA RPC] La edición también: aunque no pueda
+// "duplicarse" como un alta, antes escribía directo a las tablas (sin transacción
+// y sin validar el total en el servidor). Ahora es atómica y usa la misma validación.
+import { crearPresupuestoIdempotente, actualizarPresupuestoIdempotente } from '../services/presupuestosIdempotente'
 import { useClaveIdempotencia } from '../lib/idempotency'
 import { buscarProductos, obtenerProductoPorId, obtenerMedidasDeProducto } from '../services/productosService'
 import { calcularPromocionParaItem, obtenerPromocionesVigentes } from '../services/promocionesService'
+// [FIX Ajuste vs Promo] Regla única: el ajuste por método de pago NO se aplica a ítems con promoción.
+import { calcularTotales, derivarFactorAjustable, factorCompatibleRpc } from '../lib/calculoPresupuesto'
 import { obtenerSaldosPendientesDeCliente } from '../services/saldosService'
 
 // ─── Hooks ───────────────────────────────────────────────────────────────────
@@ -51,29 +53,9 @@ function norm(s) {
 const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
 
 // ─── Helpers de totales ────────────────────────────────────────────────────
-
-/**
- * Calcula los totales del carrito a partir de ítems ya enriquecidos con promos.
- * Reemplaza calcularTotales() de lib/promociones.js.
- */
-function calcularTotales(itemsConPromo, factor) {
-  let subtotalSinPromo = 0
-  let subtotalConPromo = 0
-
-  for (const it of itemsConPromo) {
-    if (it.noDisponible) continue // [BORRADOR] producto dado de baja: no entra en los totales
-    const cant     = parseInt(it.cantidad) || 0
-    const precio   = parseFloat(it.precioUnitario) || 0
-    const efectivo = it.precioConPromo != null ? it.precioConPromo : precio
-    subtotalSinPromo += cant * precio
-    subtotalConPromo += cant * efectivo
-  }
-
-  const ahorro     = subtotalSinPromo - subtotalConPromo
-  const totalFinal = Math.round(subtotalConPromo * factor * 100) / 100
-
-  return { subtotalSinPromo, subtotalConPromo, ahorro, totalFinal }
-}
+// [FIX Ajuste vs Promo] `calcularTotales` vive en lib/calculoPresupuesto.js (módulo puro y
+// testeado). Antes el factor del método de pago multiplicaba TODO el subtotal, acumulando
+// el ajuste sobre ítems que ya tenían precio promocional.
 
 // ─── Toast ─────────────────────────────────────────────────────────────────
 
@@ -764,6 +746,10 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
                   {itemConPromo.promoAplicada?.nombre ?? ''}
                 </span>
               </div>
+              {/* [FIX Ajuste vs Promo] Aviso al usuario: este ítem queda fuera del ajuste por método de pago */}
+              <div className="text-surface-500 text-[10px] font-body leading-tight">
+                Sin ajuste por método de pago
+              </div>
             </>
           ) : (
             <div
@@ -879,7 +865,7 @@ function MetodoPagoSelector({ metodoPago, onMetodoPago, excepcionFactor, onExcep
           </div>
           {pct !== '' && (
             <p className="text-brand-400 text-xs font-mono">
-              Factor: {(1 - (parseFloat(pct)||0)/100).toFixed(4)} · el precio final será {((1-(parseFloat(pct)||0)/100)*100).toFixed(2)}% del original
+              Factor: {(1 - (parseFloat(pct)||0)/100).toFixed(4)} · el precio final será {((1-(parseFloat(pct)||0)/100)*100).toFixed(2)}% del original (solo ítems sin promoción)
             </p>
           )}
         </div>
@@ -998,41 +984,13 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
 
         const esExcepcionDB = pres.esExcepcion === 1
 
-        // [FIX Margen Excepción + Promoción] BUG ORIGINAL:
-        // `montoOriginal` es el subtotal a PRECIO DE LISTA (sin promo, sin
-        // excepción — ver `cabecera.montoOriginal = subtotalSinPromo` en
-        // guardar()). `monto` es el total final CON promo Y CON excepción
-        // ya aplicadas. Calcular factorDB = monto / montoOriginal mezclaba
-        // en un único número el descuento de la promoción del producto Y
-        // el margen de la excepción. Al reabrir el presupuesto para editar,
-        // ese factor "contaminado" con la promo se guardaba como si fuera
-        // el margen puro de la excepción (pctDB) y quedaba en el input
-        // editable. Efecto en cada escenario:
-        //   · Guardar sin tocar nada → la promo se re-aplicaba sobre un
-        //     total que YA la incluía (doble descuento/recargo).
-        //   · Sacar el producto en promo → el "residuo" de la promo se
-        //     quedaba pegado al margen de excepción.
-        //   · Agregar un producto en promo nuevo → no se combinaba con el
-        //     margen de excepción vigente, se pisaban entre sí.
-        //
-        // FIX: reconstruir el subtotal CON promo pero SIN excepción a
-        // partir de `detalle_presupuesto.subtotal`, que es exactamente
-        // `cantidad * precioConPromo` (ver guardar(): `subtotal: cantidad *
-        // precioFinal`). Ese valor es el que se usó como base real del
-        // cálculo al momento del alta/última edición, así que dividir
-        // `monto` por él aísla el margen puro de la excepción,
-        // desacoplado de qué promociones estaban vigentes en ese momento.
-        // Es además un punto fijo estable: si el usuario reabre y guarda
-        // sin cambiar nada, itemsConPromo recalcula el mismo
-        // subtotalConPromo (mismos ítems + mismas promos vigentes) y
-        // totalFinal = round(subtotalConPromo * factorDB, 2) = monto,
-        // sin drift entre ediciones sucesivas (ver Escenario 2).
-        const subtotalConPromoDB = detalles.reduce(
-          (acc, d) => acc + (Number(d.subtotal) || 0),
-          0,
-        )
-        const factorDB = esExcepcionDB && subtotalConPromoDB > 0
-          ? pres.monto / subtotalConPromoDB
+        // [FIX Ajuste vs Promo] El % de la excepción se aplica SOLO a los ítems sin promoción,
+        // así que el factor se reconstruye como (monto − subtotalPromo) / subtotalAjustable,
+        // usando `precioConPromo` persistido en cada detalle para separar ambos grupos.
+        // Es un punto fijo: reabrir y guardar sin cambios reproduce el mismo `monto`.
+        // (Presupuestos anteriores al fix: el total se conserva; ver nota en lib/calculoPresupuesto.js.)
+        const factorDB = esExcepcionDB
+          ? derivarFactorAjustable({ monto: pres.monto, detalles })
           : 1
         const pctDB = esExcepcionDB
           ? String(((1 - factorDB) * 100).toFixed(4).replace(/\.?0+$/, ''))
@@ -1110,7 +1068,7 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
   }), [items, promoVigentes])
 
   // [OPTIMIZACIÓN 3] Totales memoizados — dependen de itemsConPromo y factorReal
-  const { subtotalSinPromo, subtotalConPromo, ahorro, totalFinal } = useMemo(
+  const { subtotalSinPromo, subtotalConPromo, subtotalPromo, subtotalAjustable, ajuste, ahorro, totalFinal, cantItemsConPromo, cantItemsAjustables } = useMemo(
     () => calcularTotales(itemsConPromo, factorReal),
     [itemsConPromo, factorReal]
   )
@@ -1359,19 +1317,29 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
         monto:           totalFinal,
         estado:          'borrador',
         esExcepcion:     esExcepcion ? 1 : 0,
-        // [ANTI-DUPLICACIÓN / FIX] El backend valida que `monto` sea
-        // coherente con la suma del detalle, pero no puede recalcular el
-        // recargo/descuento por método de pago sin duplicar METODOS_BASE
-        // acá y allá (y desincronizarse el día que cambien un %). Se manda
-        // el factor ya resuelto por el frontend; el RPC solo verifica que
-        // monto ≈ round(sum(detalle.subtotal) * factor, 2).
-        factor:          factorReal,
+        // [ANTI-DUPLICACIÓN / FIX Ajuste vs Promo] El RPC actual valida
+        // monto ≈ round(Σ detalle.subtotal × factor, 2). Como el ajuste ya no es uniforme
+        // (los ítems con promoción quedan fuera), `factor` se envía como factor mezclado
+        // (monto / Σ subtotal): sigue cumpliendo esa igualdad. Los campos nuevos permiten
+        // que el servidor valide con la regla real (ver sql/calcular_total_presupuesto.sql).
+        factor:            factorCompatibleRpc(totalFinal, detalles),
+        factorMetodo:      factorReal,
+        subtotalPromo,
+        subtotalAjustable,
       }
 
       let presupuestoReal
 
       if (modoEdicion) {
-        await actualizarPresupuesto(presupuestoEditar, cabecera, detalles)
+        // [EDICIÓN VÍA RPC] Atómica, validada en el servidor con la misma regla que el alta,
+        // solo para borradores. Antes: update + delete + insert directos desde el cliente.
+        await actualizarPresupuestoIdempotente({
+          clave:         leerClaveIdempotencia(),
+          idPresupuesto: presupuestoEditar,
+          cabecera,
+          detalles,
+        })
+        rotarClaveIdempotencia()
         presupuestoReal = presupuestoEditar
         if (onEditarVolver) { onEditarVolver(presupuestoReal); return }
       } else {
@@ -1408,6 +1376,10 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
 
       setGuardado({ idPresupuesto: presupuestoReal, esCuenta, totalFinal, metodoLabel, clienteNombre: `${cliente.nombre} ${cliente.apellido}`, clienteId: cliente.idCliente })
     } catch (err) {
+      // [EDICIÓN VÍA RPC] CLAVE_REUTILIZADA: el usuario cambió el contenido tras un envío cuyo
+      // resultado quedó incierto. Como la edición REEMPLAZA el estado completo, es seguro
+      // tratar el próximo clic como una intención nueva; sin rotar quedaría trabado.
+      if (modoEdicion && err?.codigo === 'P0IDK') rotarClaveIdempotencia()
       setError(err.message || 'Error al guardar el presupuesto.')
     } finally {
       setSaving(false)
@@ -1630,15 +1602,20 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
               </div>
             )}
 
-            {/* Ajuste por método de pago */}
+            {/* Ajuste por método de pago — solo sobre ítems sin promoción */}
             <div className="flex justify-between gap-12">
               <span className="text-surface-400">Ajuste ({metodoLabel}):</span>
-              <span className={`font-mono font-medium ${factorReal < 1 ? 'text-emerald-400' : factorReal > 1 ? 'text-red-400' : 'text-surface-400'}`}>
-                {factorReal === 1 ? '—' : factorReal < 1
-                  ? `- ${fmt(subtotalConPromo - totalFinal)}`
-                  : `+ ${fmt(totalFinal - subtotalConPromo)}`}
+              <span className={`font-mono font-medium ${ajuste < 0 ? 'text-emerald-400' : ajuste > 0 ? 'text-red-400' : 'text-surface-400'}`}>
+                {ajuste === 0 ? '—' : ajuste < 0 ? `- ${fmt(-ajuste)}` : `+ ${fmt(ajuste)}`}
               </span>
             </div>
+            {cantItemsConPromo > 0 && (
+              <p role="status" className="text-surface-500 text-xs -mt-1">
+                {cantItemsAjustables > 0
+                  ? `Se aplica solo sobre ${fmt(subtotalAjustable)} (ítems sin promoción).`
+                  : 'Todos los ítems tienen promoción: no se aplica ajuste por método de pago.'}
+              </p>
+            )}
 
             <div className="border-t border-surface-700 pt-2 flex justify-between gap-12">
               <span className="text-white font-semibold">Total a pagar:</span>

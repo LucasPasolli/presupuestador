@@ -189,4 +189,63 @@ export async function eliminarPresupuestoConReintegro({ clave, idPresupuesto }) 
   return resultado
 }
 
+/**
+ * @typedef {object} ResultadoEdicion
+ * @property {number}  idPresupuesto
+ * @property {number}  monto
+ * @property {boolean} idempotente `true` si la respuesta vino de una
+ *   solicitud anterior con la misma clave.
+ */
+
+/**
+ * Edita un presupuesto en BORRADOR de forma atómica e idempotente.
+ *
+ * Reemplaza a `actualizarPresupuesto(id, cabecera, detalles)` del service, que
+ * escribía directo a las tablas (update + delete + insert sin transacción) y por lo
+ * tanto: (1) podía dejar un presupuesto sin ítems si la secuencia se cortaba y
+ * (2) nunca pasaba por la validación de totales del servidor.
+ *
+ * La RPC valida con las MISMAS reglas que el alta (app.validar_presupuesto), bloquea
+ * la fila y rechaza si el estado ya no es 'borrador'.
+ * `cabecera.estado` se ignora: los cambios de estado siguen su propio camino.
+ *
+ * @param {object} args
+ * @param {string} args.clave          UUID de `useClaveIdempotencia()`. Una clave
+ *   por intento de guardado; rotar tras éxito (y tras CLAVE_REUTILIZADA, ver
+ *   Presupuestador.jsx: como la edición REEMPLAZA el estado, rotar es seguro).
+ * @param {number} args.idPresupuesto
+ * @param {CabeceraPresupuesto}  args.cabecera
+ * @param {DetallePresupuesto[]} args.detalles
+ * @returns {Promise<ResultadoEdicion>}
+ * @throws {import('./idempotencia').ErrorOperacion} Error ya saneado para la UI.
+ */
+export async function actualizarPresupuestoIdempotente({ clave, idPresupuesto, cabecera, detalles }) {
+  if (!idPresupuesto) {
+    throw new Error('idPresupuesto es requerido.')
+  }
+  if (!clave) {
+    throw new Error('Falta la clave de idempotencia.')
+  }
+  if (!Array.isArray(detalles) || detalles.length === 0) {
+    throw new Error('El presupuesto debe tener al menos un ítem.')
+  }
+
+  const resultado = /** @type {ResultadoEdicion} */ (
+    await ejecutarIdempotente(
+      'actualizar_presupuesto_idempotente',
+      { p_id_presupuesto: Number(idPresupuesto), p_cabecera: cabecera, p_detalles: detalles },
+      { clave },
+    )
+  )
+
+  if (resultado.idempotente) {
+    logger.warn('presupuesto.edicion_duplicada_absorbida', {
+      idPresupuesto: resultado.idPresupuesto,
+      clave,
+    })
+  }
+
+  return resultado
+}
+
 export default crearPresupuestoIdempotente

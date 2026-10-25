@@ -41,6 +41,10 @@ export const CODIGOS = /** @type {const} */ ({
   // internamente (no_data_found de STRICT INTO) y mezclar semántica propia
   // con la del motor genera falsos positivos difíciles de rastrear.
   RECURSO_NO_ENCONTRADO: 'P0NFD',
+  // AGREGADO (feature: edición de presupuesto vía RPC): el recurso existe pero su
+  // estado ya no admite la operación (p. ej. se aprobó desde otra pestaña mientras
+  // se editaba). Genérico para que otras RPC con máquina de estados lo reutilicen.
+  ESTADO_NO_EDITABLE:    'P0EST',
 })
 
 const REINTENTOS_MAX   = 2
@@ -91,6 +95,8 @@ export function mapearErrorSeguro(error) {
       return { mensaje: 'No tenés permisos para realizar esta acción.', codigo, reintentable: false }
     case CODIGOS.RECURSO_NO_ENCONTRADO:
       return { mensaje: 'Este registro ya no existe. Es posible que se haya eliminado desde otra pestaña o dispositivo — actualizá la pantalla.', codigo, reintentable: false }
+    case CODIGOS.ESTADO_NO_EDITABLE:
+      return { mensaje: 'Este presupuesto ya no se puede editar porque cambió de estado (por ejemplo, fue aprobado desde otra pestaña). Actualizá la pantalla.', codigo, reintentable: false }
     case 'TIMEOUT':
       return { mensaje: 'El servidor tardó demasiado en responder. Verificá si la operación se completó antes de reintentar.', codigo, reintentable: true }
     default:

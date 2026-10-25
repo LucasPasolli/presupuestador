@@ -25,6 +25,7 @@ import {
 import { descontarStock } from '../services/productosService'
 import { useDebounce } from '../hooks/useDebounce'
 import { useScrollAnchor } from '../hooks/useScrollToTopOnChange'
+import { derivarFactorAjustable, tienePromocion } from '../lib/calculoPresupuesto'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -190,14 +191,16 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
   // saldo allí: un callejón sin salida.
   const sinSaldoCC  = esCC && pres.estado === 'aprobado' && !loading && !saldo
 
-  const _subtotalConPromo = detalles.reduce((acc, d) => acc + (parseFloat(d.subtotal) || 0), 0)
+  // [FIX Ajuste vs Promo] El factor se aplica solo a los ítems sin promoción: para
+  // excepciones se infiere de lo persistido; para métodos base, es el del método.
+  const hayPromos = detalles.some(tienePromocion)
   let factorReal
   if (esExcepcion) {
-    factorReal = _subtotalConPromo > 0 ? (parseFloat(pres.monto) || 0) / _subtotalConPromo : 1
+    factorReal = derivarFactorAjustable({ monto: pres.monto, detalles })
   } else {
     factorReal = METODOS_FACTOR[pres.metodoPago] ?? 1
   }
-  const ajusteLabel = pctLabel(factorReal)
+  const ajusteLabel = pctLabel(factorReal) + (hayPromos && factorReal !== 1 ? ' · solo ítems sin promoción' : '')
 
   async function cambiarEstado(nuevoEstado) {
     setErrorModal('')
