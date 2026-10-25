@@ -1,173 +1,251 @@
 // src/lib/pdfPresupuesto.js
-// Función unificada de generación de PDF de presupuesto.
-// Usada por Presupuestador.jsx e Historial.jsx.
+// Generación unificada del PDF de presupuesto (Presupuestador.jsx e Historial.jsx).
+//
+// Paginación:
+//  - La tabla de ítems se reparte en N hojas (cabecera repetida, filas nunca partidas).
+//  - El bloque de totales es una unidad atómica: se mide antes de dibujar y, si no
+//    entra en el espacio restante, se traslada ENTERO a una hoja nueva.
+//  - El encabezado de página se dibuja al final sobre todas las hojas.
 
-import { obtenerPresupuestoPorId } from '../services/presupuestosService'
-import { obtenerClientePorId }     from '../services/clientesService'
-import { obtenerDetallesConNombreDePresupuesto } from '../services/presupuestosService'
+import { obtenerPresupuestoPorId, obtenerDetallesConNombreDePresupuesto } from '../services/presupuestosService'
+import { obtenerClientePorId } from '../services/clientesService'
+import { separarSubtotales } from './calculoPresupuesto'
 
-// ─── Mapa de métodos de pago (fuente de verdad compartida con Presupuestador) ─
-// Exportado para que otros módulos puedan consultarlo sin duplicar la definición.
+// ─── Métodos de pago (fuente de verdad compartida con Presupuestador) ───────
 export const METODOS_BASE_PDF = [
-  { value: 'efectivo',      label: 'Efectivo',          factor: 0.95,  pct: -5    },
-  { value: 'transferencia', label: 'Transferencia',      factor: 0.95,  pct: -5    },
-  { value: 'cc15',          label: 'CC 15 días',         factor: 1.00,  pct:  0    },
-  { value: 'cc30',          label: 'CC 30 días',         factor: 1.105, pct:  10.5 },
+  { value: 'efectivo',      label: 'Efectivo',      factor: 0.95,  pct: -5   },
+  { value: 'transferencia', label: 'Transferencia', factor: 0.95,  pct: -5   },
+  { value: 'cc15',          label: 'CC 15 días',    factor: 1.00,  pct:  0   },
+  { value: 'cc30',          label: 'CC 30 días',    factor: 1.105, pct:  10.5 },
 ]
 
-/**
- * Devuelve el string de porcentaje fijo del método de pago para mostrar en PDF.
- * Ej: "efectivo" → "(5% descuento)", "cc30" → "(10.5% recargo)", "cc15" → null
- * Para excepciones, devuelve el % calculado entre montoOriginal y montoConPromos.
- */
-function pctMetodoPago(metodoPago, esExcepcion, montoFinal, subtotalConPromo) {
-  if (esExcepcion) {
-    if (!subtotalConPromo || subtotalConPromo === 0) return null
-    const ajuste = montoFinal - subtotalConPromo
-    if (Math.abs(ajuste) < 0.01) return null
-    const pct = Math.abs((ajuste / subtotalConPromo) * 100)
-    const pctStr = Number.isInteger(pct) ? String(pct) : pct.toFixed(2).replace(/\.?0+$/, '')
-    return ajuste < 0 ? `(${pctStr}% descuento)` : `(${pctStr}% recargo)`
-  }
+// ─── Layout (mm, A4 vertical) ───────────────────────────────────────────────
+export const LAYOUT = Object.freeze({
+  PAGE_W: 210,
+  PAGE_H: 297,
+  ML: 14,
+  HEADER_H: 18,            // banda gris superior (todas las hojas)
+  FIRST_TABLE_Y: 55,       // la hoja 1 lleva además los datos de cliente
+  CONT_TABLE_Y: 26,        // inicio de contenido en hojas 2..N
+  FOOTER_H: 14,            // reservado para la numeración
+  GAP_AFTER_TABLE: 6,
+  TOTALS_SEP_H: 7,         // línea separadora + aire
+  TOTALS_LINE_H: 6,
+  TOTALS_BOX_H: 14,        // caja TOTAL (2 de aire + 12 de alto)
+  NOTE_H: 8,
+})
+const CONTENT_BOTTOM = LAYOUT.PAGE_H - LAYOUT.FOOTER_H
 
-  const metodo = METODOS_BASE_PDF.find(m => m.value === metodoPago)
-  if (!metodo || metodo.pct === 0) return null
-  if (metodo.pct < 0) return `(${Math.abs(metodo.pct)}% descuento)`
-  return `(${metodo.pct}% recargo)`
-}
+// ─── Paleta de grises ───────────────────────────────────────────────────────
+const GRIS_HEADER = [235, 235, 235]
+const GRIS_TEXTO = [50, 50, 50]
+const GRIS_SUAVE = [100, 100, 100]
+const GRIS_ALT_ROW = [250, 250, 250]
+const GRIS_LINEA = [235, 235, 235]
+const GRIS_DESCUENTO = [80, 80, 80]
+const GRIS_RECARGO = [40, 40, 40]
+const GRIS_NOTA = [130, 130, 130]
 
-function fmt(n) {
+// ─── Helpers puros (exportados para test) ───────────────────────────────────
+const round2 = n => Math.round((Number(n) || 0) * 100) / 100
+
+export function fmt(n) {
   return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(n ?? 0)
 }
 
-/**
- * Formatea el id_producto (PK interna) como código de catálogo visible al cliente.
- * Ej: 7 → "#0007". Zero-padding a 4 dígitos; si el id supera 9999 no se trunca.
- * NOTA: hoy el "código" es el id_producto. Si en el futuro se agrega un campo
- * SKU real y editable en la tabla `producto`, reemplazar esta función por el
- * valor de ese campo (ver detalle.codigoProducto una vez exista esa columna).
- */
-function formatearCodigoProducto(idProducto) {
+function fmtFecha(iso) {
+  if (!iso) return '—'
+  const [y, m, d] = String(iso).split('-')
+  return `${d}/${m}/${y}`
+}
+
+/** Elimina caracteres no seguros para nombre de archivo (path traversal, reservados). */
+export function sanitizarNombreArchivo(s) {
+  return String(s ?? '').replace(/[^\p{L}\p{N}_-]+/gu, '_').replace(/^_+|_+$/g, '')
+}
+
+/** "(5% descuento)" / "(10.5% recargo)" / null. Para excepciones calcula el % real. */
+export function pctMetodoPago(metodoPago, esExcepcion, montoFinal, subtotalConPromo, baseAjustable = subtotalConPromo) {
+  if (esExcepcion) {
+    // [FIX Ajuste vs Promo] el % real se calcula sobre los ítems SIN promoción (los únicos ajustados)
+    if (!subtotalConPromo || !baseAjustable) return null
+    const ajuste = montoFinal - subtotalConPromo
+    if (Math.abs(ajuste) < 0.01) return null
+    const pct = Math.abs((ajuste / baseAjustable) * 100)
+    const pctStr = Number.isInteger(pct) ? String(pct) : pct.toFixed(2).replace(/\.?0+$/, '')
+    return ajuste < 0 ? `(${pctStr}% descuento)` : `(${pctStr}% recargo)`
+  }
+  const metodo = METODOS_BASE_PDF.find(m => m.value === metodoPago)
+  if (!metodo || metodo.pct === 0) return null
+  return metodo.pct < 0 ? `(${Math.abs(metodo.pct)}% descuento)` : `(${metodo.pct}% recargo)`
+}
+
+/** "#0007" — hoy el código visible es el id_producto. */
+export function formatearCodigoProducto(idProducto) {
   if (idProducto == null) return '—'
   return `#${String(idProducto).padStart(4, '0')}`
 }
 
 /**
- * Genera y descarga el PDF de un presupuesto dado su ID.
- * - PDF completamente en escala de grises.
- * - Muestra precio con promo marcado con asterisco en la tabla de productos.
- * - Desglosa totales: subtotal lista / ahorro promos / ajuste método de pago (con %) / total.
+ * Única fuente de las líneas del bloque de totales: se usa tanto para MEDIR
+ * como para DIBUJAR, así nunca divergen. No incluye el TOTAL (caja aparte).
+ * @returns {{label:string, valor:string, tono:'normal'|'descuento'|'recargo'}[]}
+ */
+export function construirLineasTotales({ montoOriginal, subtotalConPromo, ajusteMetodo, ajusteLabel }) {
+  const ahorroPromo = round2(montoOriginal - subtotalConPromo)
+  const ajuste = round2(ajusteMetodo)
+  const lineas = [{ label: 'Subtotal (precio lista):', valor: fmt(montoOriginal), tono: 'normal' }]
+
+  if (ahorroPromo > 0.01) {
+    lineas.push({ label: 'Promoción:', valor: `- ${fmt(ahorroPromo)}`, tono: 'descuento' })
+    lineas.push({ label: 'Subtotal con promociones:', valor: fmt(subtotalConPromo), tono: 'normal' })
+  }
+  if (Math.abs(ajuste) > 0.01) {
+    lineas.push(
+      ajuste < 0
+        ? { label: ajusteLabel, valor: `- ${fmt(Math.abs(ajuste))}`, tono: 'descuento' }
+        : { label: ajusteLabel, valor: `+ ${fmt(ajuste)}`, tono: 'recargo' },
+    )
+  }
+  return lineas
+}
+
+/** Altura total (mm) del bloque: separador + líneas + caja TOTAL + nota opcional. */
+export function alturaBloqueTotales(cantLineas, hayPromos) {
+  const L = LAYOUT
+  return L.TOTALS_SEP_H + cantLineas * L.TOTALS_LINE_H + L.TOTALS_BOX_H + (hayPromos ? L.NOTE_H : 0)
+}
+
+// ─── Dibujo ─────────────────────────────────────────────────────────────────
+function dibujarBloqueTotales(doc, y, lineas, totalStr, hayPromos) {
+  const { PAGE_W, ML, TOTALS_SEP_H, TOTALS_LINE_H } = LAYOUT
+  const xLabel = PAGE_W - ML - 90 // más ancho: la etiqueta de ajuste puede aclarar "sin promo"
+  let cur = y
+
+  doc.setDrawColor(...GRIS_LINEA)
+  doc.line(ML, cur, PAGE_W - ML, cur)
+  cur += TOTALS_SEP_H
+
+  doc.setFontSize(8.5); doc.setFont('helvetica', 'normal')
+  for (const l of lineas) {
+    doc.setTextColor(...GRIS_SUAVE)
+    doc.text(l.label, xLabel, cur)
+    doc.setTextColor(...(l.tono === 'descuento' ? GRIS_DESCUENTO : l.tono === 'recargo' ? GRIS_RECARGO : GRIS_TEXTO))
+    doc.text(l.valor, PAGE_W - ML, cur, { align: 'right' })
+    cur += TOTALS_LINE_H
+  }
+
+  doc.setFillColor(...GRIS_HEADER)
+  doc.roundedRect(ML, cur + 2, PAGE_W - ML * 2, 12, 2, 2, 'F')
+  doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(...GRIS_TEXTO)
+  doc.text('TOTAL', ML + 4, cur + 10)
+  doc.text(totalStr, PAGE_W - ML - 4, cur + 10, { align: 'right' })
+
+  if (hayPromos) {
+    doc.setFontSize(7); doc.setFont('helvetica', 'italic'); doc.setTextColor(...GRIS_NOTA)
+    doc.text('* Precio con descuento promocional. Los ítems con promoción no reciben ajuste por método de pago.', ML, cur + 20)
+  }
+}
+
+/** Banda de encabezado en TODAS las hojas. */
+function decorarPaginas(doc, idPresupuesto, cliente) {
+  const { PAGE_W, ML, HEADER_H } = LAYOUT
+  const total = doc.getNumberOfPages()
+  for (let i = 1; i <= total; i++) {
+    doc.setPage(i)
+    doc.setFillColor(...GRIS_HEADER)
+    doc.rect(0, 0, PAGE_W, HEADER_H, 'F')
+    doc.setFontSize(13); doc.setFont('helvetica', 'bold'); doc.setTextColor(...GRIS_TEXTO)
+    doc.text('CLAUDIO RER GROUP', ML, 12)
+
+    if (i > 1) {
+      doc.setFontSize(8.5); doc.setFont('helvetica', 'normal'); doc.setTextColor(...GRIS_SUAVE)
+      doc.text(`Presupuesto #${idPresupuesto} · ${cliente}`.trim(), PAGE_W - ML, 12, { align: 'right' })
+    }
+  }
+}
+
+/**
+ * Genera y descarga el PDF de un presupuesto.
+ * @param {number|string} idPresupuesto
+ * @returns {Promise<void>}
  */
 export async function generarPDFPresupuesto(idPresupuesto) {
-  const { default: jsPDF }     = await import('jspdf')
+  const { default: jsPDF } = await import('jspdf')
   const { default: autoTable } = await import('jspdf-autotable')
 
-  // ── Cargar datos desde los services ────────────────────────────────────────
   const [pres, detalles] = await Promise.all([
     obtenerPresupuestoPorId(idPresupuesto),
     obtenerDetallesConNombreDePresupuesto(idPresupuesto),
   ])
   if (!pres) return
 
-  // Traer datos frescos del cliente (cuit, telefono, mail)
-  // con fallback a los snapshots del presupuesto si el cliente fue borrado
   let clienteData = null
   try {
     clienteData = await obtenerClientePorId(pres.idCliente)
   } catch {
-    // cliente eliminado — se usan los snapshots del presupuesto
+    // cliente eliminado: se usan los snapshots del presupuesto
   }
-
-  const cNombre   = clienteData?.nombre   ?? pres.nombreCliente   ?? ''
+  const cNombre = clienteData?.nombre ?? pres.nombreCliente ?? ''
   const cApellido = clienteData?.apellido ?? pres.apellidoCliente ?? ''
-  const cCuit     = clienteData?.cuit     ?? null
+  const cCuit = clienteData?.cuit ?? null
   const cTelefono = clienteData?.telefono ?? null
-  const cMail     = clienteData?.mail     ?? null
+  const cMail = clienteData?.mail ?? null
 
-  // ── Cálculo de desglose de totales ──────────────────────────────────────
+  // ── Importes (mismas fórmulas que la pantalla) ───────────────────────────
   const montoOriginal = pres.montoOriginal ??
-    detalles.reduce((acc, d) => acc + (parseFloat(d.precioUnitario) || 0) * (parseInt(d.cantidad) || 0), 0)
-
-  const subtotalConPromo = detalles.reduce((acc, d) => acc + (parseFloat(d.subtotal) || 0), 0)
-
-  const ahorroPromo  = montoOriginal - subtotalConPromo
-  const ajusteMetodo = (parseFloat(pres.monto) || 0) - subtotalConPromo
-
+    detalles.reduce((a, d) => a + (parseFloat(d.precioUnitario) || 0) * (parseInt(d.cantidad) || 0), 0)
+  const subtotalConPromo = detalles.reduce((a, d) => a + (parseFloat(d.subtotal) || 0), 0)
+  const montoFinal = parseFloat(pres.monto) || 0
+  const ajusteMetodo = montoFinal - subtotalConPromo
   const esExcepcion = pres.esExcepcion === 1
 
-  const metodoLabelBase = {
-    efectivo:      'Efectivo',
-    transferencia: 'Transferencia',
-    cc15:          'CC 15 días',
-    cc30:          'CC 30 días',
-  }
-  const metodoNombre = metodoLabelBase[pres.metodoPago] ?? pres.metodoPago
-  const pctSufijo = pctMetodoPago(pres.metodoPago, esExcepcion, parseFloat(pres.monto) || 0, subtotalConPromo)
-  const ajusteLineaLabel = `Ajuste${pctSufijo ? ' ' + pctSufijo : ''}:`
+  const nombresMetodo = { efectivo: 'Efectivo', transferencia: 'Transferencia', cc15: 'CC 15 días', cc30: 'CC 30 días' }
+  const metodoNombre = nombresMetodo[pres.metodoPago] ?? pres.metodoPago
+  const { subtotalAjustable } = separarSubtotales(detalles)
+  const hayPromos = detalles.some(d => d.precioConPromo != null)
+  const pctSufijo = pctMetodoPago(pres.metodoPago, esExcepcion, montoFinal, subtotalConPromo, subtotalAjustable)
+  // [FIX Ajuste vs Promo] con promociones, el ajuste aplica solo a los ítems sin promoción
+  const ajusteLabel = `Ajuste${hayPromos ? ' productos sin promoción' : ''}${pctSufijo ? ' ' + pctSufijo : ''}:`
 
-  // ── Helpers ──────────────────────────────────────────────────────────────
-  const fmtFecha = iso => {
-    if (!iso) return '—'
-    const [y, m, d] = iso.split('-')
-    return `${d}/${m}/${y}`
-  }
-
-  // ── Paleta de grises ─────────────────────────────────────────────────────
-  const GRIS_HEADER    = [235, 235, 235]
-  const GRIS_TEXTO     = [50,  50,  50]
-  const GRIS_SUAVE     = [100, 100, 100]
-  const GRIS_ALT_ROW   = [250, 250, 250]
-  const GRIS_LINEA     = [235, 235, 235]
-  const GRIS_DESCUENTO = [80,  80,  80]
-  const GRIS_RECARGO   = [40,  40,  40]
-  const GRIS_NOTA      = [130, 130, 130]
+  const lineas = construirLineasTotales({ montoOriginal, subtotalConPromo, ajusteMetodo, ajusteLabel })
 
   // ── Documento ────────────────────────────────────────────────────────────
+  const { PAGE_W, ML, FIRST_TABLE_Y, CONT_TABLE_Y, GAP_AFTER_TABLE } = LAYOUT
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
-  const PW  = 210
-  const ML  = 14
 
-  // Encabezado empresa
-  doc.setFillColor(...GRIS_HEADER)
-  doc.rect(0, 0, PW, 18, 'F')
-  doc.setFontSize(13); doc.setFont('helvetica', 'bold'); doc.setTextColor(...GRIS_TEXTO)
-  doc.text('CLAUDIO RER GROUP', ML, 12)
-
-  // Número y fecha
+  // Datos propios de la hoja 1 (la banda y la numeración se aplican al final)
   doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(...GRIS_TEXTO)
   doc.text(`PRESUPUESTO #${idPresupuesto}`, ML, 28)
   doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...GRIS_SUAVE)
   doc.text(`Fecha: ${fmtFecha(pres.fecha)}`, ML, 34)
-  doc.text(
-    `Método de pago: ${esExcepcion ? `Excepción (${metodoNombre})` : metodoNombre}`,
-    ML, 39
-  )
+  doc.text(`Método de pago: ${esExcepcion ? `Excepción (${metodoNombre})` : metodoNombre}`, ML, 39)
 
-  // Datos cliente
+  const xCli = PAGE_W - ML - 70
   doc.setFontSize(9); doc.setFont('helvetica', 'bold'); doc.setTextColor(...GRIS_TEXTO)
-  doc.text('CLIENTE', PW - ML - 70, 26)
+  doc.text('CLIENTE', xCli, 26)
   doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...GRIS_SUAVE)
-  doc.text(`${cNombre} ${cApellido}`, PW - ML - 70, 32)
-  if (cCuit)     doc.text(`CUIT: ${cCuit}`,    PW - ML - 70, 37)
-  if (cTelefono) doc.text(`Tel: ${cTelefono}`, PW - ML - 70, 42)
-  if (cMail)     doc.text(cMail,               PW - ML - 70, 47)
+  doc.text(`${cNombre} ${cApellido}`, xCli, 32)
+  if (cCuit) doc.text(`CUIT: ${cCuit}`, xCli, 37)
+  if (cTelefono) doc.text(`Tel: ${cTelefono}`, xCli, 42)
+  if (cMail) doc.text(cMail, xCli, 47)
 
-  // Tabla de productos
   autoTable(doc, {
-    startY: 55,
-    margin: { left: ML, right: ML },
+    startY: FIRST_TABLE_Y,
+    // margin.top aplica a hojas 2..N; bottom reserva la numeración
+    margin: { left: ML, right: ML, top: CONT_TABLE_Y, bottom: LAYOUT.FOOTER_H + 4 },
     head: [['Código', 'Producto', 'Medida', 'Cant.', 'Precio Unit.', 'Subtotal']],
     body: detalles.map(d => [
       formatearCodigoProducto(d.idProducto),
       d.nombreProducto ?? `(producto eliminado #${d.idProducto})`,
       d.medida ?? '—',
       d.cantidad,
-      d.precioConPromo != null
-        ? `${fmt(d.precioConPromo)} *`
-        : fmt(d.precioUnitario),
+      d.precioConPromo != null ? `${fmt(d.precioConPromo)} *` : fmt(d.precioUnitario),
       fmt(d.subtotal),
     ]),
-    styles:     { fontSize: 8, cellPadding: 2.5, textColor: GRIS_TEXTO },
+    showHead: 'everyPage',
+    rowPageBreak: 'avoid',            // una fila (aunque ocupe 2 líneas) nunca se parte
+    styles: { fontSize: 8, cellPadding: 2.5, textColor: GRIS_TEXTO, overflow: 'linebreak' },
     headStyles: { fillColor: GRIS_HEADER, textColor: [60, 60, 60], fontStyle: 'bold' },
     alternateRowStyles: { fillColor: GRIS_ALT_ROW },
     columnStyles: {
@@ -180,66 +258,17 @@ export async function generarPDFPresupuesto(idPresupuesto) {
     },
   })
 
-  // ── Desglose de totales ──────────────────────────────────────────────────
-  const finalY = doc.lastAutoTable.finalY + 6
-  let curY = finalY
-
-  doc.setDrawColor(...GRIS_LINEA)
-  doc.line(ML, curY, PW - ML, curY)
-  curY += 7
-
-  // 1. Subtotal precio lista
-  doc.setFontSize(8.5); doc.setFont('helvetica', 'normal'); doc.setTextColor(...GRIS_SUAVE)
-  doc.text('Subtotal (precio lista):', PW - ML - 70, curY)
-  doc.setTextColor(...GRIS_TEXTO)
-  doc.text(fmt(montoOriginal), PW - ML, curY, { align: 'right' })
-  curY += 6
-
-  // 2. Ahorro por promociones (solo si existe)
-  if (ahorroPromo > 0.01) {
-    doc.setTextColor(...GRIS_SUAVE)
-    doc.text('Promoción:', PW - ML - 70, curY)
-    doc.setTextColor(...GRIS_DESCUENTO)
-    doc.text(`- ${fmt(ahorroPromo)}`, PW - ML, curY, { align: 'right' })
-    curY += 6
-
-    // 3. Subtotal con promociones (solo si hay ahorro)
-    doc.setTextColor(...GRIS_SUAVE)
-    doc.text('Subtotal con promociones:', PW - ML - 70, curY)
-    doc.setTextColor(...GRIS_TEXTO)
-    doc.text(fmt(subtotalConPromo), PW - ML, curY, { align: 'right' })
-    curY += 6
+  // ── Bloque de totales: atómico ───────────────────────────────────────────
+  const alto = alturaBloqueTotales(lineas.length, hayPromos)
+  let y = doc.lastAutoTable.finalY + GAP_AFTER_TABLE
+  if (y + alto > CONTENT_BOTTOM) {
+    doc.addPage()
+    y = CONT_TABLE_Y
   }
+  dibujarBloqueTotales(doc, y, lineas, fmt(pres.monto), hayPromos)
 
-  // 4. Ajuste por método de pago (solo si existe)
-  if (Math.abs(ajusteMetodo) > 0.01) {
-    doc.setFontSize(8.5); doc.setTextColor(...GRIS_SUAVE)
-    doc.text(ajusteLineaLabel, PW - ML - 70, curY)
-    doc.setFontSize(8.5)
-    if (ajusteMetodo < 0) {
-      doc.setTextColor(...GRIS_DESCUENTO)
-      doc.text(`- ${fmt(Math.abs(ajusteMetodo))}`, PW - ML, curY, { align: 'right' })
-    } else {
-      doc.setTextColor(...GRIS_RECARGO)
-      doc.text(`+ ${fmt(ajusteMetodo)}`, PW - ML, curY, { align: 'right' })
-    }
-    curY += 6
-  }
+  decorarPaginas(doc, idPresupuesto, `${cNombre} ${cApellido}`)
 
-  // 5. Total final
-  doc.setFillColor(...GRIS_HEADER)
-  doc.roundedRect(ML, curY + 2, PW - ML * 2, 12, 2, 2, 'F')
-  doc.setFontSize(10); doc.setFont('helvetica', 'bold'); doc.setTextColor(...GRIS_TEXTO)
-  doc.text('TOTAL', ML + 4, curY + 10)
-  doc.text(fmt(pres.monto), PW - ML - 4, curY + 10, { align: 'right' })
-
-  // Nota al pie si hay precios con promo
-  const hayPromos = detalles.some(d => d.precioConPromo != null)
-  if (hayPromos) {
-    const noteY = curY + 20
-    doc.setFontSize(7); doc.setFont('helvetica', 'italic'); doc.setTextColor(...GRIS_NOTA)
-    doc.text('* Precio con descuento promocional aplicado.', ML, noteY)
-  }
-
-  doc.save(`Presupuesto_${idPresupuesto}_${cNombre}_${cApellido}.pdf`)
+  const archivo = `Presupuesto_${sanitizarNombreArchivo(idPresupuesto)}_${sanitizarNombreArchivo(cNombre)}_${sanitizarNombreArchivo(cApellido)}.pdf`
+  doc.save(archivo)
 }

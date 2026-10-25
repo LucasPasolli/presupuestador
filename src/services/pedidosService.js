@@ -11,6 +11,23 @@ function manejarError(operacion, error) {
   throw new Error(error.message)
 }
 
+// Códigos devueltos por las RPC de recepción / estados / eliminación → texto seguro
+// para el usuario (nunca se filtran constraints ni nombres de tablas).
+const MENSAJES_ERROR_PEDIDO = {
+  pedido_no_encontrado: 'El pedido no existe o ya fue eliminado por otro usuario.',
+  estado_invalido:      'El estado indicado no es válido.',
+  metodo_pago_invalido: 'El método de pago indicado no es válido.',
+  no_autorizado:        'No tenés permisos para realizar esta operación.',
+}
+
+function manejarErrorRpc(operacion, error) {
+  console.error(`[pedidosService] ${operacion}:`, error.message)
+  throw new Error(
+    MENSAJES_ERROR_PEDIDO[error.message] ??
+    'No se pudo completar la operación. Revisá la conexión e intentá de nuevo.'
+  )
+}
+
 export function mapPedido(row) {
   if (!row) return null
   return {
@@ -30,7 +47,7 @@ export function mapPedido(row) {
   }
 }
 
-function mapDetallePedido(row) {
+export function mapDetallePedido(row) {
   if (!row) return null
   return {
     idDetallePedido: row.id_detalle_pedido,
@@ -132,6 +149,9 @@ export async function obtenerPedidoConDetalles(idPedido) {
 // ─── Mutaciones ───────────────────────────────────────────────────────────────
 
 /**
+ * @deprecated El formulario usa pedidosGuardadoService.guardarPedido (RPC atómica en lote).
+ * Se conserva sólo por compatibilidad con otros consumidores.
+ *
  * Crea un pedido nuevo con sus detalles.
  * Equivale a:
  *   run(`INSERT INTO PedidoCompra ...`)
@@ -188,6 +208,9 @@ export async function crearPedido(pedido, detalles) {
 }
 
 /**
+ * @deprecated El formulario usa pedidosGuardadoService.guardarPedido (RPC atómica en lote).
+ * Esta versión tiene N+1 y no es atómica; no usar en código nuevo.
+ *
  * Actualiza cabecera y detalles de un pedido existente.
  * Si el pedido cambia de estado logístico a 'recibido', ajusta el stock.
  * Equivale a la lógica compleja de guardarPedido() en PedidosCompra.jsx.
@@ -292,33 +315,25 @@ export async function marcarPedidoPagado(idPedido, fechaPago) {
 }
 
 /**
- * Marca un pedido como recibido y ajusta el stock de todos sus productos.
- * Equivale a la lógica de recibirPedido() en PedidosCompra.jsx.
+ * Marca un pedido como recibido, suma el stock de todos sus productos y
+ * actualiza el precio proveedor — en UNA llamada y UNA transacción
+ * (RPC `recibir_pedido_compra`). Si ya estaba recibido no hace nada.
+ * Antes: 2 lecturas + ~5 consultas por ítem.
  */
 export async function recibirPedido(idPedido, fechaRecepcion) {
-  // 1. Leer estado anterior
-  const pedidoAnterior = await obtenerPedidoPorId(idPedido)
-  if (pedidoAnterior.estadoLogistico === 'recibido') return // ya estaba recibido
+  const { data, error } = await supabase.rpc('recibir_pedido_compra', {
+    p_id_pedido:       idPedido,
+    p_fecha_recepcion: fechaRecepcion ?? null,
+  })
 
-  // 2. Actualizar estado logístico
-  const { error } = await supabase
-    .from('pedido_compra')
-    .update({
-      estado_logistico: 'recibido',
-      fecha_recepcion:  fechaRecepcion,
-    })
-    .eq('id_pedido', idPedido)
-
-  if (error) manejarError('recibirPedido', error)
-
-  // 3. Leer detalles y ajustar stock
-  const detalles = await obtenerDetallesDePedido(idPedido)
-  await _aplicarStockRecepcion(detalles)
+  if (error) manejarErrorRpc('recibirPedido', error)
+  return mapPedido(data)
 }
 
 /**
  * Actualiza estado logístico, pago, método y fechas desde ABMC.
- * Equivale al UPDATE compuesto de ABMC.jsx sobre pedidos.
+ * Ajusta el stock sólo en las transiciones (→recibido suma, recibido→otro
+ * resta), todo en UNA transacción (RPC `actualizar_estados_pedido_compra`).
  */
 export async function actualizarEstadosPedido(idPedido, {
   estadoPago,
@@ -327,54 +342,27 @@ export async function actualizarEstadosPedido(idPedido, {
   fechaRecepcion,
   fechaPago,
 }) {
-  // Leer estado anterior para saber si hay que ajustar stock
-  const anterior = await obtenerPedidoPorId(idPedido)
-  const estabaRecibido = anterior.estadoLogistico === 'recibido'
-  const pasaARecibido  = estadoLogistico === 'recibido'
+  const { data, error } = await supabase.rpc('actualizar_estados_pedido_compra', {
+    p_id_pedido:        idPedido,
+    p_estado_pago:      estadoPago,
+    p_estado_logistico: estadoLogistico,
+    p_metodo_pago:      metodoPago     ?? null,
+    p_fecha_recepcion:  fechaRecepcion ?? null,
+    p_fecha_pago:       fechaPago      ?? null,
+  })
 
-  const { error } = await supabase
-    .from('pedido_compra')
-    .update({
-      estado_pago:      estadoPago,
-      estado_logistico: estadoLogistico,
-      metodo_pago:      metodoPago      ?? null,
-      fecha_recepcion:  fechaRecepcion  ?? null,
-      fecha_pago:       fechaPago       ?? null,
-    })
-    .eq('id_pedido', idPedido)
-
-  if (error) manejarError('actualizarEstadosPedido', error)
-
-  // Ajuste de stock si cambió el estado logístico
-  if (!estabaRecibido && pasaARecibido) {
-    const detalles = await obtenerDetallesDePedido(idPedido)
-    await _aplicarStockRecepcion(detalles)
-  } else if (estabaRecibido && !pasaARecibido) {
-    const detalles = await obtenerDetallesDePedido(idPedido)
-    await _revertirStockRecepcion(detalles)
-  }
+  if (error) manejarErrorRpc('actualizarEstadosPedido', error)
+  return mapPedido(data)
 }
 
 /**
- * Elimina un pedido y sus detalles (CASCADE en BD).
- * Si estaba recibido, descuenta el stock que había sumado.
- * Equivale a: DELETE FROM PedidoCompra WHERE idPedido = ?
+ * Elimina un pedido con sus cuotas y detalles. Si estaba recibido, revierte
+ * el stock que había sumado — todo en UNA transacción (RPC `eliminar_pedido_compra`).
  */
 export async function eliminarPedido(idPedido) {
-  const pedido = await obtenerPedidoPorId(idPedido)
+  const { error } = await supabase.rpc('eliminar_pedido_compra', { p_id_pedido: idPedido })
 
-  // Si estaba recibido, revertir el stock antes de borrar
-  if (pedido.estadoLogistico === 'recibido') {
-    const detalles = await obtenerDetallesDePedido(idPedido)
-    await _revertirStockRecepcion(detalles)
-  }
-
-  const { error } = await supabase
-    .from('pedido_compra')
-    .delete()
-    .eq('id_pedido', idPedido)
-
-  if (error) manejarError('eliminarPedido', error)
+  if (error) manejarErrorRpc('eliminarPedido', error)
 }
 
 // ─── Helpers privados de stock ────────────────────────────────────────────────

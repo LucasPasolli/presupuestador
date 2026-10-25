@@ -105,6 +105,15 @@ const fmt = (n) =>
     ? Number(n).toLocaleString('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 0 })
     : '—'
 
+// Fechas de la BD (AAAA-MM-DD, tipo date) → DD-MM-AAAA para mostrar en pantalla.
+// Se reordena el texto SIN pasar por `new Date()`: evita que la zona horaria
+// corra la fecha un día. Los filtros y comparaciones siguen usando el valor ISO original.
+const formatearFecha = (iso) => {
+  if (!iso) return '—'
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso))
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : String(iso)
+}
+
 const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
 
 // Normaliza texto para búsquedas: minúsculas + sin tildes/diacríticos.
@@ -765,7 +774,7 @@ function Presupuestos() {
             : paged.map(r => (
               <Tr key={r.idPresupuesto}>
                 <Td className="text-surface-500 font-mono text-xs">#{r.idPresupuesto}</Td>
-                <Td className="text-surface-400">{r.fecha}</Td>
+                <Td className="text-surface-400">{formatearFecha(r.fecha)}</Td>
                 <Td>{r.clienteNombre}</Td>
                 <Td className="text-surface-400">{METODO_LABEL[r.metodoPago] ?? r.metodoPago}</Td>
                 <Td>{fmt(r.monto)}</Td>
@@ -825,7 +834,7 @@ function Presupuestos() {
         details={confirmRow ? [
           ['ID', `#${confirmRow.idPresupuesto}`],
           ['Cliente', confirmRow.clienteNombre],
-          ['Fecha', confirmRow.fecha],
+          ['Fecha', formatearFecha(confirmRow.fecha)],
           ['Monto', fmt(confirmRow.monto)],
           ['Estado', confirmRow.estado],
         ] : []}
@@ -850,6 +859,21 @@ function Presupuestos() {
 
 const EPAGO_COLOR = { pendiente: 'yellow', pagado: 'green' }
 const ELOGISTICO_COLOR = { encargado: 'blue', recibido: 'green' }
+
+// Etiquetas de método de pago de PEDIDOS DE COMPRA (columna `metodo_pago`).
+// Cuenta Corriente se distingue según tenga plan de cuotas o sea pago único
+// (mismo criterio que el listado de PedidosCompra.jsx).
+const PEDIDO_METODO_LABEL = {
+  efectivo:      'Efectivo',
+  transferencia: 'Transferencia',
+  echeck:        'E-check',
+}
+const pedidoMetodoLabel = (pedido) => {
+  const m = pedido?.metodoPago
+  if (!m) return '—'
+  if (m === 'cuenta_corriente') return pedido.tieneCuotas ? 'CC Cuotas' : 'CC'
+  return PEDIDO_METODO_LABEL[m] ?? m
+}
 
 function Pedidos() {
   const [allRows, setAllRows] = useState([])
@@ -947,10 +971,10 @@ function Pedidos() {
           {paged.map(r => (
             <Tr key={r.idPedido}>
               <Td className="text-surface-500 font-mono text-xs">#{r.idPedido}</Td>
-              <Td className="text-surface-400">{r.fecha}</Td>
+              <Td className="text-surface-400">{formatearFecha(r.fecha)}</Td>
               <Td>{r.provNombre || '—'}</Td>
               <Td>{fmt(r.monto)}</Td>
-              <Td className="text-surface-400">{r.metodoPago ? r.metodoPago.charAt(0).toUpperCase() + r.metodoPago.slice(1) : '—'}</Td>
+              <Td className="text-surface-400">{pedidoMetodoLabel(r)}</Td>
               <Td><Badge color={EPAGO_COLOR[r.estadoPago] ?? 'gray'}>{r.estadoPago.charAt(0).toUpperCase() + r.estadoPago.slice(1)}</Badge></Td>
               <Td><Badge color={ELOGISTICO_COLOR[r.estadoLogistico] ?? 'gray'}>{r.estadoLogistico.charAt(0).toUpperCase() + r.estadoLogistico.slice(1)}</Badge></Td>
               <Td>
@@ -979,11 +1003,19 @@ function Pedidos() {
                 <option value="encargado">Encargado</option>
                 <option value="recibido">Recibido</option>
               </Select>
-              <Select label="Método de pago" value={editRow.metodoPago || 'efectivo'} onChange={fe('metodoPago')}>
-                <option value="efectivo">Efectivo</option>
-                <option value="transferencia">Transferencia</option>
-                <option value="echeck">E-check</option>
-              </Select>
+              {editRow.metodoPago === 'cuenta_corriente' ? (
+                // El método de un pedido en Cuenta Corriente no se cambia desde acá
+                // (su plan y vencimientos se gestionan en Pedidos de Compra).
+                <Select label="Método de pago" value="cuenta_corriente" onChange={fe('metodoPago')} disabled>
+                  <option value="cuenta_corriente">{pedidoMetodoLabel(editRow)}</option>
+                </Select>
+              ) : (
+                <Select label="Método de pago" value={editRow.metodoPago || 'efectivo'} onChange={fe('metodoPago')}>
+                  <option value="efectivo">Efectivo</option>
+                  <option value="transferencia">Transferencia</option>
+                  <option value="echeck">E-check</option>
+                </Select>
+              )}
               <Input label="Fecha recepción" type="date" value={editRow.fechaRecepcion || ''} onChange={fe('fechaRecepcion')} />
               <Input label="Fecha pago" type="date" value={editRow.fechaPago || ''} onChange={fe('fechaPago')} />
             </div>
@@ -998,7 +1030,7 @@ function Pedidos() {
       <ConfirmModal open={!!confirm} onClose={() => setConfirm(null)} onConfirm={() => del(confirm)}
         details={confirmRow ? [
           ['ID', `#${confirmRow.idPedido}`],
-          ['Fecha', confirmRow.fecha],
+          ['Fecha', formatearFecha(confirmRow.fecha)],
           ['Proveedor', confirmRow.provNombre || '—'],
           ['Monto', fmt(confirmRow.monto)],
         ] : []}
@@ -1230,7 +1262,7 @@ function Saldos() {
               <Td>{r.clienteNombre}</Td>
               <Td className="text-surface-400 font-mono text-xs">#{r.idPresupuesto}</Td>
               <Td>{fmt(r.monto)}</Td>
-              <Td className="text-surface-400">{r.fechaFin}</Td>
+              <Td className="text-surface-400">{formatearFecha(r.fechaFin)}</Td>
               <Td><Badge color={r.estado === 'pagado' ? 'green' : 'yellow'}>{r.estado.charAt(0).toUpperCase() + r.estado.slice(1)}</Badge></Td>
               <Td>
                 <div className="flex gap-2 justify-end">
@@ -1424,7 +1456,7 @@ function Egresos() {
           empty={paged.length === 0 ? 'Sin egresos' : null}>
           {paged.map(r => (
             <Tr key={r.idEgreso}>
-              <Td className="text-surface-400">{r.fecha}</Td>
+              <Td className="text-surface-400">{formatearFecha(r.fecha)}</Td>
               <Td><Badge color="red">{r.categoria}</Badge></Td>
               <Td>{r.descripcion}</Td>
               <Td className="text-surface-400">{r.metodoPago.charAt(0).toUpperCase() + r.metodoPago.slice(1)}</Td>
@@ -1473,7 +1505,7 @@ function Egresos() {
       <ConfirmModal open={!!confirm} onClose={() => setConfirm(null)} onConfirm={() => del(confirm)}
         details={confirmRow ? [
           ['ID', `#${confirmRow.idEgreso}`],
-          ['Fecha', confirmRow.fecha],
+          ['Fecha', formatearFecha(confirmRow.fecha)],
           ['Categoría', confirmRow.categoria],
           ['Descripción', confirmRow.descripcion],
           ['Monto', fmt(confirmRow.monto)],
@@ -1597,7 +1629,7 @@ function Ingresos() {
           {paged.map(r => (
             <Tr key={r.idIngreso}>
               <Td className="text-surface-500 font-mono text-xs">#{r.idIngreso}</Td>
-              <Td className="text-surface-400">{r.fecha}</Td>
+              <Td className="text-surface-400">{formatearFecha(r.fecha)}</Td>
               <Td><Badge color="blue">{r.categoria ?? 'Otro'}</Badge></Td>
               <Td>{r.descripcion}</Td>
               <Td className="text-green-300 font-semibold">{fmt(r.monto)}</Td>
@@ -1638,7 +1670,7 @@ function Ingresos() {
       <ConfirmModal open={!!confirm} onClose={() => setConfirm(null)} onConfirm={() => del(confirm)}
         details={confirmRow ? [
           ['ID', `#${confirmRow.idIngreso}`],
-          ['Fecha', confirmRow.fecha],
+          ['Fecha', formatearFecha(confirmRow.fecha)],
           ['Categoría', confirmRow.categoria ?? '—'],
           ['Descripción', confirmRow.descripcion],
           ['Monto', fmt(confirmRow.monto)],
@@ -1859,7 +1891,7 @@ function Inversiones() {
           {paged.map(r => (
             <Tr key={r.idInversion}>
               <Td className="text-surface-500 font-mono text-xs">#{r.idInversion}</Td>
-              <Td className="text-surface-400">{r.fecha}</Td>
+              <Td className="text-surface-400">{formatearFecha(r.fecha)}</Td>
               <Td><Badge color="violet">{r.categoria}</Badge></Td>
               <Td>{r.descripcion}</Td>
               <Td><Badge color={r.estado === 'invertido' ? 'green' : 'red'}>{r.estado.charAt(0).toUpperCase() + r.estado.slice(1)}</Badge></Td>
@@ -1988,7 +2020,7 @@ function Inversiones() {
       <ConfirmModal open={!!confirm} onClose={() => setConfirm(null)} onConfirm={() => del(confirm)}
         details={confirmRow ? [
           ['ID', `#${confirmRow.idInversion}`],
-          ['Fecha', confirmRow.fecha],
+          ['Fecha', formatearFecha(confirmRow.fecha)],
           ['Categoría', confirmRow.categoria],
           ['Descripción', confirmRow.descripcion],
           ['Monto', fmt(confirmRow.monto)],
@@ -2154,7 +2186,7 @@ const fmtMonto = (n) =>
 // Formato de cliente: NOMBRE APELLIDO (sin coma).
 const nombreCompleto = (c) => (c ? [c.nombre, c.apellido].filter(Boolean).join(' ') : '')
 
-// Mismo formato que el resto del ABMC (r.fecha): AAAA-MM-DD. created_at es timestamptz (UTC),
+// Mismo formato que el resto del ABMC (formatearFecha): DD-MM-AAAA. created_at es timestamptz (UTC),
 // así que se toma el día en la zona horaria local para no correr la fecha de noche.
 const fmtFecha = (iso) => {
   if (!iso) return '—'
@@ -2162,7 +2194,7 @@ const fmtFecha = (iso) => {
   if (Number.isNaN(d.getTime())) return '—'
   const mm = String(d.getMonth() + 1).padStart(2, '0')
   const dd = String(d.getDate()).padStart(2, '0')
-  return `${d.getFullYear()}-${mm}-${dd}`
+  return `${dd}-${mm}-${d.getFullYear()}`
 }
 
 function SuccessBanner({ message, onClose }) {

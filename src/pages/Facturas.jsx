@@ -1,6 +1,7 @@
 // src/pages/Facturas.jsx
 import { useState, useEffect, useCallback } from 'react'
 import { obtenerFacturasConDetalles } from '../services/presupuestosService'
+import { ajustarDetallesAlMonto } from '../lib/calculoPresupuesto'
 import { Card, PageHeader, Button, Badge } from '../components/ui'
 import { FileText, Download, Eye, Calendar, AlertCircle } from 'lucide-react'
 
@@ -62,23 +63,24 @@ function agruparPresupuestos(presupuestos, metodos) {
       continue
     }
 
-    // Agrupar detalles por producto (sumar cantidad y subtotal)
+    // [FIX Ajuste vs Promo] El ajuste por método de pago/excepción se reparte SOLO entre los
+    // detalles sin promoción; los que tienen promoción conservan su subtotal. La suma de los
+    // subtotales ajustados es exactamente `p.monto`.
+    const detallesAjustados = ajustarDetallesAlMonto(p.detalles ?? [], p.monto)
+
+    // Agrupar detalles por producto (sumar cantidad y subtotal ya ajustado)
     const agrupados = {}
-    for (const d of p.detalles ?? []) {
+    for (const d of detallesAjustados) {
       const pid = d.idProducto
       if (!agrupados[pid]) {
         agrupados[pid] = { ...d, cantidad: 0, subtotal: 0 }
       }
       agrupados[pid].cantidad += d.cantidad
-      agrupados[pid].subtotal += d.subtotal
+      agrupados[pid].subtotal += d.subtotalAjustado
     }
 
-    // Detectar factor de ajuste aplicado al presupuesto (ej: redondeo, excepción)
-    const subtotalBase = Object.values(agrupados).reduce((acc, d) => acc + d.subtotal, 0)
-    const factorAjuste = subtotalBase > 0 ? p.monto / subtotalBase : 1
-
     const items = Object.values(agrupados).map(d => {
-      const subtotalAjustado        = d.subtotal * factorAjuste
+      const subtotalAjustado        = d.subtotal
       const precioUnitarioAjustado  = d.cantidad > 0 ? subtotalAjustado / d.cantidad : 0
 
       return {

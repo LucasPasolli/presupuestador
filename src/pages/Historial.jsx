@@ -12,19 +12,21 @@ import {
   obtenerPresupuestos,
   obtenerPresupuestoPorId,
   obtenerDetallesDePresupuesto,
-  actualizarEstadoPresupuesto,
   eliminarPresupuesto,
 } from '../services/presupuestosService'
+import { cambiarEstadoPresupuestoIdempotente } from '../services/presupuestosIdempotente'
+import { ErrorOperacion, CODIGOS } from '../services/idempotencia'
 import { obtenerClientePorId } from '../services/clientesService'
 import {
   obtenerSaldoPorPresupuesto,
-  eliminarSaldoPorPresupuesto,
   regenerarSaldoDePresupuesto,
   calcularVencimientoCC,
 } from '../services/saldosService'
-import { descontarStock } from '../services/productosService'
+import { useAsyncAction } from '../hooks/useAsyncAction'
+import { useClaveIdempotencia } from '../lib/idempotency'
 import { useDebounce } from '../hooks/useDebounce'
 import { useScrollAnchor } from '../hooks/useScrollToTopOnChange'
+import { derivarFactorAjustable, tienePromocion } from '../lib/calculoPresupuesto'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -155,21 +157,17 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
   const reload = useCallback(async () => {
     setLoading(true)
     try {
-      const [p, rows, sal] = await Promise.all([
+      const [p, rows, sal, cl] = await Promise.all([
         obtenerPresupuestoPorId(pres.idPresupuesto),
         obtenerDetallesDePresupuesto(pres.idPresupuesto),
         obtenerSaldoPorPresupuesto(pres.idPresupuesto),
+        // cliente eliminado → null (no debe tumbar el resto de la carga)
+        obtenerClientePorId(pres.idCliente).catch(() => null),
       ])
       if (p) setPres(p)
       setDetalles(rows)
       setSaldo(sal)
-
-      try {
-        const cl = await obtenerClientePorId(pres.idCliente)
-        setCliente(cl)
-      } catch {
-        setCliente(null) // cliente eliminado
-      }
+      setCliente(cl)
     } catch (err) {
       console.error('[PresupuestoDetalle] Error recargando:', err)
     } finally {
@@ -190,22 +188,37 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
   // saldo allí: un callejón sin salida.
   const sinSaldoCC  = esCC && pres.estado === 'aprobado' && !loading && !saldo
 
-  const _subtotalConPromo = detalles.reduce((acc, d) => acc + (parseFloat(d.subtotal) || 0), 0)
+  // [FIX Ajuste vs Promo] El factor se aplica solo a los ítems sin promoción: para
+  // excepciones se infiere de lo persistido; para métodos base, es el del método.
+  const hayPromos = detalles.some(tienePromocion)
   let factorReal
   if (esExcepcion) {
-    factorReal = _subtotalConPromo > 0 ? (parseFloat(pres.monto) || 0) / _subtotalConPromo : 1
+    factorReal = derivarFactorAjustable({ monto: pres.monto, detalles })
   } else {
     factorReal = METODOS_FACTOR[pres.metodoPago] ?? 1
   }
-  const ajusteLabel = pctLabel(factorReal)
+  const ajusteLabel = pctLabel(factorReal) + (hayPromos && factorReal !== 1 ? ' · solo ítems sin promoción' : '')
 
-  async function cambiarEstado(nuevoEstado) {
+  // Una clave de idempotencia por intento de confirmación: se rota al abrir
+  // cualquier modal (nueva intención) y tras un éxito. Entre reintentos del
+  // MISMO modal se conserva → si la respuesta se perdió, el servidor devuelve
+  // lo ya aplicado en vez de volver a descontar stock.
+  const { leer: leerClave, rotar: rotarClave } = useClaveIdempotencia()
+  useEffect(() => { if (modal) rotarClave() }, [modal, rotarClave])
+
+  /**
+   * Aprobar / pagar / rechazar: UNA llamada a `cambiar_estado_presupuesto`.
+   * Estado, fecha de pago, stock y saldo se aplican en la misma transacción
+   * (rollback total ante cualquier error) y el costo NO depende de la cantidad
+   * de ítems. Los errores se lanzan: los captura `useAsyncAction` → `onError`.
+   */
+  async function aplicarCambioEstado(nuevoEstado) {
     setErrorModal('')
 
     // CORRECCIÓN (desacople Día X / Día Y): para Efectivo/Transferencia el
     // cobro se registra con la fecha real que cargó el usuario, no con la
-    // fecha de aceptación del presupuesto. Validamos acá (además de required
-    // en el input) para no depender solo de la validación del navegador.
+    // fecha de aceptación del presupuesto. Se valida acá (además de `required`
+    // en el input) para dar feedback inmediato; el servidor la vuelve a validar.
     const requiereFechaPago = nuevoEstado === 'pagado' && !esCC
     if (requiereFechaPago) {
       if (!fechaPagoInput) {
@@ -222,43 +235,39 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
       }
     }
 
-    try {
-      const estadoAnterior = pres.estado
+    const res = await cambiarEstadoPresupuestoIdempotente({
+      clave:         leerClave(),
+      idPresupuesto: pres.idPresupuesto,
+      nuevoEstado,
+      fechaPago:     requiereFechaPago ? fechaPagoInput : null,
+    })
+    rotarClave() // la próxima acción es otra intención
 
-      await actualizarEstadoPresupuesto(
-        pres.idPresupuesto,
-        nuevoEstado,
-        requiereFechaPago ? { fechaPago: fechaPagoInput } : {}
-      )
+    // Feedback inmediato: el estado nuevo ya es un hecho confirmado por la BD.
+    setPres(prev => ({ ...prev, estado: res.estadoNuevo, fechaPago: res.fechaPago ?? prev.fechaPago }))
+    setModal(null)
 
-      const debeDescontar = (nuevoEstado === 'aprobado' || nuevoEstado === 'pagado') &&
-                            estadoAnterior !== 'aprobado' && estadoAnterior !== 'pagado'
-      if (debeDescontar) {
-        for (const d of detalles) {
-          try {
-            await descontarStock(d.idProducto, d.cantidad, d.medida ?? null)
-          } catch {
-            // producto eliminado → ignorar
-          }
-        }
-      }
-
-      if (nuevoEstado === 'aprobado' && esCC) {
-        // Idempotente: si el saldo ya existe no lo duplica.
-        await regenerarSaldoDePresupuesto(pres)
-      }
-
-      if (nuevoEstado === 'rechazado') {
-        await eliminarSaldoPorPresupuesto(pres.idPresupuesto)
-      }
-
-      setModal(null)
-      await reload()
-      onUpdated()
-    } catch (err) {
-      setErrorModal(err.message)
-    }
+    // Refresco de saldo/detalle en 1 ronda paralela. El latch se mantiene hasta
+    // acá para que no se pueda disparar otra acción sobre datos viejos.
+    await reload()
+    onUpdated()
   }
+
+  const { run: cambiarEstado, pending: cambiandoEstado } = useAsyncAction(aplicarCambioEstado, {
+    nombre: 'cambiar_estado_presupuesto',
+    onError: (err) => {
+      // La clave quedó atada a otro contenido (p. ej. se cambió la fecha tras
+      // un intento fallido): se rota para que el próximo clic sea una intención nueva.
+      if (err?.codigo === CODIGOS.CLAVE_REUTILIZADA) rotarClave()
+      setErrorModal(
+        err instanceof ErrorOperacion
+          ? err.message
+          : err?.codigo === 'TIMEOUT'
+            ? 'La operación está tardando más de lo normal. Actualizá la pantalla para verificar si se aplicó antes de reintentar.'
+            : 'No se pudo completar la operación. Intentá nuevamente.',
+      )
+    },
+  })
 
   // Abre el modal con el vencimiento por defecto (emisión + plazo), editable.
   function abrirReactivar() {
@@ -387,22 +396,22 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
             <div className="flex flex-col sm:flex-row flex-wrap gap-2">
               {pres.estado === 'borrador' && esCC && (
                 <>
-                  <Button size="sm" icon={ThumbsUp} className="w-full sm:w-auto justify-center min-h-[44px] sm:min-h-0" onClick={() => setModal('aprobar')}>Marcar como Aprobado</Button>
+                  <Button size="sm" icon={ThumbsUp} className="w-full sm:w-auto justify-center min-h-[44px] sm:min-h-0" disabled={cambiandoEstado} onClick={() => setModal('aprobar')}>Marcar como Aprobado</Button>
                   <Button size="sm" variant="secondary" icon={XCircle}
                     className="w-full sm:w-auto justify-center min-h-[44px] sm:min-h-0 hover:bg-red-500/15 hover:border-red-500/40 hover:text-red-400"
-                    onClick={() => setModal('rechazar')}>Rechazar</Button>
+                    disabled={cambiandoEstado} onClick={() => setModal('rechazar')}>Rechazar</Button>
                 </>
               )}
               {pres.estado === 'borrador' && !esCC && (
                 <>
-                  <Button size="sm" icon={CheckCircle2} className="w-full sm:w-auto justify-center min-h-[44px] sm:min-h-0" onClick={() => { setFechaPagoInput(today()); setModal('pagar') }}>Marcar como Pagado</Button>
+                  <Button size="sm" icon={CheckCircle2} className="w-full sm:w-auto justify-center min-h-[44px] sm:min-h-0" disabled={cambiandoEstado} onClick={() => { setFechaPagoInput(today()); setModal('pagar') }}>Marcar como Pagado</Button>
                   <Button size="sm" variant="secondary" icon={XCircle}
                     className="w-full sm:w-auto justify-center min-h-[44px] sm:min-h-0 hover:bg-red-500/15 hover:border-red-500/40 hover:text-red-400"
-                    onClick={() => setModal('rechazar')}>Rechazar</Button>
+                    disabled={cambiandoEstado} onClick={() => setModal('rechazar')}>Rechazar</Button>
                 </>
               )}
               {pres.estado === 'aprobado' && !esCC && (
-                <Button size="sm" icon={CheckCircle2} className="w-full sm:w-auto justify-center min-h-[44px] sm:min-h-0" onClick={() => { setFechaPagoInput(today()); setModal('pagar') }}>Marcar como Pagado</Button>
+                <Button size="sm" icon={CheckCircle2} className="w-full sm:w-auto justify-center min-h-[44px] sm:min-h-0" disabled={cambiandoEstado} onClick={() => { setFechaPagoInput(today()); setModal('pagar') }}>Marcar como Pagado</Button>
               )}
               {pres.estado === 'aprobado' && esCC && !sinSaldoCC && (
                 <div className="flex items-center gap-2 text-surface-400 text-xs font-body bg-surface-700 rounded-xl px-4 py-2.5">
@@ -650,9 +659,12 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
       {[
         { key:'aprobar',  title:'Aprobar presupuesto',  body:`Presupuesto #${pres.idPresupuesto} → Aprobado. Se descuenta stock y se genera saldo pendiente de cobro.`, action:()=>cambiarEstado('aprobado'),   label:'Aprobar',        icon:ThumbsUp },
         { key:'pagar',    title:'Registrar pago',        body:`Presupuesto #${pres.idPresupuesto} → Pagado. El ingreso de ${fmt(pres.monto)} se reflejará en estadísticas y el stock será modificado.`, action:()=>cambiarEstado('pagado'),     label:'Confirmar pago', icon:CheckCircle2 },
-        { key:'rechazar', title:'Rechazar presupuesto',  body:`Presupuesto #${pres.idPresupuesto} → Rechazado. No afecta stock.`, action:()=>cambiarEstado('rechazado'), label:'Rechazar',       icon:XCircle, danger:true },
+        { key:'rechazar', title:'Rechazar presupuesto',  body:pres.estado === 'aprobado'
+          ? `Presupuesto #${pres.idPresupuesto} → Rechazado. Se reintegra al stock lo descontado al aprobar${esCC ? ' y se elimina el saldo pendiente' : ''}.`
+          : `Presupuesto #${pres.idPresupuesto} → Rechazado. No afecta stock.`, action:()=>cambiarEstado('rechazado'), label:'Rechazar',       icon:XCircle, danger:true },
       ].map(m => (
-        <Modal key={m.key} open={modal===m.key} onClose={()=>{setModal(null);setErrorModal('')}} title={m.title} width="max-w-sm">
+        <Modal key={m.key} open={modal===m.key} busy={cambiandoEstado}
+          onClose={()=>{ if (cambiandoEstado) return; setModal(null); setErrorModal('') }} title={m.title} width="max-w-sm">
           <p className="text-surface-300 text-sm font-body mb-4">{m.body}</p>
 
           {/* CORRECCIÓN (desacople Día X / Día Y): captura explícita de la
@@ -672,6 +684,7 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
                 value={fechaPagoInput}
                 max={today()}
                 min={pres.fecha}
+                disabled={cambiandoEstado}
                 onChange={e => setFechaPagoInput(e.target.value)}
                 className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2.5
                            text-white text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500"
@@ -683,13 +696,17 @@ function PresupuestoDetalle({ presupuesto: presInit, onBack, onUpdated, onEditar
           )}
 
           {errorModal && (
-            <div className="flex items-center gap-2 text-red-400 text-xs bg-red-500/10 border border-red-500/30 rounded-xl px-3 py-2 mb-4">
-              <AlertCircle size={13}/>{errorModal}
+            <div role="alert" className="flex items-center gap-2 text-red-400 text-xs bg-red-500/10 border border-red-500/30 rounded-xl px-3 py-2 mb-4">
+              <AlertCircle size={13} aria-hidden="true"/>{errorModal}
             </div>
           )}
           <div className="flex gap-2">
-            <Button variant="secondary" className="flex-1" onClick={()=>{setModal(null);setErrorModal('')}}>Cancelar</Button>
-            <Button variant={m.danger?'danger':'primary'} className="flex-1" icon={m.icon} onClick={m.action}>{m.label}</Button>
+            <Button variant="secondary" className="flex-1" disabled={cambiandoEstado}
+              onClick={()=>{setModal(null);setErrorModal('')}}>Cancelar</Button>
+            <Button variant={m.danger?'danger':'primary'} className="flex-1" icon={m.icon} onClick={m.action}
+              disabled={cambiandoEstado} loading={cambiandoEstado} loadingText="Aplicando el cambio, aguardá un momento">
+              {m.label}
+            </Button>
           </div>
         </Modal>
       ))}

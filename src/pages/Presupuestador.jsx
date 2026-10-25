@@ -5,19 +5,25 @@ import { useNavigate } from 'react-router-dom'
 
 // ─── Services ────────────────────────────────────────────────────────────────
 import { crearCliente, buscarClientes, obtenerClientePorId } from '../services/clientesService'
-import { actualizarPresupuesto, obtenerPresupuestoPorId, obtenerDetallesDePresupuesto } from '../services/presupuestosService'
-// [ANTI-DUPLICACIÓN] El alta ahora pasa por el RPC idempotente (escenario 3
-// de la historia de usuario). `actualizarPresupuesto` sigue igual: la edición
-// de un presupuesto ya existente no puede "duplicarse" de la misma manera
-// que un alta, así que no requiere este cableado.
-import { crearPresupuestoIdempotente } from '../services/presupuestosIdempotente'
+import { obtenerPresupuestoPorId, obtenerDetallesDePresupuesto } from '../services/presupuestosService'
+// [ANTI-DUPLICACIÓN] El alta pasa por el RPC idempotente (escenario 3 de la
+// historia de usuario). [EDICIÓN VÍA RPC] La edición también: aunque no pueda
+// "duplicarse" como un alta, antes escribía directo a las tablas (sin transacción
+// y sin validar el total en el servidor). Ahora es atómica y usa la misma validación.
+import { crearPresupuestoIdempotente, actualizarPresupuestoIdempotente } from '../services/presupuestosIdempotente'
 import { useClaveIdempotencia } from '../lib/idempotency'
 import { buscarProductos, obtenerProductoPorId, obtenerMedidasDeProducto } from '../services/productosService'
 import { calcularPromocionParaItem, obtenerPromocionesVigentes } from '../services/promocionesService'
+// [FIX Ajuste vs Promo] Regla única: el ajuste por método de pago NO se aplica a ítems con promoción.
+import { calcularTotales, derivarFactorAjustable, factorCompatibleRpc } from '../lib/calculoPresupuesto'
 import { obtenerSaldosPendientesDeCliente } from '../services/saldosService'
 
 // ─── Hooks ───────────────────────────────────────────────────────────────────
 import { useDebounce } from '../hooks/useDebounce'
+// [BORRADOR] Persistencia local del formulario (ver lib/borradorPresupuesto.js).
+import { useBorradorAutoguardado } from '../hooks/useBorradorAutoguardado'
+import { leerBorrador, reconciliarConCatalogo } from '../lib/borradorPresupuesto'
+import BorradorBanner from '../components/presupuestos/BorradorBanner'
 
 import { generarPDFPresupuesto } from '../lib/pdfPresupuesto'
 import { Button, Card, PageHeader, Modal, Input } from '../components/ui'
@@ -47,28 +53,9 @@ function norm(s) {
 const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
 
 // ─── Helpers de totales ────────────────────────────────────────────────────
-
-/**
- * Calcula los totales del carrito a partir de ítems ya enriquecidos con promos.
- * Reemplaza calcularTotales() de lib/promociones.js.
- */
-function calcularTotales(itemsConPromo, factor) {
-  let subtotalSinPromo = 0
-  let subtotalConPromo = 0
-
-  for (const it of itemsConPromo) {
-    const cant     = parseInt(it.cantidad) || 0
-    const precio   = parseFloat(it.precioUnitario) || 0
-    const efectivo = it.precioConPromo != null ? it.precioConPromo : precio
-    subtotalSinPromo += cant * precio
-    subtotalConPromo += cant * efectivo
-  }
-
-  const ahorro     = subtotalSinPromo - subtotalConPromo
-  const totalFinal = Math.round(subtotalConPromo * factor * 100) / 100
-
-  return { subtotalSinPromo, subtotalConPromo, ahorro, totalFinal }
-}
+// [FIX Ajuste vs Promo] `calcularTotales` vive en lib/calculoPresupuesto.js (módulo puro y
+// testeado). Antes el factor del método de pago multiplicaba TODO el subtotal, acumulando
+// el ajuste sobre ítems que ya tenían precio promocional.
 
 // ─── Toast ─────────────────────────────────────────────────────────────────
 
@@ -609,7 +596,7 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
                 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none`
 
   return (
-    <tr className="border-b border-surface-700/50">
+    <tr className={`border-b border-surface-700/50 ${item.noDisponible ? 'bg-red-500/5' : ''}`}>
       {/* # */}
       <td className="py-2 px-3 text-surface-500 text-sm font-mono w-8 select-none">{index + 1}</td>
 
@@ -662,6 +649,12 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
             </div>
           )}
         </div>
+        {/* [BORRADOR] Escenario 7: producto dado de baja mientras el borrador estaba guardado */}
+        {item.noDisponible && (
+          <p className="text-red-400 text-[10px] font-body mt-1 leading-tight">
+            No disponible — quitá este ítem para poder guardar.
+          </p>
+        )}
         {showDrop && createPortal(
           <div
             data-producto-drop
@@ -753,6 +746,10 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
                   {itemConPromo.promoAplicada?.nombre ?? ''}
                 </span>
               </div>
+              {/* [FIX Ajuste vs Promo] Aviso al usuario: este ítem queda fuera del ajuste por método de pago */}
+              <div className="text-surface-500 text-[10px] font-body leading-tight">
+                Sin ajuste por método de pago
+              </div>
             </>
           ) : (
             <div
@@ -776,6 +773,12 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
             </div>
           )}
         </div>
+        {/* [BORRADOR] Escenario 7: el precio vigente difiere del que tenía el borrador */}
+        {item.precioAnterior != null && !item.noDisponible && (
+          <p className="text-yellow-400 text-[10px] font-body mt-0.5 leading-tight">
+            Precio actualizado (antes {fmt(item.precioAnterior)})
+          </p>
+        )}
         {priceWarning && showPriceTooltip && createPortal(
           <div style={{ position: 'absolute', top: priceTooltipPos.top, left: priceTooltipPos.left, zIndex: 9999, pointerEvents: 'none' }}
                className="bg-yellow-900/95 border border-yellow-500/60 text-yellow-200 text-[11px] font-body
@@ -789,7 +792,7 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
       {/* Subtotal — usa precio efectivo */}
       <td className="py-2 px-3 text-right w-36">
         <span className={`text-sm font-mono ${tienePromo ? 'text-emerald-300' : 'text-surface-200'}`}>
-          {fmt((parseInt(item.cantidad) || 0) * precioEfectivo)}
+          {item.noDisponible ? '—' : fmt((parseInt(item.cantidad) || 0) * precioEfectivo)}
         </span>
       </td>
 
@@ -805,8 +808,7 @@ function ItemRow({ uid, item, itemConPromo, index, onUpdate, onRemove, onClearEr
 
 // ─── Selector método de pago ────────────────────────────────────────────────
 
-function MetodoPagoSelector({ metodoPago, onMetodoPago, excepcionFactor, onExcepcionFactor, excepcionSubMetodo, onExcepcionSubMetodo, initialPct }) {
-  const [pct, setPct] = useState(initialPct ?? '')
+function MetodoPagoSelector({ metodoPago, onMetodoPago, excepcionFactor, onExcepcionFactor, excepcionSubMetodo, onExcepcionSubMetodo, pct, onPct }) {
   const esExcepcion = metodoPago === 'excepcion'
 
   useEffect(() => {
@@ -854,7 +856,7 @@ function MetodoPagoSelector({ metodoPago, onMetodoPago, excepcionFactor, onExcep
             <div>
               <label className="block text-surface-400 text-xs font-body mb-1">% Descuento (+) / Recargo (−)</label>
               <input type="text" inputMode="decimal" value={pct}
-                onChange={e => { const v = e.target.value.replace(',', '.'); if (/^-?\d*\.?\d*$/.test(v)) setPct(v) }}
+                onChange={e => { const v = e.target.value.replace(',', '.'); if (/^-?\d*\.?\d*$/.test(v)) onPct(v) }}
                 placeholder="Ej: 10 → 10% desc."
                 className="w-full bg-surface-800 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
                            font-mono focus:outline-none focus:border-brand-500 transition-all
@@ -863,7 +865,7 @@ function MetodoPagoSelector({ metodoPago, onMetodoPago, excepcionFactor, onExcep
           </div>
           {pct !== '' && (
             <p className="text-brand-400 text-xs font-mono">
-              Factor: {(1 - (parseFloat(pct)||0)/100).toFixed(4)} · el precio final será {((1-(parseFloat(pct)||0)/100)*100).toFixed(2)}% del original
+              Factor: {(1 - (parseFloat(pct)||0)/100).toFixed(4)} · el precio final será {((1-(parseFloat(pct)||0)/100)*100).toFixed(2)}% del original (solo ítems sin promoción)
             </p>
           )}
         </div>
@@ -875,20 +877,39 @@ function MetodoPagoSelector({ metodoPago, onMetodoPago, excepcionFactor, onExcep
 
 const ITEM_EMPTY = () => ({ _uid: Math.random().toString(36).slice(2), idProducto: '', nombreProducto: '', cantidad: 1, precioUnitario: 0, idCategoria: null, medida: null })
 
-export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVerHistorial }) {
+export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVerHistorial, usuarioId }) {
   const navigate = useNavigate()
   const modoEdicion = !!presupuestoEditar
+
+  // [BORRADOR] Lectura SINCRÓNICA y única al montar: el formulario nace ya
+  // restaurado (sin parpadeo de formulario vacío). Solo en alta; la edición de
+  // un presupuesto existente no usa borrador. `usuarioId` aísla el borrador por
+  // usuario en equipos compartidos.
+  const scopeBorrador = usuarioId ? String(usuarioId) : 'local'
+  const borradorInicialRef = useRef(undefined)
+  if (borradorInicialRef.current === undefined) {
+    borradorInicialRef.current = modoEdicion ? null : leerBorrador(scopeBorrador)
+  }
+  const borradorInicial = borradorInicialRef.current
 
   // ── Estado de inicialización (async) ──
   const [initDone,  setInitDone]  = useState(!modoEdicion)
   const [initError, setInitError] = useState('')
 
-  const [cliente,            setCliente]            = useState(null)
-  const [metodoPago,         setMetodoPago]          = useState('efectivo')
-  const [excepcionFactor,    setExcepcionFactor]     = useState(1)
-  const [excepcionSubMetodo, setExcepcionSubMetodo]  = useState('efectivo')
-  const [items,              setItems]               = useState([ITEM_EMPTY()])
-  const [pctInit,            setPctInit]             = useState('')
+  const [cliente,            setCliente]            = useState(borradorInicial?.cliente ?? null)
+  const [metodoPago,         setMetodoPago]          = useState(borradorInicial?.metodoPago ?? 'efectivo')
+  const [excepcionFactor,    setExcepcionFactor]     = useState(() => {
+    const p = parseFloat(borradorInicial?.pct)
+    return borradorInicial?.metodoPago === 'excepcion' && Number.isFinite(p) ? 1 - p / 100 : 1
+  })
+  const [excepcionSubMetodo, setExcepcionSubMetodo]  = useState(borradorInicial?.excepcionSubMetodo ?? 'efectivo')
+  const [items,              setItems]               = useState(() =>
+    borradorInicial?.items.length
+      ? borradorInicial.items.map(it => ({ ...ITEM_EMPTY(), ...it })) // _uid nuevo por fila
+      : [ITEM_EMPTY()]
+  )
+  // % de excepción tal como lo tipeó el usuario (antes vivía dentro de MetodoPagoSelector).
+  const [pct,                setPct]                 = useState(borradorInicial?.pct ?? '')
   const [guardado,           setGuardado]            = useState(null)
   const [error,              setError]               = useState('')
   const [toast,              setToast]               = useState('')
@@ -904,8 +925,14 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
 
   // ── Promociones vigentes — se cargan una sola vez ──
   const [promoVigentes, setPromoVigentes] = useState([])
+  // [BORRADOR] Hace falta saber cuándo terminó la carga (incluso si falló): los
+  // totales solo son comparables/persistibles con las promociones ya aplicadas.
+  const [promosCargadas, setPromosCargadas] = useState(false)
   useEffect(() => {
-    obtenerPromocionesVigentes().then(setPromoVigentes).catch(() => {})
+    obtenerPromocionesVigentes()
+      .then(setPromoVigentes)
+      .catch(() => {})
+      .finally(() => setPromosCargadas(true))
   }, [])
 
   // ── [OPTIMIZACIÓN 2] Caché de productos compartido entre todas las ItemRow ──
@@ -957,41 +984,13 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
 
         const esExcepcionDB = pres.esExcepcion === 1
 
-        // [FIX Margen Excepción + Promoción] BUG ORIGINAL:
-        // `montoOriginal` es el subtotal a PRECIO DE LISTA (sin promo, sin
-        // excepción — ver `cabecera.montoOriginal = subtotalSinPromo` en
-        // guardar()). `monto` es el total final CON promo Y CON excepción
-        // ya aplicadas. Calcular factorDB = monto / montoOriginal mezclaba
-        // en un único número el descuento de la promoción del producto Y
-        // el margen de la excepción. Al reabrir el presupuesto para editar,
-        // ese factor "contaminado" con la promo se guardaba como si fuera
-        // el margen puro de la excepción (pctDB) y quedaba en el input
-        // editable. Efecto en cada escenario:
-        //   · Guardar sin tocar nada → la promo se re-aplicaba sobre un
-        //     total que YA la incluía (doble descuento/recargo).
-        //   · Sacar el producto en promo → el "residuo" de la promo se
-        //     quedaba pegado al margen de excepción.
-        //   · Agregar un producto en promo nuevo → no se combinaba con el
-        //     margen de excepción vigente, se pisaban entre sí.
-        //
-        // FIX: reconstruir el subtotal CON promo pero SIN excepción a
-        // partir de `detalle_presupuesto.subtotal`, que es exactamente
-        // `cantidad * precioConPromo` (ver guardar(): `subtotal: cantidad *
-        // precioFinal`). Ese valor es el que se usó como base real del
-        // cálculo al momento del alta/última edición, así que dividir
-        // `monto` por él aísla el margen puro de la excepción,
-        // desacoplado de qué promociones estaban vigentes en ese momento.
-        // Es además un punto fijo estable: si el usuario reabre y guarda
-        // sin cambiar nada, itemsConPromo recalcula el mismo
-        // subtotalConPromo (mismos ítems + mismas promos vigentes) y
-        // totalFinal = round(subtotalConPromo * factorDB, 2) = monto,
-        // sin drift entre ediciones sucesivas (ver Escenario 2).
-        const subtotalConPromoDB = detalles.reduce(
-          (acc, d) => acc + (Number(d.subtotal) || 0),
-          0,
-        )
-        const factorDB = esExcepcionDB && subtotalConPromoDB > 0
-          ? pres.monto / subtotalConPromoDB
+        // [FIX Ajuste vs Promo] El % de la excepción se aplica SOLO a los ítems sin promoción,
+        // así que el factor se reconstruye como (monto − subtotalPromo) / subtotalAjustable,
+        // usando `precioConPromo` persistido en cada detalle para separar ambos grupos.
+        // Es un punto fijo: reabrir y guardar sin cambios reproduce el mismo `monto`.
+        // (Presupuestos anteriores al fix: el total se conserva; ver nota en lib/calculoPresupuesto.js.)
+        const factorDB = esExcepcionDB
+          ? derivarFactorAjustable({ monto: pres.monto, detalles })
           : 1
         const pctDB = esExcepcionDB
           ? String(((1 - factorDB) * 100).toFixed(4).replace(/\.?0+$/, ''))
@@ -1029,7 +1028,7 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
         setMetodoPago(esExcepcionDB ? 'excepcion' : pres.metodoPago)
         setExcepcionSubMetodo(esExcepcionDB ? pres.metodoPago : 'efectivo')
         setExcepcionFactor(factorDB)
-        setPctInit(pctDB)
+        setPct(pctDB)
         setItems(itemsDB.length ? itemsDB : [ITEM_EMPTY()])
         setInitDone(true)
       } catch (err) {
@@ -1069,16 +1068,110 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
   }), [items, promoVigentes])
 
   // [OPTIMIZACIÓN 3] Totales memoizados — dependen de itemsConPromo y factorReal
-  const { subtotalSinPromo, subtotalConPromo, ahorro, totalFinal } = useMemo(
+  const { subtotalSinPromo, subtotalConPromo, subtotalPromo, subtotalAjustable, ajuste, ahorro, totalFinal, cantItemsConPromo, cantItemsAjustables } = useMemo(
     () => calcularTotales(itemsConPromo, factorReal),
     [itemsConPromo, factorReal]
   )
+
+  // ══ [BORRADOR] Restauración, reconciliación y autoguardado ═════════════════
+
+  const [avisoBorrador, setAvisoBorrador] = useState(() => borradorInicial
+    ? { guardadoEn: borradorInicial.savedAt, cambios: [], noVerificados: 0, totalAnterior: null, totalActual: null }
+    : null)
+  // `false` mientras se contrasta el borrador con el catálogo vigente.
+  const [reconciliado,      setReconciliado]      = useState(!borradorInicial)
+  const [confirmarDescarte, setConfirmarDescarte] = useState(false)
+
+  // Escenario 7: contrastar precios/disponibilidad (y el cliente) con el catálogo
+  // vigente. Se corre una sola vez, al montar, sobre el borrador restaurado.
+  useEffect(() => {
+    if (!borradorInicial) return undefined
+    let cancelado = false
+
+    ;(async () => {
+      let r = null
+      try {
+        r = await reconciliarConCatalogo(
+          { items, cliente },
+          { obtenerProducto: getProductoCached, obtenerCliente: obtenerClientePorId },
+        )
+      } catch { /* sin datos: se avisa como "no verificado" */ }
+      if (cancelado) return
+
+      // Todo junto y sin awaits intermedios → un único render consistente.
+      if (r?.parches.size) {
+        setItems(prev => prev.map(it => {
+          const p = r.parches.get(it._uid)
+          // Si la fila cambió de producto mientras tanto, el parche ya no aplica.
+          return p && p.idProducto === it.idProducto ? { ...it, ...p.patch } : it
+        }))
+      }
+      if (r?.cliente) {
+        setCliente(prev => (prev && prev.idCliente === r.cliente.idCliente ? r.cliente.valor : prev))
+      }
+      setAvisoBorrador(prev => prev && { ...prev, cambios: r?.cambios ?? [], noVerificados: r ? r.noVerificados : 1 })
+      setReconciliado(true)
+    })()
+
+    return () => { cancelado = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Escenario 2: una vez reconciliado y con promos aplicadas, si el TOTAL difiere
+  // del que tenía el borrador al guardarse, se informa en lugar de cambiarlo en silencio.
+  const totalComparadoRef = useRef(false)
+  useEffect(() => {
+    if (totalComparadoRef.current || !borradorInicial || !reconciliado || !promosCargadas) return
+    totalComparadoRef.current = true
+    const previo = borradorInicial.totalFinal
+    if (previo != null && Math.abs(previo - totalFinal) >= 0.01) {
+      setAvisoBorrador(prev => prev && { ...prev, totalAnterior: previo, totalActual: totalFinal })
+    }
+  }, [borradorInicial, reconciliado, promosCargadas, totalFinal])
+
+  // Snapshot mínimo y estable: sin flags transitorios (noDisponible, precioAnterior)
+  // ni datos que no hagan falta (CUIT, domicilio del cliente).
+  const snapshotBorrador = useMemo(() => ({
+    cliente: cliente
+      ? { idCliente: cliente.idCliente, nombre: cliente.nombre, apellido: cliente.apellido, mail: cliente.mail ?? null, telefono: cliente.telefono ?? null }
+      : null,
+    metodoPago,
+    excepcionSubMetodo,
+    pct,
+    items: items
+      .filter(it => it.idProducto)
+      .map(({ idProducto, nombreProducto, cantidad, precioUnitario, idCategoria, medida }) =>
+        ({ idProducto: String(idProducto), nombreProducto, cantidad: String(cantidad), precioUnitario, idCategoria, medida })),
+    totalFinal,
+  }), [cliente, metodoPago, excepcionSubMetodo, pct, items, totalFinal])
+
+  // No se escribe hasta que el estado sea confiable: así un borrador recién
+  // restaurado nunca es pisado con valores intermedios (sin promos / sin reconciliar).
+  const {
+    ultimoGuardado,
+    errorAlmacenamiento,
+    descartar: descartarBorrador,
+    reanudar: reanudarBorrador,
+  } = useBorradorAutoguardado({
+    scope: scopeBorrador,
+    snapshot: snapshotBorrador,
+    habilitado: !modoEdicion && promosCargadas && reconciliado,
+  })
+
+  function confirmarDescartarBorrador() {
+    setConfirmarDescarte(false)
+    descartarBorrador()
+    nuevo()
+  }
 
   // ── [OPTIMIZACIÓN 4] useCallback para handlers pasados a ItemRow ──
   // Evita que ItemRow reciba funciones nuevas en cada render del padre,
   // habilitando React.memo(ItemRow) en el futuro sin trabajo extra.
   const updateItem = useCallback((uid, key, val) => {
-    setItems(prev => prev.map(it => it._uid === uid ? { ...it, [key]: val } : it))
+    setItems(prev => prev.map(it => it._uid === uid
+      // [BORRADOR] Al cambiar el producto de la fila, los avisos del borrador dejan de aplicar.
+      ? { ...it, [key]: val, ...(key === 'idProducto' ? { noDisponible: false, precioAnterior: null } : null) }
+      : it))
     setError('')
   }, [])
 
@@ -1120,6 +1213,17 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
     try {
       if (!cliente) {
         setError('Seleccioná un cliente antes de guardar.')
+        return
+      }
+
+      // [BORRADOR] No se guarda con precios sin verificar ni con productos dados de baja.
+      if (!reconciliado) {
+        setError('Estamos verificando los precios del borrador. Probá de nuevo en unos segundos.')
+        return
+      }
+      const itemNoDisponible = items.find(it => it.noDisponible)
+      if (itemNoDisponible) {
+        setError(`El producto "${itemNoDisponible.nombreProducto || 'ID ' + itemNoDisponible.idProducto}" ya no está disponible. Quitalo para continuar.`)
         return
       }
 
@@ -1213,19 +1317,29 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
         monto:           totalFinal,
         estado:          'borrador',
         esExcepcion:     esExcepcion ? 1 : 0,
-        // [ANTI-DUPLICACIÓN / FIX] El backend valida que `monto` sea
-        // coherente con la suma del detalle, pero no puede recalcular el
-        // recargo/descuento por método de pago sin duplicar METODOS_BASE
-        // acá y allá (y desincronizarse el día que cambien un %). Se manda
-        // el factor ya resuelto por el frontend; el RPC solo verifica que
-        // monto ≈ round(sum(detalle.subtotal) * factor, 2).
-        factor:          factorReal,
+        // [ANTI-DUPLICACIÓN / FIX Ajuste vs Promo] El RPC actual valida
+        // monto ≈ round(Σ detalle.subtotal × factor, 2). Como el ajuste ya no es uniforme
+        // (los ítems con promoción quedan fuera), `factor` se envía como factor mezclado
+        // (monto / Σ subtotal): sigue cumpliendo esa igualdad. Los campos nuevos permiten
+        // que el servidor valide con la regla real (ver sql/calcular_total_presupuesto.sql).
+        factor:            factorCompatibleRpc(totalFinal, detalles),
+        factorMetodo:      factorReal,
+        subtotalPromo,
+        subtotalAjustable,
       }
 
       let presupuestoReal
 
       if (modoEdicion) {
-        await actualizarPresupuesto(presupuestoEditar, cabecera, detalles)
+        // [EDICIÓN VÍA RPC] Atómica, validada en el servidor con la misma regla que el alta,
+        // solo para borradores. Antes: update + delete + insert directos desde el cliente.
+        await actualizarPresupuestoIdempotente({
+          clave:         leerClaveIdempotencia(),
+          idPresupuesto: presupuestoEditar,
+          cabecera,
+          detalles,
+        })
+        rotarClaveIdempotencia()
         presupuestoReal = presupuestoEditar
         if (onEditarVolver) { onEditarVolver(presupuestoReal); return }
       } else {
@@ -1246,6 +1360,11 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
         // confirmó, se rota: el próximo clic en "Guardar" (otro presupuesto,
         // o un reintento manual tras cerrar este) es una intención nueva.
         rotarClaveIdempotencia()
+
+        // [BORRADOR] Escenario 4: alta confirmada → el borrador se elimina y el
+        // autoguardado queda en pausa hasta que se abra un formulario nuevo
+        // (nuevo()). Va acá, y no antes, para que un error de red conserve el trabajo.
+        descartarBorrador()
       }
 
       const esCuenta = metodoPago === 'cc15' || metodoPago === 'cc30' ||
@@ -1257,6 +1376,10 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
 
       setGuardado({ idPresupuesto: presupuestoReal, esCuenta, totalFinal, metodoLabel, clienteNombre: `${cliente.nombre} ${cliente.apellido}`, clienteId: cliente.idCliente })
     } catch (err) {
+      // [EDICIÓN VÍA RPC] CLAVE_REUTILIZADA: el usuario cambió el contenido tras un envío cuyo
+      // resultado quedó incierto. Como la edición REEMPLAZA el estado completo, es seguro
+      // tratar el próximo clic como una intención nueva; sin rotar quedaría trabado.
+      if (modoEdicion && err?.codigo === 'P0IDK') rotarClaveIdempotencia()
       setError(err.message || 'Error al guardar el presupuesto.')
     } finally {
       setSaving(false)
@@ -1270,6 +1393,8 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
     productoCacheRef.current.clear()
     setCliente(null); setMetodoPago('efectivo'); setItems([ITEM_EMPTY()])
     setGuardado(null); setError(''); setExcepcionFactor(1); setExcepcionSubMetodo('efectivo')
+    // [BORRADOR] Escenario 4: el formulario siguiente nace vacío y vuelve a autoguardarse.
+    setPct(''); setAvisoBorrador(null); reanudarBorrador()
     // [ANTI-DUPLICACIÓN] Rotación defensiva: normalmente la clave ya se rotó
     // tras el éxito en guardar(). Repetirla acá no tiene costo y cubre el
     // caso borde de que "Nuevo" se dispare desde un lugar que no pasó por ahí.
@@ -1355,6 +1480,27 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
       )}
       <PageHeader title={modoEdicion ? 'Editar Presupuesto' : 'Presupuestador'} subtitle={modoEdicion ? `Modificando #${presupuestoEditar}` : 'Nuevo presupuesto'} />
 
+      {/* [BORRADOR] Estado del autoguardado (reserva su altura: no mueve el layout) */}
+      {!modoEdicion && (
+        <p className={`h-4 -mt-3 text-xs font-body ${errorAlmacenamiento ? 'text-yellow-400' : 'text-surface-500'}`} aria-live="polite">
+          {errorAlmacenamiento
+            ? 'No se pudo guardar el borrador en este navegador. Terminá el presupuesto antes de salir.'
+            : ultimoGuardado
+              ? `Borrador guardado automáticamente · ${new Date(ultimoGuardado).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })}`
+              : ''}
+        </p>
+      )}
+
+      {/* [BORRADOR] Escenarios 1 y 7: aviso de restauración y diferencias con el catálogo */}
+      {!modoEdicion && avisoBorrador && (
+        <BorradorBanner
+          aviso={avisoBorrador}
+          verificando={!reconciliado}
+          onCerrar={() => setAvisoBorrador(null)}
+          onDescartar={() => setConfirmarDescarte(true)}
+        />
+      )}
+
       {/* Cabecera */}
       <Card className="p-6">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-start">
@@ -1376,7 +1522,8 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
           onExcepcionFactor={setExcepcionFactor}
           excepcionSubMetodo={excepcionSubMetodo}
           onExcepcionSubMetodo={setExcepcionSubMetodo}
-          initialPct={pctInit}
+          pct={pct}
+          onPct={setPct}
         />
       </Card>
 
@@ -1455,15 +1602,20 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
               </div>
             )}
 
-            {/* Ajuste por método de pago */}
+            {/* Ajuste por método de pago — solo sobre ítems sin promoción */}
             <div className="flex justify-between gap-12">
               <span className="text-surface-400">Ajuste ({metodoLabel}):</span>
-              <span className={`font-mono font-medium ${factorReal < 1 ? 'text-emerald-400' : factorReal > 1 ? 'text-red-400' : 'text-surface-400'}`}>
-                {factorReal === 1 ? '—' : factorReal < 1
-                  ? `- ${fmt(subtotalConPromo - totalFinal)}`
-                  : `+ ${fmt(totalFinal - subtotalConPromo)}`}
+              <span className={`font-mono font-medium ${ajuste < 0 ? 'text-emerald-400' : ajuste > 0 ? 'text-red-400' : 'text-surface-400'}`}>
+                {ajuste === 0 ? '—' : ajuste < 0 ? `- ${fmt(-ajuste)}` : `+ ${fmt(ajuste)}`}
               </span>
             </div>
+            {cantItemsConPromo > 0 && (
+              <p role="status" className="text-surface-500 text-xs -mt-1">
+                {cantItemsAjustables > 0
+                  ? `Se aplica solo sobre ${fmt(subtotalAjustable)} (ítems sin promoción).`
+                  : 'Todos los ítems tienen promoción: no se aplica ajuste por método de pago.'}
+              </p>
+            )}
 
             <div className="border-t border-surface-700 pt-2 flex justify-between gap-12">
               <span className="text-white font-semibold">Total a pagar:</span>
@@ -1486,6 +1638,19 @@ export default function Presupuestador({ presupuestoEditar, onEditarVolver, onVe
           </div>
         </div>
       </Card>
+
+      {/* [BORRADOR] Confirmación: descartar es destructivo e irreversible */}
+      <Modal open={confirmarDescarte} onClose={() => setConfirmarDescarte(false)} title="Descartar borrador">
+        <div className="space-y-4">
+          <p className="text-surface-300 text-sm font-body">
+            Se borrarán el cliente, los ítems y los ajustes cargados. Esta acción no se puede deshacer.
+          </p>
+          <div className="flex gap-2">
+            <Button variant="secondary" className="flex-1" onClick={() => setConfirmarDescarte(false)}>Cancelar</Button>
+            <Button className="flex-1" onClick={confirmarDescartarBorrador}>Descartar</Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }
