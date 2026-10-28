@@ -14,6 +14,7 @@
 
 import { useMemo } from 'react'
 import { Plus, Trash2, AlertCircle, CheckCircle2, Lock } from 'lucide-react'
+import { TOUCH } from './pedidosPresentacion'
 import { calcularPlanCuotas, validarPlanCuotas } from '../../services/pedidosCuotasService'
 
 function fmt(n) {
@@ -67,13 +68,13 @@ export default function PlanCuotasCC({ total, cuotas, onChange, bloqueadas = [] 
     [restante, cuotas, error]
   )
 
-  const cell = `bg-surface-700 border border-surface-600 rounded-lg px-2 py-1.5 text-white text-sm
-                font-mono focus:outline-none focus:border-brand-500 transition-all
+  const cell = `bg-surface-700 border border-surface-600 rounded-lg px-2 py-1.5 text-white text-base min-[1025px]:text-sm
+                min-h-[44px] min-[1025px]:min-h-0 font-mono focus:outline-none focus:border-brand-500 transition-all
                 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none`
 
   return (
     <div className="space-y-3">
-      <p className="text-surface-300 text-xs tracking-widest uppercase font-body">Plan de cuotas</p>
+      <p className="text-surface-300 text-sm min-[1025px]:text-xs tracking-widest uppercase font-body">Plan de cuotas</p>
 
       {/* Cuotas ya pagadas — inmutables, sólo lectura. No pasan por onChange
           bajo ninguna circunstancia: representan dinero ya entregado. */}
@@ -81,25 +82,25 @@ export default function PlanCuotasCC({ total, cuotas, onChange, bloqueadas = [] 
         <div className="space-y-2">
           {bloqueadas.map((c) => (
             <div key={c.idCuota ?? c.numeroCuota}
-              className="flex items-center gap-2 bg-surface-900/50 rounded-xl p-2 opacity-70">
-              <span className="text-surface-500 text-xs font-mono w-14 flex-shrink-0 text-center">
+              className="flex flex-col md:flex-row md:items-center gap-1 md:gap-2 bg-surface-900/50 rounded-xl p-3 md:p-2 opacity-70">
+              <span className="text-surface-500 text-sm min-[1025px]:text-xs font-mono md:w-14 flex-shrink-0 md:text-center">
                 Cuota {c.numeroCuota}
               </span>
-              <span className="flex-1 text-surface-400 text-sm font-mono text-right pr-2">
+              <span className="flex-1 text-surface-400 text-sm font-mono md:text-right md:pr-2">
                 {c.porcentaje}%
               </span>
-              <span className="flex-1 text-surface-400 text-sm font-mono text-right pr-2">
+              <span className="flex-1 text-surface-400 text-sm font-mono md:text-right md:pr-2">
                 {fmtFecha(c.fechaVencimiento)}
               </span>
-              <span className="text-surface-300 text-xs font-mono w-24 text-right flex-shrink-0">
+              <span className="text-surface-300 text-sm min-[1025px]:text-xs font-mono md:w-24 md:text-right flex-shrink-0">
                 {fmt(c.monto)}
               </span>
-              <span className="flex items-center gap-1 text-emerald-500 text-xs flex-shrink-0 w-24 justify-end">
+              <span className="flex items-center gap-1 text-emerald-500 text-sm min-[1025px]:text-xs flex-shrink-0 md:w-24 md:justify-end">
                 <Lock size={12} /> Pagada
               </span>
             </div>
           ))}
-          <p className="text-surface-500 text-xs font-body pl-1">
+          <p className="text-surface-500 text-sm min-[1025px]:text-xs font-body pl-1">
             Estas cuotas ya fueron cobradas y no pueden modificarse. Sólo se editan las pendientes de abajo.
           </p>
         </div>
@@ -110,8 +111,8 @@ export default function PlanCuotasCC({ total, cuotas, onChange, bloqueadas = [] 
         {cuotas.map((c, idx) => {
           const montoPreview = preview[idx]?.monto
           return (
-            <div key={idx} className="flex items-center gap-2 bg-surface-800/60 rounded-xl p-2">
-              <span className="text-surface-500 text-xs font-mono w-14 flex-shrink-0 text-center">
+            <div key={idx} className="flex flex-col md:flex-row md:items-center gap-3 md:gap-2 bg-surface-800/60 rounded-xl p-3 md:p-2">
+              <span className="text-surface-500 text-sm min-[1025px]:text-xs font-mono md:w-14 flex-shrink-0 md:text-center">
                 Cuota {bloqueadas.length + idx + 1}
               </span>
 
@@ -129,7 +130,7 @@ export default function PlanCuotasCC({ total, cuotas, onChange, bloqueadas = [] 
                     className={cell + ' w-full pr-6 text-right'}
                     aria-label={`Porcentaje cuota pendiente ${idx + 1}`}
                   />
-                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-surface-500 text-xs pointer-events-none">%</span>
+                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-surface-500 text-sm min-[1025px]:text-xs pointer-events-none">%</span>
                 </div>
               </div>
 
@@ -144,17 +145,17 @@ export default function PlanCuotasCC({ total, cuotas, onChange, bloqueadas = [] 
                     className={cell + ' w-full pr-10 text-right'}
                     aria-label={`Días de vencimiento cuota pendiente ${idx + 1}`}
                   />
-                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-surface-500 text-xs pointer-events-none">días</span>
+                  <span className="absolute right-2 top-1/2 -translate-y-1/2 text-surface-500 text-sm min-[1025px]:text-xs pointer-events-none">días</span>
                 </div>
               </div>
 
-              <span className="text-surface-300 text-xs font-mono w-24 text-right flex-shrink-0">
+              <span className="text-surface-300 text-sm min-[1025px]:text-xs font-mono md:w-24 md:text-right flex-shrink-0">
                 {montoPreview !== undefined ? fmt(montoPreview) : '—'}
               </span>
 
               <button type="button" onClick={() => remove(idx)}
                 disabled={cuotas.length <= 1}
-                className="text-surface-500 hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors p-1 rounded flex-shrink-0"
+                className="flex items-center justify-center min-h-[44px] min-w-[44px] self-end md:self-auto text-surface-500 hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors p-1 rounded flex-shrink-0"
                 aria-label={`Eliminar cuota pendiente ${idx + 1}`}>
                 <Trash2 size={14} />
               </button>
@@ -164,14 +165,14 @@ export default function PlanCuotasCC({ total, cuotas, onChange, bloqueadas = [] 
       </div>
 
       <button type="button" onClick={add}
-        className="flex items-center gap-2 text-brand-400 hover:text-brand-300 text-sm font-body transition-colors">
+        className="flex items-center gap-2 min-h-[44px] min-[1025px]:min-h-0 text-brand-400 hover:text-brand-300 text-sm font-body transition-colors">
         <Plus size={14} /> Agregar cuota pendiente
       </button>
 
       {/* Estado de validación en tiempo real */}
       <div
         role="status"
-        className={`flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-body border
+        className={`flex items-center gap-2 rounded-xl px-3 py-2 text-sm min-[1025px]:text-xs font-body border
           ${error
             ? 'bg-red-500/10 border-red-500/30 text-red-400'
             : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'}`}>

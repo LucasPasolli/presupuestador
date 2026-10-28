@@ -27,7 +27,7 @@ const variants = {
 }
 
 const sizes = {
-  sm: 'px-3 py-1.5 text-xs',
+  sm: 'px-3 py-1.5 text-sm min-[1025px]:text-xs',
   md: 'px-4 py-2.5 text-sm',
   lg: 'px-6 py-3 text-base',
 }
@@ -223,7 +223,7 @@ export function Input({ label, error, id, className = '', ...props }) {
       {label && (
         <label
           htmlFor={inputId}
-          className="block text-surface-300 text-xs tracking-widest uppercase font-body"
+          className="block text-surface-300 text-sm min-[1025px]:text-xs tracking-widest uppercase font-body"
         >
           {label}
         </label>
@@ -244,7 +244,7 @@ export function Input({ label, error, id, className = '', ...props }) {
         `}
         {...props}
       />
-      {error && <p id={errorId} role="alert" className="text-red-400 text-xs">{error}</p>}
+      {error && <p id={errorId} role="alert" className="text-red-400 text-sm min-[1025px]:text-xs">{error}</p>}
     </div>
   )
 }
@@ -261,7 +261,7 @@ export function Select({ label, error, children, id, className = '', ...props })
       {label && (
         <label
           htmlFor={selectId}
-          className="block text-surface-300 text-xs tracking-widest uppercase font-body"
+          className="block text-surface-300 text-sm min-[1025px]:text-xs tracking-widest uppercase font-body"
         >
           {label}
         </label>
@@ -283,7 +283,7 @@ export function Select({ label, error, children, id, className = '', ...props })
       >
         {children}
       </select>
-      {error && <p id={errorId} role="alert" className="text-red-400 text-xs">{error}</p>}
+      {error && <p id={errorId} role="alert" className="text-red-400 text-sm min-[1025px]:text-xs">{error}</p>}
     </div>
   )
 }
@@ -302,7 +302,7 @@ const badgeColors = {
 
 export function Badge({ children, color = 'gray' }) {
   return (
-    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-body border ${badgeColors[color]}`}>
+    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-sm min-[1025px]:text-xs font-body border ${badgeColors[color]}`}>
       {children}
     </span>
   )
@@ -329,7 +329,7 @@ export function PageHeader({ title, subtitle, actions }) {
             aplastar el título letra por letra. Depende del ancho REAL del
             contenedor, no del viewport: con sidebar fijo el área útil es menor. */}
       <div className="min-w-0 sm:min-w-min sm:flex-1">
-        <p className="text-brand-500 text-xs font-mono tracking-[0.3em] uppercase mb-1">
+        <p className="text-brand-500 text-sm min-[1025px]:text-xs font-mono tracking-[0.3em] uppercase mb-1">
           {subtitle}
         </p>
         {/* text-2xl→text-4xl: en 320px de ancho, "text-4xl tracking-widest" en

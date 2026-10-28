@@ -5,6 +5,7 @@
 
 import { AlertCircle, ListChecks, Printer } from 'lucide-react'
 import { Button } from '../ui'
+import { TOUCH } from './pedidosPresentacion'
 
 /**
  * @param {Object}   props
@@ -23,25 +24,25 @@ export default function ExportarHojaToolbar({
   onToggleTodos, onCambiarCantidad, onExportar,
 }) {
   return (
-    <div className="px-6 py-4 border-b border-surface-700 space-y-3">
+    <div className="px-4 sm:px-6 py-4 border-b border-surface-700 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
           <Button size="sm" variant="secondary" icon={ListChecks} onClick={onToggleTodos}
-            aria-pressed={todos}>
+            aria-pressed={todos} className={TOUCH}>
             {todos ? 'Deseleccionar todos' : 'Seleccionar todos'}
           </Button>
 
           {/* aria-live: los lectores de pantalla anuncian el cambio del contador */}
-          <span className="text-surface-300 text-xs font-mono" role="status" aria-live="polite">
+          <span className="text-surface-300 text-sm min-[1025px]:text-xs font-mono" role="status" aria-live="polite">
             {seleccionados} de {total} seleccionado{seleccionados !== 1 ? 's' : ''}
           </span>
 
-          <label className="flex items-center gap-2 text-surface-200 text-sm font-body cursor-pointer select-none">
+          <label className="flex items-center gap-2 min-h-[44px] min-[1025px]:min-h-0 text-surface-200 text-sm font-body cursor-pointer select-none">
             <input
               type="checkbox"
               checked={listarCantidad}
               onChange={(e) => onCambiarCantidad(e.target.checked)}
-              className="h-4 w-4 rounded accent-brand-500 focus-visible:outline-none
+              className="h-5 w-5 min-[1025px]:h-4 min-[1025px]:w-4 rounded accent-brand-500 focus-visible:outline-none
                          focus-visible:ring-2 focus-visible:ring-brand-400"
             />
             Listar cantidad
@@ -49,12 +50,12 @@ export default function ExportarHojaToolbar({
         </div>
 
         <Button size="sm" variant="secondary" icon={Printer} onClick={onExportar}
-          disabled={generando} aria-busy={generando}>
+          disabled={generando} aria-busy={generando} className={`w-full sm:w-auto ${TOUCH}`}>
           {generando ? 'Generando…' : 'Exportar PDF'}
         </Button>
       </div>
 
-      <p className="text-surface-500 text-xs font-body">
+      <p className="text-surface-500 text-sm min-[1025px]:text-xs font-body">
         Datos por ítem: Código, Producto y Medida{listarCantidad ? ' y Cantidad' : ''}.
       </p>
 

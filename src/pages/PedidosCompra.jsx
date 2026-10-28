@@ -1,5 +1,5 @@
 // src/pages/PedidosCompra.jsx
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useId } from 'react'
 import { createPortal } from 'react-dom'
 import { usePaginatedList } from '../hooks/usePaginatedList'
 import { useScrollAnchor } from '../hooks/useScrollToTopOnChange'
@@ -9,7 +9,7 @@ import {
   Plus, Trash2, Search, CheckCircle2, AlertCircle,
   ArrowLeft, ShoppingCart, Package, Clock, BadgeCheck,
   Pencil, Truck, RotateCcw, UserPlus, Building2, CalendarCheck,
-  Layers, Landmark, Lock, Loader2,
+  Layers, Landmark, Lock, Loader2, WifiOff,
 } from 'lucide-react'
 import {
   obtenerPedidos,
@@ -35,23 +35,17 @@ import PlanCuotasCC, { CUOTA_EMPTY } from '../components/pedidos/PlanCuotasCC'
 import { generarPDFPedidoCompra, MENSAJE_SIN_SELECCION } from '../lib/pdfPedidoCompra'
 import ExportarHojaToolbar from '../components/pedidos/ExportarHojaToolbar'
 import { useSeleccionItems } from '../hooks/useSeleccionItems'
+import { useBreakpoint } from '../hooks/useBreakpoint'
+import { useOnlineStatus } from '../hooks/useOnlineStatus'
+import FiltrosPedidos, { FILTROS_INICIALES } from '../components/pedidos/FiltrosPedidos'
+import PedidosListado from '../components/pedidos/PedidosListado'
+import PaginadorTabla from '../components/ui/PaginadorTabla'
+import { CuotasPlanDetalle, ItemsPedidoDetalle } from '../components/pedidos/PedidoDetalleListas'
+import { TOUCH, ESTADO_CONFIG, cap, fmt, fmtFecha, metodoPagoLabel } from '../components/pedidos/pedidosPresentacion'
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-function fmt(n) {
-  return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(n ?? 0)
-}
-
-function fmtFecha(iso) {
-  if (!iso) return '—'
-  const [y, m, d] = iso.split('-')
-  return `${d}/${m}/${y}`
-}
-
 function today() { return new Date().toISOString().slice(0, 10) }
-
-// Capitaliza la primera letra de un string (igual que ABMC)
-const cap = (s) => s ? s.trim().charAt(0).toUpperCase() + s.trim().slice(1) : ''
 
 // Suma N días corridos a una fecha ISO (o a hoy si no se pasa) y devuelve dd/mm/yyyy
 function sumarDiasFmt(fechaIso, dias) {
@@ -66,21 +60,6 @@ function fechaVencimientoEcheck(fechaIso) {
   return sumarDiasFmt(fechaIso, 30)
 }
 
-// Label legible del método de pago. Único punto de verdad para no repetir
-// el mismo condicional en el listado y en el detalle — 'cuenta_corriente'
-// crudo de la DB nunca se muestra tal cual (quedaría "Cuenta_corriente").
-function metodoPagoLabel(pedido) {
-  if (pedido.metodoPago === 'echeck') return 'E-Check (CC30)'
-  if (pedido.metodoPago === 'cuenta_corriente') return pedido.tieneCuotas ? 'CC Cuotas' : 'CC'
-  return pedido.metodoPago ? cap(pedido.metodoPago) : '—'
-}
-
-// Estado visual del pedido (logístico)
-const ESTADO_CONFIG = {
-  encargado: { label: 'Encargado', color: 'blue',   icon: Clock },
-  recibido:  { label: 'Recibido',  color: 'purple',  icon: Truck },
-}
-
 // ─── Toast ─────────────────────────────────────────────────────────────────
 
 function Toast({ message, onDone }) {
@@ -89,7 +68,7 @@ function Toast({ message, onDone }) {
     return () => clearTimeout(t)
   }, [onDone])
   return createPortal(
-    <div className="fixed top-5 right-5 z-[9999] pointer-events-none">
+    <div className="fixed top-4 left-4 right-4 sm:left-auto sm:right-5 sm:top-5 z-[9999] pointer-events-none pt-[env(safe-area-inset-top)]">
       <div className="flex items-center gap-3 bg-emerald-900/95 border border-emerald-500/50
                       rounded-2xl px-5 py-3 shadow-2xl animate-slide-up">
         <CheckCircle2 size={18} className="text-emerald-400 flex-shrink-0" />
@@ -153,7 +132,8 @@ function NuevoProveedorModal({ open, onClose, onCreated }) {
       onClose()
       setTimeout(() => onCreated(prov), 0)
     } catch (err) {
-      setErrors({ general: err.message })
+      console.error('[NuevoProveedorModal] Error creando proveedor', err)
+      setErrors({ general: 'No se pudo crear el proveedor. Intentá nuevamente.' })
     } finally {
       setSaving(false)
     }
@@ -171,18 +151,18 @@ function NuevoProveedorModal({ open, onClose, onCreated }) {
           placeholder="Nombre por el que se lo conoce" />
         <Input label="CUIT / RUT" value={form.identificacionTributaria} type="tel" inputMode="numeric" pattern="[0-9-]*"
           onChange={e => setField('identificacionTributaria', e.target.value)} placeholder="20-12345678-9"  />
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Input label="Teléfono" value={form.telefono} type="tel" inputMode="numeric" pattern="[0-9+\-() ]*"
             onChange={e => setField('telefono', e.target.value)} placeholder="3510000000"  />
           <Input label="Email" value={form.email}
             onChange={e => set('email', e.target.value)} placeholder="email@ejemplo.com" />
         </div>
         {errors.general && (
-          <p className="text-red-400 text-xs font-body">{errors.general}</p>
+          <p className="text-red-400 text-sm min-[1025px]:text-xs font-body">{errors.general}</p>
         )}
-        <div className="flex gap-2 pt-2">
-          <Button variant="secondary" className="flex-1" onClick={onClose}>Cancelar</Button>
-          <Button className="flex-1" onClick={guardar} disabled={saving}>
+        <div className="flex flex-col-reverse sm:flex-row gap-2 pt-2">
+          <Button variant="secondary" className={`flex-1 ${TOUCH}`} onClick={onClose}>Cancelar</Button>
+          <Button className={`flex-1 ${TOUCH}`} onClick={guardar} disabled={saving}>
             {saving ? 'Creando...' : 'Crear Proveedor'}
           </Button>
         </div>
@@ -217,10 +197,11 @@ function ProveedorSelector({ value, onChange, onToast }) {
     setSearch(text)
     if (!text.trim()) { setResults([]); setShowDrop(false); return }
 
+    const termino = text.replace(/[%,()*\\]/g, ' ').trim()
     const { data } = await supabase
       .from('proveedor')
       .select('*')
-      .or(`nombre_fiscal.ilike.%${text}%,nombre_comercial.ilike.%${text}%`)
+      .or(`nombre_fiscal.ilike.%${termino}%,nombre_comercial.ilike.%${termino}%`)
       .limit(8)
 
     // Also try exact ID match
@@ -271,21 +252,22 @@ function ProveedorSelector({ value, onChange, onToast }) {
 
   return (
     <div ref={wrapRef} className="relative">
-      <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1">
+      <label className="block text-surface-300 text-sm min-[1025px]:text-xs tracking-widest uppercase font-body mb-1">
         Proveedor
       </label>
 
       {value ? (
         <div className="flex items-center gap-3 bg-surface-700 border border-brand-500/40 rounded-xl px-4 py-2.5">
           <Building2 size={15} className="text-brand-400 flex-shrink-0" />
-          <div className="flex-1">
+          <div className="flex-1 min-w-0 break-words">
             <p className="text-white text-sm font-body">{value.nombreComercial || value.nombreFiscal}</p>
-            <p className="text-surface-400 text-xs font-mono">
+            <p className="text-surface-400 text-sm min-[1025px]:text-xs font-mono">
               #{value.idProveedor} · {value.nombreFiscal}
               {value.identificacionTributaria ? ` · CUIT ${value.identificacionTributaria}` : ''}
             </p>
           </div>
-          <button onClick={limpiar} className="text-surface-400 hover:text-red-400 transition-colors text-xl leading-none">×</button>
+          <button type="button" onClick={limpiar} aria-label="Quitar proveedor"
+            className="flex items-center justify-center min-h-[44px] min-w-[44px] -mr-2 text-surface-400 hover:text-red-400 transition-colors text-2xl leading-none">×</button>
         </div>
       ) : (
         <>
@@ -295,29 +277,29 @@ function ProveedorSelector({ value, onChange, onToast }) {
               <input value={search} onChange={e => buscar(e.target.value)}
                 onFocus={() => search && setShowDrop(true)}
                 placeholder="Buscar proveedor..."
-                className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2.5 text-white
-                           text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all" />
+                className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2.5 text-white text-base min-[1025px]:text-sm font-body placeholder-surface-500
+                           focus:outline-none focus:border-brand-500 transition-all min-h-[44px] min-[1025px]:min-h-0" />
             </div>
-            <Button size="sm" variant="secondary" icon={UserPlus} onClick={abrirNuevo}>Nuevo</Button>
+            <Button size="sm" variant="secondary" icon={UserPlus} onClick={abrirNuevo} className={TOUCH}>Nuevo</Button>
           </div>
 
           {showDrop && (
             <div className="absolute top-full left-0 right-0 mt-1 bg-surface-800 border border-surface-600
-                            rounded-xl shadow-2xl z-50 overflow-hidden">
+                            rounded-xl shadow-2xl z-50 overflow-y-auto max-h-64">
               {results.length === 0 ? (
                 <div className="px-4 py-3">
-                  <p className="text-surface-300 text-xs font-body mb-2">Sin resultados para "{search}"</p>
+                  <p className="text-surface-300 text-sm min-[1025px]:text-xs font-body mb-2">Sin resultados para "{search}"</p>
                   <button onClick={abrirNuevo}
-                    className="text-brand-400 text-xs font-body hover:underline flex items-center gap-1">
+                    className="text-brand-400 text-sm min-[1025px]:text-xs font-body hover:underline flex items-center gap-1 min-h-[44px]">
                     <UserPlus size={12} /> Crear proveedor "{search}"
                   </button>
                 </div>
               ) : (
                 results.map(p => (
                   <button key={p.idProveedor} onClick={() => seleccionar(p)}
-                    className="w-full text-left px-4 py-2.5 hover:bg-surface-700 transition-colors border-b border-surface-700/60 last:border-0">
+                    className="w-full text-left px-4 py-2.5 min-h-[44px] hover:bg-surface-700 transition-colors border-b border-surface-700/60 last:border-0">
                     <p className="text-white text-sm font-body">{p.nombreComercial || p.nombreFiscal}</p>
-                    <p className="text-surface-400 text-xs font-mono">
+                    <p className="text-surface-400 text-sm min-[1025px]:text-xs font-mono">
                       #{p.idProveedor} · {p.nombreFiscal}
                     </p>
                   </button>
@@ -341,11 +323,18 @@ function norm(s) {
 
 // ─── Fila de ítem del pedido ────────────────────────────────────────────────
 
-function ItemRow({ item, index, onUpdate, onRemove, disabled = false }) {
+// Grilla de la fila de ítems en escritorio (cabecera y filas comparten columnas).
+// En mobile/tablet cada ítem es una tarjeta con los campos apilados en 1 columna.
+const ITEM_GRID =
+  'grid grid-cols-[2rem_5rem_minmax(12rem,1fr)_7rem_8rem_9rem_9rem_2.5rem] items-center gap-x-2 px-1 py-2'
+
+
+function ItemRow({ item, index, onUpdate, onRemove, disabled = false, isDesktop = true }) {
+  const uid = useId()
   const [nombreSearch,   setNombreSearch]   = useState(item.nombreProducto || '')
   const [nombreResults,  setNombreResults]  = useState([])
   const [showDrop,       setShowDrop]       = useState(false)
-  const [dropPos,        setDropPos]        = useState({ top: 0, left: 0, width: 0 })
+  const [dropPos,        setDropPos]        = useState({ top: 0, left: 0, width: 0, above: false })
   const [medidas,        setMedidas]        = useState([])
   // En edición el padre ya trajo las medidas con el JOIN de carga del pedido:
   // se usan tal cual y NO se consulta nada por ítem. Se indexan por producto para
@@ -374,12 +363,28 @@ function ItemRow({ item, index, onUpdate, onRemove, disabled = false }) {
     if (!showDrop || !inputRef.current) return
     const update = () => {
       const rect = inputRef.current.getBoundingClientRect()
-      setDropPos({ top: rect.bottom + window.scrollY + 4, left: rect.left + window.scrollX, width: Math.max(rect.width, 300) })
+      // Se ajusta al viewport (pantallas de 320 px) y, si el teclado virtual deja poco
+      // espacio debajo, el listado se abre hacia arriba.
+      const margen = 8
+      const vw     = document.documentElement.clientWidth
+      const vh     = window.visualViewport?.height ?? window.innerHeight
+      const width  = Math.min(Math.max(rect.width, 280), vw - margen * 2)
+      const left   = Math.min(Math.max(rect.left, margen), vw - width - margen)
+      const above  = vh - rect.bottom < 220 && rect.top > vh - rect.bottom
+      setDropPos({
+        top: (above ? rect.top - 4 : rect.bottom + 4) + window.scrollY,
+        left: left + window.scrollX, width, above,
+      })
     }
     update()
     window.addEventListener('scroll', update, true)
     window.addEventListener('resize', update)
-    return () => { window.removeEventListener('scroll', update, true); window.removeEventListener('resize', update) }
+    window.visualViewport?.addEventListener('resize', update)
+    return () => {
+      window.removeEventListener('scroll', update, true)
+      window.removeEventListener('resize', update)
+      window.visualViewport?.removeEventListener('resize', update)
+    }
   }, [showDrop])
 
   // Sync nombre search when item changes externally (edit mode load)
@@ -483,122 +488,156 @@ function ItemRow({ item, index, onUpdate, onRemove, disabled = false }) {
     }
   }
 
-  const cell = `bg-surface-700 border border-surface-600 rounded-lg px-2 py-1.5 text-white text-sm
-                font-mono focus:outline-none focus:border-brand-500 transition-all
-                [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none`
+  // text-base (16 px) + 44 px de alto en táctil: legible y sin zoom automático de iOS.
+  const cell = `bg-surface-700 border border-surface-600 rounded-lg px-2 py-1.5 text-white text-base min-[1025px]:text-sm
+                font-mono focus:outline-none focus:border-brand-500 transition-all min-h-[44px] min-[1025px]:min-h-0
+                [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none
+                disabled:opacity-40 disabled:cursor-not-allowed`
 
   const subtotal = (parseInt(item.cantidad) || 0) * (parseFloat(String(item.precioUnitario).replace(',', '.')) || 0)
 
-  return (
-    <tr className="border-b border-surface-700/50">
-      {/* # */}
-      <td className="py-2 px-3 text-surface-500 text-sm font-mono w-8 select-none">{index + 1}</td>
+  // Etiqueta visible en tarjeta; sólo para lectores de pantalla en la grilla (la cabecera ya rotula).
+  const lab = (suf, texto) => (
+    <label htmlFor={`${uid}-${suf}`}
+      className={isDesktop ? 'sr-only' : 'block text-surface-300 text-sm font-body mb-1'}>{texto}</label>
+  )
 
-      {/* Cantidad */}
-      <td className="py-2 px-2 w-20">
-        <input type="text" inputMode="numeric" value={item.cantidad}
-          onChange={e => onUpdate(index, 'cantidad', e.target.value.replace(/\D/g, ''))}
-          onBlur={e => { if (!e.target.value) onUpdate(index, 'cantidad', '1') }}
-          disabled={disabled}
-          className={cell + ' w-full text-center disabled:opacity-40 disabled:cursor-not-allowed'} />
-      </td>
+  const cCantidad = (
+    <div role={isDesktop ? 'cell' : undefined}>
+      {lab('cant', 'Cantidad')}
+      <input id={`${uid}-cant`} type="text" inputMode="numeric" value={item.cantidad}
+        onChange={e => onUpdate(index, 'cantidad', e.target.value.replace(/\D/g, ''))}
+        onBlur={e => { if (!e.target.value) onUpdate(index, 'cantidad', '1') }}
+        disabled={disabled}
+        className={cell + (isDesktop ? ' w-full text-center' : ' w-full text-left')} />
+    </div>
+  )
 
-      {/* Nombre con dropdown */}
-      <td className="py-2 px-2 min-w-[200px]" ref={wrapRef}>
-        <input ref={inputRef} value={nombreSearch}
-          onChange={e => buscarPorNombre(e.target.value)}
-          placeholder="Nombre del producto..."
-          disabled={disabled}
-          className={cell + ' w-full disabled:opacity-40 disabled:cursor-not-allowed'} />
-        {showDrop && createPortal(
-          <div
-            ref={dropRef}
-            data-producto-drop
-            style={{ position: 'absolute', top: dropPos.top, left: dropPos.left, width: dropPos.width, zIndex: 9999 }}
-            className="bg-surface-800 border border-surface-600 rounded-xl shadow-2xl max-h-[260px] overflow-y-auto"
-          >
-            {nombreResults.length === 0 ? (
-              <p className="px-4 py-3 text-surface-300 text-xs font-body">Sin resultados para "{nombreSearch}"</p>
-            ) : (
-              nombreResults.map(p => (
-                <button key={p.idProducto}
-                  onMouseDown={e => e.preventDefault()}
-                  onClick={() => seleccionarProducto(p)}
-                  className="w-full text-left px-3 py-2.5 hover:bg-surface-700 transition-colors border-b border-surface-700/60 last:border-0">
-                  <p className="text-white text-xs font-body leading-tight">{p.nombre}</p>
-                  <p className="text-surface-400 text-xs font-mono mt-0.5">
-                    #{p.idProducto}{p.tieneMedidas ? ' · Con medidas' : ''}
-                    {p.precioProveedor > 0 ? ` · Último precio: ${fmt(p.precioProveedor)}` : ''}
-                  </p>
-                </button>
-              ))
-            )}
-          </div>,
-          document.body
-        )}
-      </td>
+  const cNombre = (
+    <div role={isDesktop ? 'cell' : undefined} ref={wrapRef} className="min-w-0">
+      {lab('nombre', 'Nombre del producto')}
+      <input id={`${uid}-nombre`} ref={inputRef} value={nombreSearch}
+        onChange={e => buscarPorNombre(e.target.value)}
+        placeholder="Nombre del producto..."
+        disabled={disabled} autoComplete="off"
+        className={cell + ' w-full font-body'} />
+      {showDrop && createPortal(
+        <div
+          ref={dropRef}
+          data-producto-drop
+          style={{
+            position: 'absolute', top: dropPos.top, left: dropPos.left, width: dropPos.width, zIndex: 9999,
+            transform: dropPos.above ? 'translateY(-100%)' : undefined,
+          }}
+          className="bg-surface-800 border border-surface-600 rounded-xl shadow-2xl max-h-[min(260px,40dvh)] overflow-y-auto"
+        >
+          {nombreResults.length === 0 ? (
+            <p className="px-4 py-3 text-surface-300 text-sm font-body">Sin resultados para "{nombreSearch}"</p>
+          ) : (
+            nombreResults.map(p => (
+              <button key={p.idProducto} type="button"
+                onMouseDown={e => e.preventDefault()}
+                onClick={() => seleccionarProducto(p)}
+                className="w-full text-left px-3 py-2.5 min-h-[44px] hover:bg-surface-700 transition-colors border-b border-surface-700/60 last:border-0">
+                <p className="text-white text-sm font-body leading-tight">{p.nombre}</p>
+                <p className="text-surface-400 text-sm min-[1025px]:text-xs font-mono mt-0.5">
+                  #{p.idProducto}{p.tieneMedidas ? ' · Con medidas' : ''}
+                  {p.precioProveedor > 0 ? ` · Último precio: ${fmt(p.precioProveedor)}` : ''}
+                </p>
+              </button>
+            ))
+          )}
+        </div>,
+        document.body
+      )}
+    </div>
+  )
 
-      {/* ID */}
-      <td className="py-2 px-2 w-28">
-        <input type="text" inputMode="numeric" value={item.idProducto || ''}
-          onChange={e => handleIdChange(e.target.value)}
-          placeholder="ID"
-          disabled={disabled}
-          className={cell + ' w-full text-center disabled:opacity-40 disabled:cursor-not-allowed'} />
-      </td>
+  const cId = (
+    <div role={isDesktop ? 'cell' : undefined}>
+      {lab('id', 'ID de producto')}
+      <input id={`${uid}-id`} type="text" inputMode="numeric" value={item.idProducto || ''}
+        onChange={e => handleIdChange(e.target.value)}
+        placeholder="ID" disabled={disabled}
+        className={cell + (isDesktop ? ' w-full text-center' : ' w-full text-left')} />
+    </div>
+  )
 
-      {/* Medida */}
-      <td className="py-2 px-2 w-32">
-        {medidas.length > 0 ? (
-          <select value={item.medida || ''}
+  const cMedida = (medidas.length > 0 || isDesktop) && (
+    <div role={isDesktop ? 'cell' : undefined}>
+      {medidas.length > 0 ? (
+        <>
+          {lab('medida', 'Medida')}
+          <select id={`${uid}-medida`} value={item.medida || ''}
             onChange={e => onUpdate(index, 'medida', e.target.value)}
             disabled={disabled}
-            className="w-full bg-surface-700 border border-surface-600 rounded-lg px-2 py-1.5
-                       text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer
-                       disabled:opacity-40 disabled:cursor-not-allowed">
+            className="w-full bg-surface-700 border border-surface-600 rounded-lg px-2 py-1.5 text-white text-base
+                       min-[1025px]:text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer
+                       min-h-[44px] min-[1025px]:min-h-0 disabled:opacity-40 disabled:cursor-not-allowed">
             <option value="">— medida —</option>
             {medidas.map(m => <option key={m} value={m}>{m}</option>)}
           </select>
-        ) : (
-          <span className="text-surface-500 text-xs px-2">—</span>
-        )}
-      </td>
+        </>
+      ) : (
+        <span className="text-surface-500 text-sm min-[1025px]:text-xs px-2">—</span>
+      )}
+    </div>
+  )
 
-      {/* Precio proveedor */}
-      <td className="py-2 px-2 w-36">
-        <input
-          type="text"
-          inputMode="decimal"
-          value={item.precioUnitario}
-          onChange={e => {
-            const v = e.target.value.replace(',', '.')
-            if (/^\d*\.?\d*$/.test(v)) onUpdate(index, 'precioUnitario', v)
-          }}
-          onBlur={e => {
-            const parsed = parseFloat(e.target.value) || 0
-            onUpdate(index, 'precioUnitario', parsed === 0 ? '' : parsed)
-          }}
-          placeholder="0.00"
-          disabled={disabled}
-          className={cell + ' w-full disabled:opacity-40 disabled:cursor-not-allowed'}
-        />
-      </td>
+  const cPrecio = (
+    <div role={isDesktop ? 'cell' : undefined}>
+      {lab('precio', 'Precio proveedor')}
+      <input id={`${uid}-precio`} type="text" inputMode="decimal" value={item.precioUnitario}
+        onChange={e => {
+          const v = e.target.value.replace(',', '.')
+          if (/^\d*\.?\d*$/.test(v)) onUpdate(index, 'precioUnitario', v)
+        }}
+        onBlur={e => {
+          const parsed = parseFloat(e.target.value) || 0
+          onUpdate(index, 'precioUnitario', parsed === 0 ? '' : parsed)
+        }}
+        placeholder="0.00" disabled={disabled}
+        className={cell + ' w-full'} />
+    </div>
+  )
 
-      {/* Subtotal */}
-      <td className="py-2 px-3 text-right w-36">
-        <span className="text-surface-200 text-sm font-mono">{fmt(subtotal)}</span>
-      </td>
+  const cBorrar = (
+    <button type="button" onClick={() => onRemove(index)} disabled={disabled}
+      aria-label={`Eliminar ítem ${index + 1}`}
+      className="flex items-center justify-center min-h-[44px] min-w-[44px] min-[1025px]:min-h-0 min-[1025px]:min-w-0
+                 text-surface-500 hover:text-red-400 transition-colors p-1 rounded
+                 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-surface-500">
+      <Trash2 size={isDesktop ? 15 : 18} />
+    </button>
+  )
 
-      {/* Borrar */}
-      <td className="py-2 px-2 w-10">
-        <button onClick={() => onRemove(index)}
-          disabled={disabled}
-          className="text-surface-500 hover:text-red-400 transition-colors p-1 rounded
-                     disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-surface-500">
-          <Trash2 size={15} />
-        </button>
-      </td>
-    </tr>
+  // ── Escritorio: fila de la grilla ─────────────────────────────────────────
+  if (isDesktop) {
+    return (
+      <div role="row" className={`${ITEM_GRID} border-b border-surface-700/50`}>
+        <div role="cell" className="px-2 text-surface-500 text-sm font-mono select-none">{index + 1}</div>
+        {cCantidad}{cNombre}{cId}{cMedida}{cPrecio}
+        <div role="cell" className="text-right px-1">
+          <span className="text-surface-200 text-sm font-mono">{fmt(subtotal)}</span>
+        </div>
+        <div role="cell">{cBorrar}</div>
+      </div>
+    )
+  }
+
+  // ── Mobile / tablet: tarjeta, campos apilados en UNA columna ───────────────
+  return (
+    <div role="listitem" className="bg-surface-800/60 border border-surface-700 rounded-xl p-3 space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-surface-300 text-sm font-mono">Ítem {index + 1}</span>
+        {cBorrar}
+      </div>
+      {cNombre}{cId}{cMedida}{cCantidad}{cPrecio}
+      <div className="flex items-center justify-between pt-2 border-t border-surface-700/60">
+        <span className="text-surface-300 text-sm font-body">Subtotal</span>
+        <span className="text-white text-base font-mono font-semibold">{fmt(subtotal)}</span>
+      </div>
+    </div>
   )
 }
 
@@ -618,6 +657,7 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
   const [pdfError,      setPdfError]      = useState('')
   const [listarCantidad, setListarCantidad] = useState(false) // 'Listar cantidad' desactivada por defecto
   const sel = useSeleccionItems(detalles)
+  const { isMobile, isDesktop } = useBreakpoint()
 
   const reload = useCallback(async () => {
     // Pedido actualizado
@@ -745,32 +785,32 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
   const dia30             = fechaVencimientoEcheck(pedido.fecha)
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6 animate-slide-up">
+    <div className="max-w-4xl mx-auto space-y-4 sm:space-y-6 animate-slide-up">
       {/* Breadcrumb */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0">
           <button onClick={onBack}
-            className="flex items-center gap-2 text-surface-400 hover:text-white text-sm font-body transition-colors">
+            className={`flex items-center gap-2 -ml-2 px-2 ${TOUCH} text-surface-300 hover:text-white text-sm font-body transition-colors`}>
             <ArrowLeft size={16} />Volver a pedidos
           </button>
-          <span className="text-surface-600">/</span>
+          <span className="text-surface-600" aria-hidden="true">/</span>
           <span className="text-surface-300 text-sm font-body">
             Pedido <span className="text-brand-400 font-mono">#{pedido.idPedido}</span>
           </span>
         </div>
         {estadoLog === 'encargado' && (
-          <Button size="sm" variant="secondary" icon={Pencil} onClick={onEditar}>
+          <Button size="sm" variant="secondary" icon={Pencil} onClick={onEditar} className={TOUCH}>
             Editar
           </Button>
         )}
       </div>
 
       {/* Cabecera */}
-      <Card className="p-6">
+      <Card className="p-4 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
           <div>
-            <p className="text-surface-400 text-xs tracking-widest uppercase font-body mb-1">Pedido de Compra</p>
-            <h2 className="font-display text-4xl text-white tracking-widest">#{pedido.idPedido}</h2>
+            <p className="text-surface-400 text-sm min-[1025px]:text-xs tracking-widest uppercase font-body mb-1">Pedido de Compra</p>
+            <h2 className="font-display text-3xl sm:text-4xl text-white tracking-widest">#{pedido.idPedido}</h2>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Badge color={cfg.color}>
@@ -800,54 +840,54 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
           </div>
         )}
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 min-[1025px]:grid-cols-4 gap-3 sm:gap-4 mt-6">
           <div className="bg-surface-700 rounded-xl p-4">
-            <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Fecha pedido</p>
+            <p className="text-surface-400 text-sm min-[1025px]:text-xs uppercase tracking-widest font-body mb-1">Fecha pedido</p>
             <p className="text-white text-sm font-mono">{fmtFecha(pedido.fecha)}</p>
           </div>
           {pedido.fechaRecepcion && (
             <div className="bg-surface-700 rounded-xl p-4">
-              <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Fecha recepción</p>
+              <p className="text-surface-400 text-sm min-[1025px]:text-xs uppercase tracking-widest font-body mb-1">Fecha recepción</p>
               <p className="text-white text-sm font-mono">{fmtFecha(pedido.fechaRecepcion)}</p>
             </div>
           )}
           {pedido.estadoPago === 'pagado' && (
             <div className="bg-surface-700 rounded-xl p-4">
-              <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Fecha de pago</p>
+              <p className="text-surface-400 text-sm min-[1025px]:text-xs uppercase tracking-widest font-body mb-1">Fecha de pago</p>
               <p className="text-emerald-400 text-sm font-mono">{fmtFecha(pedido.fechaPago)}</p>
             </div>
           )}
           <div className="bg-surface-700 rounded-xl p-4">
-            <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Método de pago</p>
+            <p className="text-surface-400 text-sm min-[1025px]:text-xs uppercase tracking-widest font-body mb-1">Método de pago</p>
             <p className="text-white text-sm font-body">
               {metodoPagoLabel(pedido)}
             </p>
           </div>
           {proveedor && (
             <div className="bg-surface-700 rounded-xl p-4">
-              <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Proveedor</p>
+              <p className="text-surface-400 text-sm min-[1025px]:text-xs uppercase tracking-widest font-body mb-1">Proveedor</p>
               <p className="text-white text-sm font-body">{proveedor.nombreComercial || proveedor.nombreFiscal}</p>
             </div>
           )}
           <div className="bg-surface-700 rounded-xl p-4">
-            <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Total</p>
+            <p className="text-surface-400 text-sm min-[1025px]:text-xs uppercase tracking-widest font-body mb-1">Total</p>
             <p className="text-brand-400 font-mono font-bold text-lg">{fmt(pedido.monto)}</p>
           </div>
         </div>
         {/* Acciones de estado */}
         {(estadoLog === 'encargado' || (esPendientePago && !pedido.tieneCuotas)) && (
           <div className="mt-6 pt-5 border-t border-surface-700">
-            <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-3">Cambiar estado</p>
-            <div className="flex flex-wrap gap-2">
+            <p className="text-surface-400 text-sm min-[1025px]:text-xs uppercase tracking-widest font-body mb-3">Cambiar estado</p>
+            <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2">
               {estadoLog === 'encargado' && (
                 <Button size="sm" icon={Truck} onClick={() => setConfirmEstado('recibido')}
-                  className="bg-brand-600 hover:bg-brand-500 border-brand-500 text-white">
+                  className={`${TOUCH} w-full sm:w-auto bg-brand-600 hover:bg-brand-500 border-brand-500 text-white`}>
                   Marcar Recibido
                 </Button>
               )}
               {esPendientePago && !pedido.tieneCuotas && (
                 <Button size="sm" icon={BadgeCheck} onClick={() => setConfirmPagar(true)}
-                  className="bg-emerald-600 hover:bg-emerald-500 border-emerald-500 text-white">
+                  className={`${TOUCH} w-full sm:w-auto bg-emerald-600 hover:bg-emerald-500 border-emerald-500 text-white`}>
                   Marcar Pagado
                 </Button>
               )}
@@ -857,7 +897,7 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
         {/* CC con cuotas: el pago único no aplica — se paga cuota por cuota más abajo */}
         {esPendientePago && pedido.tieneCuotas && (
           <div className="mt-6 pt-5 border-t border-surface-700">
-            <p className="text-surface-500 text-xs font-body flex items-center gap-2">
+            <p className="text-surface-500 text-sm min-[1025px]:text-xs font-body flex items-center gap-2">
               <Layers size={13} className="text-brand-400 flex-shrink-0" />
               Este pedido se paga por cuotas: se debe confirmar cada pago individualmente en el plan de cuotas de abajo.
             </p>
@@ -868,55 +908,23 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
       {/* Plan de cuotas (CC fraccionada) */}
       {pedido.tieneCuotas && (
         <Card className="overflow-hidden">
-          <div className="px-6 py-4 border-b border-surface-700 flex items-center justify-between">
+          <div className="px-4 sm:px-6 py-4 border-b border-surface-700 flex items-center justify-between">
             <h3 className="flex items-center gap-2 font-body font-semibold text-white text-sm">
               <Layers size={14} className="text-brand-400" /> Plan de cuotas
             </h3>
-            <span className="text-surface-400 text-xs font-mono">
+            <span className="text-surface-400 text-sm min-[1025px]:text-xs font-mono">
               {cuotas.filter(c => c.estado === 'pagada').length} / {cuotas.length} pagadas
             </span>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm font-body">
-              <thead>
-                <tr className="border-b border-surface-700">
-                  {['Cuota', '%', 'Vencimiento', 'Monto', 'Estado', ''].map(h => (
-                    <th key={h} className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {cuotas.map(c => (
-                  <tr key={c.idCuota} className="border-b border-surface-700/50">
-                    <td className="py-3 px-4 text-white font-mono text-sm">#{c.numeroCuota}</td>
-                    <td className="py-3 px-4 text-surface-300 font-mono text-xs">{c.porcentaje}%</td>
-                    <td className="py-3 px-4 text-surface-300 font-mono text-xs">{fmtFecha(c.fechaVencimiento)}</td>
-                    <td className="py-3 px-4 text-surface-200 font-mono font-medium">{fmt(c.monto)}</td>
-                    <td className="py-3 px-4">
-                      {c.estado === 'pagada'
-                        ? <Badge color="green"><CheckCircle2 size={11} className="inline mr-1" />Pagada{c.fechaPago ? ` · ${fmtFecha(c.fechaPago)}` : ''}</Badge>
-                        : <Badge color="yellow"><Clock size={11} className="inline mr-1" />Pendiente</Badge>}
-                    </td>
-                    <td className="py-3 px-4">
-                      {c.estado !== 'pagada' && (
-                        <Button size="sm" variant="secondary" icon={BadgeCheck} onClick={() => setConfirmCuota(c.idCuota)}>
-                          Pagar
-                        </Button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <CuotasPlanDetalle cuotas={cuotas} onPagar={setConfirmCuota} mobile={isMobile} />
         </Card>
       )}
 
       {/* Tabla de ítems */}
       <Card className="overflow-hidden">
-        <div className="px-6 py-4 border-b border-surface-700 flex items-center gap-3">
+        <div className="px-4 sm:px-6 py-4 border-b border-surface-700 flex items-center gap-3">
           <h3 className="font-body font-semibold text-white text-sm">Productos</h3>
-          <span className="text-surface-400 text-xs font-mono">{detalles.length} ítem{detalles.length !== 1 ? 's' : ''}</span>
+          <span className="text-surface-400 text-sm min-[1025px]:text-xs font-mono">{detalles.length} ítem{detalles.length !== 1 ? 's' : ''}</span>
         </div>
         {detalles.length > 0 && (
           <ExportarHojaToolbar
@@ -931,64 +939,25 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
             onExportar={descargarHojaRecepcion}
           />
         )}
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm font-body">
-            <thead>
-              <tr className="border-b border-surface-700">
-                <th className="py-3 px-4 w-10"><span className="sr-only">Incluir en la exportación</span></th>
-                {['#','ID Prod.','Producto','Medida','Cant.','Precio Proveedor','Subtotal'].map(h => (
-                  <th key={h} className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {detalles.map((d, idx) => (
-                <tr key={d.idDetallePedido}
-                  className={`border-b border-surface-700/50 ${sel.estaSeleccionado(d.idDetallePedido) ? 'bg-brand-500/5' : ''}`}>
-                  <td className="py-3 px-4">
-                    <input
-                      type="checkbox"
-                      checked={sel.estaSeleccionado(d.idDetallePedido)}
-                      onChange={() => sel.toggle(d.idDetallePedido)}
-                      aria-label={`Incluir en la exportación: ${d.nombreProducto ?? 'producto #' + d.idProducto}${d.medida ? ' ' + d.medida : ''}`}
-                      className="h-4 w-4 rounded accent-brand-500 cursor-pointer
-                                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-400"
-                    />
-                  </td>
-                  <td className="py-3 px-4 text-surface-500 text-xs font-mono">{idx + 1}</td>
-                  <td className="py-3 px-4 text-surface-400 font-mono text-xs">#{d.idProducto}</td>
-                  <td className="py-3 px-4 text-white font-body">{d.nombreProducto ?? `#${d.idProducto}`}</td>
-                  <td className="py-3 px-4">
-                    {d.medida
-                      ? <Badge color="blue">{d.medida}</Badge>
-                      : <span className="text-surface-500 text-xs">—</span>}
-                  </td>
-                  <td className="py-3 px-4 text-surface-200 font-mono text-center">{d.cantidad}</td>
-                  <td className="py-3 px-4 text-surface-200 font-mono">{fmt(d.precioUnitario)}</td>
-                  <td className="py-3 px-4 text-surface-200 font-mono font-medium">{fmt(d.subtotal)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <ItemsPedidoDetalle detalles={detalles} sel={sel} mobile={isMobile} desktop={isDesktop} />
         {detalles.length === 0 && (
           <p className="text-center py-10 text-surface-500 text-sm font-body">Sin ítems registrados.</p>
         )}
       </Card>
 
       {/* Total */}
-      <Card className="p-6">
+      <Card className="p-4 sm:p-6">
         <div className="flex justify-end">
-          <div className="space-y-2 text-sm font-body text-right">
+          <div className="space-y-2 text-sm font-body text-right w-full sm:w-auto">
             {pedido.tieneCuotas && (
-              <div className="flex justify-between gap-16 text-surface-400">
+              <div className="flex justify-between gap-6 sm:gap-16 text-surface-400">
                 <span>Pagado hasta ahora:</span>
                 <span className="font-mono text-emerald-400">
                   {fmt(cuotas.reduce((a, c) => a + (c.estado === 'pagada' ? c.monto : 0), 0))}
                 </span>
               </div>
             )}
-            <div className="border-t border-surface-700 pt-2 flex justify-between gap-16">
+            <div className="border-t border-surface-700 pt-2 flex justify-between gap-6 sm:gap-16">
               <span className="text-white font-semibold">
                 {pedido.tieneCuotas ? 'Saldo pendiente:' : 'Total del pedido:'}
               </span>
@@ -1007,12 +976,12 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
         <p className="text-surface-300 text-sm font-body mb-2">
           ¿Marcar el pedido <span className="text-white font-mono">#{pedido.idPedido}</span> como pagado?
         </p>
-        <p className="text-surface-500 text-xs font-body mb-6">
+        <p className="text-surface-500 text-sm min-[1025px]:text-xs font-body mb-6">
           Esta acción registrará el egreso de <span className="text-brand-400 font-mono">{fmt(pedido.monto)}</span>.
         </p>
-        <div className="flex gap-2">
-          <Button variant="secondary" className="flex-1" onClick={() => setConfirmPagar(false)}>Cancelar</Button>
-          <Button className="flex-1" icon={BadgeCheck} onClick={marcarPagado} disabled={loading}>
+        <div className="flex flex-col-reverse sm:flex-row gap-2">
+          <Button variant="secondary" className={`flex-1 ${TOUCH}`} onClick={() => setConfirmPagar(false)}>Cancelar</Button>
+          <Button className={`flex-1 ${TOUCH}`} icon={BadgeCheck} onClick={marcarPagado} disabled={loading}>
             {loading ? 'Guardando...' : 'Confirmar pago'}
           </Button>
         </div>
@@ -1027,7 +996,7 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
             <p className="text-surface-300 text-sm font-body mb-2">
               ¿Confirmar que el pedido <span className="text-white font-mono">#{pedido.idPedido}</span> fue recibido correctamente?
             </p>
-            <p className="text-emerald-400 text-xs font-body mb-6 bg-emerald-500/10 border border-emerald-500/25 rounded-xl px-3 py-2">
+            <p className="text-emerald-400 text-sm min-[1025px]:text-xs font-body mb-6 bg-emerald-500/10 border border-emerald-500/25 rounded-xl px-3 py-2">
               El stock de todos los productos de este pedido se sumará al Inventario.
             </p>
           </>
@@ -1036,14 +1005,14 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
             <p className="text-surface-300 text-sm font-body mb-2">
               ¿Marcar el pedido <span className="text-white font-mono">#{pedido.idPedido}</span> para revisión?
             </p>
-            <p className="text-yellow-400 text-xs font-body mb-6 bg-yellow-500/10 border border-yellow-500/25 rounded-xl px-3 py-2">
+            <p className="text-yellow-400 text-sm min-[1025px]:text-xs font-body mb-6 bg-yellow-500/10 border border-yellow-500/25 rounded-xl px-3 py-2">
               El stock NO se actualizará hasta que el pedido sea marcado como Recibido.
             </p>
           </>
         )}
-        <div className="flex gap-2">
-          <Button variant="secondary" className="flex-1" onClick={() => setConfirmEstado(null)}>Cancelar</Button>
-          <Button className="flex-1"
+        <div className="flex flex-col-reverse sm:flex-row gap-2">
+          <Button variant="secondary" className={`flex-1 ${TOUCH}`} onClick={() => setConfirmEstado(null)}>Cancelar</Button>
+          <Button className={`flex-1 ${TOUCH}`}
             icon={confirmEstado === 'recibido' ? CheckCircle2 : AlertCircle}
             onClick={() => cambiarEstadoLogistico(confirmEstado)}
             disabled={loading}>
@@ -1062,13 +1031,13 @@ function PedidoDetalle({ pedido: pedidoInit, onBack, onUpdated, onEditar }) {
               <p className="text-surface-300 text-sm font-body mb-2">
                 ¿Marcar la <span className="text-white font-mono">cuota #{c.numeroCuota}</span> como pagada?
               </p>
-              <p className="text-surface-500 text-xs font-body mb-6">
+              <p className="text-surface-500 text-sm min-[1025px]:text-xs font-body mb-6">
                 Se registrará el pago de <span className="text-brand-400 font-mono">{fmt(c.monto)}</span>.
                 Si es la última cuota pendiente, el pedido completo pasará a estado "Pagado".
               </p>
-              <div className="flex gap-2">
-                <Button variant="secondary" className="flex-1" onClick={() => setConfirmCuota(null)}>Cancelar</Button>
-                <Button className="flex-1" icon={BadgeCheck} onClick={() => pagarCuota(c.idCuota)} disabled={loadingCuota}>
+              <div className="flex flex-col-reverse sm:flex-row gap-2">
+                <Button variant="secondary" className={`flex-1 ${TOUCH}`} onClick={() => setConfirmCuota(null)}>Cancelar</Button>
+                <Button className={`flex-1 ${TOUCH}`} icon={BadgeCheck} onClick={() => pagarCuota(c.idCuota)} disabled={loadingCuota}>
                   {loadingCuota ? 'Guardando...' : 'Confirmar pago'}
                 </Button>
               </div>
@@ -1101,6 +1070,7 @@ const DIAS_CC_DEFAULT = 30
 
 function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
   const esEdicion = !!pedidoEditando
+  const { isDesktop } = useBreakpoint()
 
   const [items,      setItems]      = useState([ITEM_EMPTY()])
   const [metodoPago, setMetodoPago] = useState(esEdicion ? (pedidoEditando.metodoPago || 'efectivo') : 'efectivo')
@@ -1321,12 +1291,12 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
   }
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6 animate-slide-up">
+    <div className="max-w-5xl mx-auto space-y-4 sm:space-y-6 animate-slide-up">
       {toast && <Toast message={toast} onDone={() => setToast('')} />}
 
       <div className="flex items-center gap-3">
         <button onClick={onCancelar}
-          className="flex items-center gap-2 text-surface-400 hover:text-white text-sm font-body transition-colors">
+          className="flex items-center gap-2 -ml-2 px-2 min-h-[44px] min-[1025px]:min-h-0 text-surface-300 hover:text-white text-sm font-body transition-colors">
           <ArrowLeft size={16} />Volver a pedidos
         </button>
       </div>
@@ -1346,17 +1316,17 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
       </div>
 
       {/* Proveedor + Método de pago */}
-      <Card className="p-6 space-y-5">
+      <Card className="p-4 sm:p-6 space-y-5">
         <ProveedorSelector value={proveedor} onChange={setProveedor} onToast={setToast} />
 
         <div>
-          <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-2">
+          <label className="block text-surface-300 text-sm min-[1025px]:text-xs tracking-widest uppercase font-body mb-2">
             Método de pago
           </label>
-          <div className="flex flex-wrap gap-2">
+          <div className="grid grid-cols-1 min-[480px]:grid-cols-2 sm:flex sm:flex-wrap gap-2">
             {METODOS_PAGO.map(m => (
               <button key={m.value} onClick={() => setMetodoPago(m.value)}
-                className={`px-4 py-2 rounded-xl text-sm font-body border transition-all
+                className={`px-4 py-2 ${TOUCH} rounded-xl text-sm font-body border transition-all
                   ${metodoPago === m.value
                     ? 'bg-brand-500/15 border-brand-500/40 text-white'
                     : 'bg-surface-700 border-surface-600 text-surface-400 hover:border-surface-500'}`}>
@@ -1377,14 +1347,14 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
           {metodoPago === 'cuenta_corriente' && (
             <div className="mt-4 space-y-4">
               <div>
-                <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-2">Modalidad</p>
-                <div className="inline-flex bg-surface-900/50 border border-surface-600 rounded-xl p-1 gap-1">
+                <p className="text-surface-400 text-sm min-[1025px]:text-xs uppercase tracking-widest font-body mb-2">Modalidad</p>
+                <div className="flex sm:inline-flex w-full sm:w-auto bg-surface-900/50 border border-surface-600 rounded-xl p-1 gap-1">
                   <button
                     type="button"
                     onClick={() => setConFraccion(false)}
                     disabled={esEdicion}
                     aria-pressed={!conFraccion}
-                    className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-body font-medium
+                    className={`flex flex-1 sm:flex-none items-center justify-center text-center gap-1.5 px-3 sm:px-4 py-2 ${TOUCH} rounded-lg text-sm font-body font-medium
                                transition-all disabled:cursor-not-allowed
                                ${!conFraccion
                                  ? 'bg-brand-600 text-white shadow-md shadow-brand-900/40'
@@ -1396,7 +1366,7 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
                     onClick={() => setConFraccion(true)}
                     disabled={esEdicion}
                     aria-pressed={conFraccion}
-                    className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-body font-medium
+                    className={`flex flex-1 sm:flex-none items-center justify-center text-center gap-1.5 px-3 sm:px-4 py-2 ${TOUCH} rounded-lg text-sm font-body font-medium
                                transition-all disabled:cursor-not-allowed
                                ${conFraccion
                                  ? 'bg-brand-600 text-white shadow-md shadow-brand-900/40'
@@ -1406,7 +1376,7 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
                 </div>
               </div>
               {esEdicion && (
-                <p className="text-surface-500 text-xs font-body">
+                <p className="text-surface-500 text-sm min-[1025px]:text-xs font-body">
                   La modalidad (pago único / cuotas) no puede cambiarse una vez creado el pedido.
                   {pedidoEditando.tieneCuotas && ' Podés editar el % y los días de las cuotas pendientes; las ya pagadas quedan bloqueadas.'}
                 </p>
@@ -1425,7 +1395,7 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
 
               {!conFraccion ? (
                 <div className="max-w-xs">
-                  <label className="block text-surface-300 text-xs tracking-widest uppercase font-body mb-1">
+                  <label className="block text-surface-300 text-sm min-[1025px]:text-xs tracking-widest uppercase font-body mb-1">
                     Días de vencimiento
                   </label>
                   <div className="relative">
@@ -1436,11 +1406,11 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
                       onChange={e => setDiasVencimientoCC(e.target.value.replace(/\D/g, ''))}
                       disabled={esEdicion}
                       placeholder="30"
-                      className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2.5 text-white
-                                 text-sm font-mono focus:outline-none focus:border-brand-500 transition-all disabled:opacity-40"
+                      className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2.5 text-white text-base min-[1025px]:text-sm font-mono focus:outline-none
+                                 focus:border-brand-500 transition-all disabled:opacity-40 min-h-[44px] min-[1025px]:min-h-0"
                     />
                   </div>
-                  <p className="text-surface-500 text-xs font-body mt-1">
+                  <p className="text-surface-500 text-sm min-[1025px]:text-xs font-body mt-1">
                     Vence el {sumarDiasFmt(esEdicion ? pedidoEditando.fecha : today(), diasVencimientoCC)}
                     {' '}({diasVencimientoCC || 0} días desde la fecha del pedido).
                   </p>
@@ -1458,34 +1428,35 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
         </div>
       </Card>
 
-      {/* Tabla de productos */}
+      {/* Productos: grilla en escritorio, tarjetas apiladas en mobile/tablet */}
       <Card className="overflow-visible">
-        <div className="px-6 py-4 border-b border-surface-700 flex items-center justify-between">
+        <div className="px-4 sm:px-6 py-4 border-b border-surface-700 flex items-center justify-between gap-3">
           <h2 className="font-body font-semibold text-white text-sm">Productos</h2>
-          <Button size="sm" icon={Plus} onClick={addItem} disabled={hayCuotaPagada || saving}>Agregar ítem</Button>
+          <Button size="sm" icon={Plus} onClick={addItem} disabled={hayCuotaPagada || saving} className={TOUCH}>Agregar ítem</Button>
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-surface-700">
-                {['#','Cant.','Nombre','ID','Medida','Precio Proveedor','Subtotal',''].map(h => (
-                  <th key={h} className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-2 first:px-3 font-body">{h}</th>
+        <div className={isDesktop ? 'overflow-x-auto' : 'p-3'}>
+          <div role={isDesktop ? 'table' : 'list'} aria-label="Productos del pedido"
+            className={isDesktop ? 'min-w-[56rem]' : 'space-y-3'}>
+            {isDesktop && (
+              <div role="row" className={`${ITEM_GRID} border-b border-surface-700 text-surface-400 text-sm min-[1025px]:text-xs tracking-widest uppercase font-body`}>
+                {['#', 'Cant.', 'Nombre', 'ID', 'Medida', 'Precio Proveedor', 'Subtotal'].map(h => (
+                  <div key={h} role="columnheader" className="px-1">{h}</div>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item, idx) => (
-                <ItemRow key={idx} item={item} index={idx} onUpdate={updateItem} onRemove={removeItem} disabled={hayCuotaPagada || saving} />
-              ))}
-            </tbody>
-          </table>
+                <div role="columnheader"><span className="sr-only">Acciones</span></div>
+              </div>
+            )}
+            {items.map((item, idx) => (
+              <ItemRow key={idx} item={item} index={idx} onUpdate={updateItem} onRemove={removeItem}
+                disabled={hayCuotaPagada || saving} isDesktop={isDesktop} />
+            ))}
+          </div>
         </div>
         {items.length > 0 && (
           <div className="px-4 py-3 border-t border-surface-700/50">
             <button
               onClick={addItem}
               disabled={hayCuotaPagada || saving}
-              className="flex items-center gap-2 text-brand-400 hover:text-brand-300 text-sm font-body transition-colors
+              className="flex items-center gap-2 text-brand-400 hover:text-brand-300 text-sm font-body transition-colors min-h-[44px] min-[1025px]:min-h-0
                          disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-brand-400">
               <Plus size={15} />
               Agregar ítem
@@ -1499,29 +1470,30 @@ function NuevoPedido({ onGuardado, onCancelar, pedidoEditando }) {
         )}
       </Card>
 
-      {/* Total + guardar */}
-      <Card className="p-6">
-        <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
+      {/* Total + guardar. En mobile/tablet queda fijo al pie: el botón nunca se pierde al scrollear. */}
+      <Card className={`p-4 sm:p-6 ${isDesktop ? '' : 'sticky bottom-0 z-30 shadow-2xl shadow-black/50 pb-[max(1rem,env(safe-area-inset-bottom))]'}`}>
+        <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 md:gap-6">
           <div className="text-sm font-body">
-            <div className="border-t border-surface-700 pt-2 flex justify-between gap-16">
+            <div className="md:border-t md:border-surface-700 md:pt-2 flex items-baseline justify-between gap-6 sm:gap-16">
               <span className="text-white font-semibold">Total del pedido:</span>
               <span className="text-brand-400 font-mono font-bold text-lg">{fmt(total)}</span>
             </div>
           </div>
-          <div className="flex flex-col items-end gap-2">
+          <div className="flex flex-col md:items-end gap-2">
             {error && (
               <div role="alert"
-                   className="flex items-center gap-2 text-red-400 text-xs bg-red-500/10 border border-red-500/30
-                              rounded-xl px-3 py-2 max-w-xs text-right">
-                <AlertCircle size={14} className="flex-shrink-0" />{error}
+                   className="flex items-start gap-2 text-red-400 text-sm bg-red-500/10 border border-red-500/30
+                              rounded-xl px-3 py-2 md:max-w-xs max-h-32 overflow-y-auto">
+                <AlertCircle size={14} className="flex-shrink-0 mt-0.5" />{error}
               </div>
             )}
             <Button size="lg" icon={saving ? IconoGuardando : (esEdicion ? Pencil : ShoppingCart)}
+                    className={`w-full md:w-auto ${TOUCH}`}
                     onClick={guardar} disabled={saving} aria-busy={saving}>
               {saving ? 'Guardando...' : (esEdicion ? 'Guardar cambios' : 'Guardar Pedido')}
             </Button>
             {/* Región en vivo: anuncia el progreso a lectores de pantalla y a la vista */}
-            <p role="status" aria-live="polite" className="text-surface-400 text-xs font-body min-h-[1rem] text-right">
+            <p role="status" aria-live="polite" className="text-surface-300 text-sm min-[1025px]:text-xs font-body min-h-[1rem] md:text-right">
               {saving && guardandoLento ? 'Guardando el pedido… puede demorar unos segundos. No cierres esta pantalla.' : ''}
             </p>
           </div>
@@ -1539,11 +1511,9 @@ export default function PedidosCompra() {
   const [cuotasResumen, setCuotasResumen] = useState({}) // { [idPedido]: { cuotasPendientes, montoPendiente, ... } }
   const [vista,        setVista]        = useState('lista') // 'lista' | 'nuevo' | 'detalle' | 'editar'
   const [selected,     setSelected]     = useState(null)
-  const [filterEst,    setFilterEst]    = useState('all')
-  const [filterLog,    setFilterLog]    = useState('all')
-  const [filterProv,   setFilterProv]   = useState('')
-  const [filterDesde,  setFilterDesde]  = useState('')
-  const [filterHasta,  setFilterHasta]  = useState('')
+  // Filtros aplicados: un solo objeto en el padre, por eso sobreviven a la rotación del equipo
+  // (FiltrosPedidos sólo guarda un borrador mientras su panel está abierto).
+  const [filtros,     setFiltros]      = useState(FILTROS_INICIALES)
   const [toast,        setToast]        = useState('')
 
   // ── Datos + paginación ────────────────────────────────────────────────
@@ -1556,7 +1526,7 @@ export default function PedidosCompra() {
     pageItems: paginated,
     items:     filteredPedidos,
     rawItems:  pedidos,
-    page, setPage, totalPages,
+    page, setPage, totalPages, loading, error,
     reload: load,
   } = usePaginatedList({
     fetcher: async (f) => {
@@ -1573,8 +1543,11 @@ export default function PedidosCompra() {
       setCuotasResumen(await obtenerResumenCuotasPorPedidos(idsConCuotas))
       return data
     },
-    serverFilters: { filterEst, filterLog, filterDesde, filterHasta },
-    clientFilters: { filterProv },
+    serverFilters: {
+      filterEst: filtros.filterEst, filterLog: filtros.filterLog,
+      filterDesde: filtros.filterDesde, filterHasta: filtros.filterHasta,
+    },
+    clientFilters: { filterProv: filtros.filterProv },
     clientFilter: (p, cf) => {
       if (!cf.filterProv.trim()) return true
       const term      = norm(cf.filterProv.trim())
@@ -1587,6 +1560,8 @@ export default function PedidosCompra() {
     pageSize: PAGE_SIZE,
   })
   const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
+  const { isCompact } = useBreakpoint()
+  const online = useOnlineStatus()
 
   // Deuda pendiente real: para pedidos CC fraccionada, sólo lo que falta
   // cobrar (sum de cuotas no pagadas) — no el monto total del pedido, que
@@ -1644,186 +1619,60 @@ export default function PedidosCompra() {
     )
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
+    <div className="max-w-5xl mx-auto space-y-4 sm:space-y-6">
       {toast && <Toast message={toast} onDone={() => setToast('')} />}
+
+      {/* Offline: en mobile la conexión es intermitente; los datos mostrados pueden estar viejos. */}
+      {!online && (
+        <div role="status" className="flex items-center gap-2 text-amber-300 text-sm font-body bg-amber-500/10
+                                      border border-amber-500/30 rounded-xl px-4 py-2.5">
+          <WifiOff size={15} className="flex-shrink-0" />
+          Sin conexión: los datos pueden estar desactualizados y no se podrán guardar cambios.
+        </div>
+      )}
 
       <PageHeader
         title="Pedidos de Compra"
         subtitle="Órdenes a proveedores"
         actions={
-          <Button icon={Plus} onClick={() => setVista('nuevo')}>Nuevo Pedido</Button>
+          <Button icon={Plus} onClick={() => setVista('nuevo')} className={TOUCH}>Nuevo Pedido</Button>
         }
       />
 
-      {/* Resumen */}
-      <div className="grid grid-cols-3 gap-4">
+      {/* Resumen: filas compactas en mobile, 3 tarjetas desde tablet */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2 md:gap-4">
         {[
           { label: 'Total pedidos',   value: pedidos.length,      color: 'text-white' },
           { label: 'Deuda pendiente', value: fmt(totalPendiente), color: 'text-yellow-400' },
           { label: 'Total pagado',    value: fmt(totalPagado),    color: 'text-emerald-400' },
         ].map(({ label, value, color }) => (
-          <div key={label} className="bg-surface-800 border border-surface-700 rounded-xl p-4">
-            <p className="text-surface-400 text-xs uppercase tracking-widest font-body">{label}</p>
-            <p className={`font-display text-2xl tracking-widest mt-1 ${color}`}>{value}</p>
+          <div key={label} className="bg-surface-800 border border-surface-700 rounded-xl px-4 py-3 md:p-4
+                                      flex md:block items-baseline justify-between gap-3">
+            <p className="text-surface-400 text-sm min-[1025px]:text-xs uppercase tracking-widest font-body">{label}</p>
+            <p className={`font-display text-xl min-[1025px]:text-2xl tracking-wider min-[1025px]:tracking-widest md:mt-1 ${color}`}>{value}</p>
           </div>
         ))}
       </div>
 
-      {/* Filtros */}
-      <Card className="p-4">
-        <div className="flex flex-wrap gap-3 items-end w-full">
+      <FiltrosPedidos value={filtros} onChange={setFiltros} compact={isCompact} />
 
-          {/* Buscador */}
-          <div className="relative flex-1 min-w-[180px]">
-            <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
-            <input
-              type="text" value={filterProv}
-              onChange={e => setFilterProv(e.target.value)}
-              placeholder="Buscar por proveedor o ID..."
-              className="w-full bg-surface-700 border border-surface-600 rounded-xl pl-9 pr-4 py-2 text-white
-                         text-sm font-body placeholder-surface-500 focus:outline-none focus:border-brand-500 transition-all"
-            />
-          </div>
-
-          {/* Dropdown: Estado Logístico */}
-          <select
-            value={filterLog}
-            onChange={e => setFilterLog(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer [color-scheme:dark]">
-            <option value="all">Estado logístico</option>
-            <option value="encargado">Encargado</option>
-            <option value="recibido">Recibido</option>
-          </select>
-
-          {/* Dropdown: Estado Pago */}
-          <select
-            value={filterEst}
-            onChange={e => setFilterEst(e.target.value)}
-            className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 cursor-pointer [color-scheme:dark]">
-            <option value="all">Estado de pago</option>
-            <option value="pendiente">Pago pendiente</option>
-            <option value="pagado">Pagado</option>
-          </select>
-
-          {/* Fecha Desde */}
-          <div className="flex flex-col gap-1">
-            <label className="text-surface-400 text-xs uppercase tracking-widest font-body">Desde</label>
-            <input type="date" value={filterDesde} onChange={e => setFilterDesde(e.target.value)}
-              className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
-          </div>
-
-          {/* Fecha Hasta */}
-          <div className="flex flex-col gap-1">
-            <label className="text-surface-400 text-xs uppercase tracking-widest font-body">Hasta</label>
-            <input type="date" value={filterHasta} onChange={e => setFilterHasta(e.target.value)}
-              className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm font-body focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
-          </div>
-
-          {/* Limpiar */}
-          {(filterProv || filterDesde || filterHasta || filterEst !== 'all' || filterLog !== 'all') && (
-            <button
-              onClick={() => { setFilterProv(''); setFilterDesde(''); setFilterHasta(''); setFilterEst('all'); setFilterLog('all') }}
-              className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-surface-400 text-sm font-body
-                         hover:text-white hover:border-surface-500 transition-all whitespace-nowrap">
-              Limpiar
-            </button>
-          )}
-
-        </div>
-      </Card>
-
-      {/* Tabla */}
+      {/* Listado + paginador en UN solo Card (igual que Inventario). El ancla marca el inicio de la lista. */}
       <div ref={tableAnchorRef}>
-      <Card className="overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm font-body">
-            <thead>
-              <tr className="border-b border-surface-700">
-                {['ID','Fecha pedido','Proveedor','Monto','Método pago','Estado logístico','Pago',''].map(h => (
-                  <th key={h} className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 font-body">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {paginated.map(p => {
-                const estadoLog = p.estadoLogistico ?? 'encargado'
-                const cfg       = ESTADO_CONFIG[estadoLog] ?? ESTADO_CONFIG.encargado
-                return (
-                  <tr key={p.idPedido} onClick={() => abrirDetalle(p)}
-                    className="border-b border-surface-700/50 hover:bg-surface-700/40 cursor-pointer transition-colors">
-                    <td className="py-3 px-4 text-brand-400 font-mono text-sm">#{p.idPedido}</td>
-                    <td className="py-3 px-4 text-surface-300 font-mono text-xs">{fmtFecha(p.fecha)}</td>
-                    <td className="py-3 px-4">
-                      {p.nombreProveedor ? (
-                        <p className="text-white text-sm font-body font-medium">{p.nombreProveedor}</p>
-                      ) : (
-                        <span className="text-surface-600 text-sm font-body">—</span>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 text-white font-mono font-medium">{fmt(p.monto)}</td>
-                    <td className="py-3 px-4 text-surface-300 text-xs font-body">
-                      {metodoPagoLabel(p)}
-                    </td>
-                    <td className="py-3 px-4">
-                      <Badge color={cfg.color}>
-                        <cfg.icon size={11} className="inline mr-1" />{cfg.label}
-                      </Badge>
-                    </td>
-                    <td className="py-3 px-4">
-                      {p.tieneCuotas ? (
-                        (() => {
-                          const r = cuotasResumen[p.idPedido]
-                          if (!r) {
-                            // Resumen todavía cargando: usar estadoPago como fallback
-                            // seguro (nunca mostrar "Pagado" a ciegas mientras se resuelve).
-                            return p.estadoPago === 'pagado'
-                              ? <Badge color="green"><CheckCircle2 size={11} className="inline mr-1" />Pagado</Badge>
-                              : <Badge color="yellow"><Clock size={11} className="inline mr-1" />Pendiente</Badge>
-                          }
-                          return r.cuotasPendientes > 0 ? (
-                            <Badge color="blue">
-                              <Layers size={11} className="inline mr-1" />
-                              {r.cuotasPendientes} cuota{r.cuotasPendientes !== 1 ? 's' : ''} pendiente{r.cuotasPendientes !== 1 ? 's' : ''}
-                            </Badge>
-                          ) : (
-                            <Badge color="green"><CheckCircle2 size={11} className="inline mr-1" />Pagado</Badge>
-                          )
-                        })()
-                      ) : (
-                        p.estadoPago === 'pendiente'
-                          ? <Badge color="yellow"><Clock size={11} className="inline mr-1" />Pendiente</Badge>
-                          : <Badge color="green"><CheckCircle2 size={11} className="inline mr-1" />Pagado</Badge>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 text-surface-500"><ShoppingCart size={15} /></td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
-
-        {filteredPedidos.length === 0 && (
-          <div className="flex flex-col items-center py-16 gap-3 text-surface-500">
-            <ShoppingCart size={32} className="opacity-30" />
-            <p className="font-body text-sm">
-              {pedidos.length === 0 ? 'Sin pedidos registrados.' : 'No hay pedidos que coincidan con los filtros.'}
-            </p>
-          </div>
-        )}
-
-        {totalPages > 1 && (
-          <div className="flex items-center justify-between px-6 py-3 border-t border-surface-700">
-            <p className="text-surface-400 text-xs font-body">
-              {(page-1)*PAGE_SIZE+1}–{Math.min(page*PAGE_SIZE, filteredPedidos.length)} de {filteredPedidos.length}
-            </p>
-            <div className="flex gap-2">
-              <Button size="sm" variant="secondary" onClick={() => { setPage(p => Math.max(1,p-1)); scrollToStart() }} disabled={page===1}>← Ant.</Button>
-              <Button size="sm" variant="secondary" onClick={() => { setPage(p => Math.min(totalPages,p+1)); scrollToStart() }} disabled={page===totalPages}>Sig. →</Button>
-            </div>
-          </div>
-        )}
-      </Card>
+        <PedidosListado
+          pedidos={paginated}
+          cuotasResumen={cuotasResumen}
+          totalSinFiltrar={pedidos.length}
+          loading={loading}
+          error={error}
+          onRetry={load}
+          onAbrir={abrirDetalle}
+          footer={
+            <PaginadorTabla
+              page={page} totalPages={totalPages} pageSize={PAGE_SIZE} total={filteredPedidos.length}
+              onChange={(n) => { setPage(n); scrollToStart() }}
+            />
+          }
+        />
       </div>
     </div>
   )
