@@ -194,7 +194,8 @@ export default function AppShell({ children }) {
       </div>
 
       {/* ── Main content ────────────────────────────────────────── */}
-      <main className="flex-1 lg:ml-56 min-h-screen">
+      <main className="flex-1 min-w-0 lg:ml-56 min-h-screen">
+        {/* `min-w-0` (arriba): un hijo flex tiene min-width:auto y una tabla ancha estiraba toda la página. */}
         {/* Spacer para el topbar en mobile */}
         <div className="lg:hidden h-14" />
         <div className="p-4 sm:p-6 lg:p-8">

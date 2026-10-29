@@ -1,1732 +1,336 @@
 // src/pages/Estadisticas.jsx
-import { useState, useEffect, useCallback, useRef } from 'react'
-import { obtenerMetricas, obtenerTicketPromedioPorCliente } from '../services/estadisticasService'
-import { useDebounce } from '../hooks/useDebounce'
-import { useScrollAnchor, useResetScrollAnchor } from '../hooks/useScrollToTopOnChange'
-import { Card, PageHeader, Button } from '../components/ui'
+// Pantalla de estadísticas: orquesta filtros, carga de datos y secciones.
+// Toda la lógica visual vive en src/components/estadisticas/*.
+//
+// Garantías de la historia "Optimizar mobile/tablet":
+//  · Gráficos, KPIs y tablas se adaptan por CSS (sin JS de medición) → se
+//    redibujan solos al rotar (Esc. 1, 3, 4, 6).
+//  · Filtros y modales viven en estado del padre/propio y NUNCA se desmontan por
+//    una recarga ni por cruzar un breakpoint (Esc. 5, 6).
+//  · Un solo origen de datos y de formato (obtenerMetricas + formatters) para
+//    todos los dispositivos (Esc. 7). Las respuestas obsoletas se descartan.
+
+import { useCallback, useState } from 'react'
 import {
-  TrendingUp, TrendingDown, Wallet, Clock, Users, Package,
-  BarChart2, CreditCard, Tag, AlertTriangle, RefreshCw,
-  ShoppingCart, Layers, Repeat, Truck, PieChart, CheckCircle, PiggyBank, Boxes, DollarSign
+  TrendingUp, TrendingDown, Wallet, Clock, Users, Package, BarChart2, CreditCard, Tag,
+  AlertTriangle, RefreshCw, Layers, Repeat, Truck, PieChart, PiggyBank, Boxes, WifiOff,
 } from 'lucide-react'
-
-// ─── Hooks de overlay (modal/drawer): scroll-lock + captura de scroll ─────
-//
-// Se comparten entre TODOS los overlays de la página (ModalTopProductos,
-// ModalProductosIncompletos, y cualquier drawer/modal futuro) para no
-// duplicar esta lógica overlay por overlay.
-
-/**
- * Bloquea el scroll del <body> mientras `activo` sea true. Soporta overlays
- * anidados/simultáneos porque cada instancia restaura el valor ANTERIOR de
- * `overflow`/`paddingRight` al desmontarse (no un valor fijo hardcodeado),
- * así que si dos modales se abren en secuencia no se pisan entre sí.
- *
- * Compensa el ancho de la scrollbar con `padding-right` para que el layout
- * de fondo no se corra horizontalmente al ocultarse la barra — sin esto,
- * el bloqueo de scroll genera un "salto" visible del contenido.
- */
-function useLockBodyScroll(activo) {
-  useEffect(() => {
-    if (!activo) return
-
-    const scrollBarWidth = window.innerWidth - document.documentElement.clientWidth
-    const previoOverflow     = document.body.style.overflow
-    const previoPaddingRight = document.body.style.paddingRight
-
-    document.body.style.overflow = 'hidden'
-    if (scrollBarWidth > 0) {
-      document.body.style.paddingRight = `${scrollBarWidth}px`
-    }
-
-    return () => {
-      document.body.style.overflow     = previoOverflow
-      document.body.style.paddingRight = previoPaddingRight
-    }
-  }, [activo])
-}
-
-/**
- * Devuelve un ref para el contenedor scrolleable del overlay y le da foco
- * automáticamente apenas `activo` pasa a true — sin que el usuario tenga
- * que clickear primero. `preventScroll: true` evita que el propio `focus()`
- * dispare un salto de scroll no deseado.
- *
- * El elemento debe tener `tabIndex={-1}` (focuseable por JS, pero fuera del
- * orden de tabulación normal) y la clase `overscroll-contain` en su CSS
- * (Tailwind `overscroll-contain` = `overscroll-behavior: contain`), para
- * que la rueda/gesto táctil no se "escape" hacia el body una vez que el
- * mouse está sobre la lista.
- */
-function useAutoFocusScrollable(activo) {
-  const ref = useRef(null)
-  useEffect(() => {
-    if (activo) ref.current?.focus({ preventScroll: true })
-  }, [activo])
-  return ref
-}
-
-// ─── Helpers ───────────────────────────────────────────────────────────────
-
-function fmt(n) {
-  return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS' }).format(n ?? 0)
-}
-
-function fmtCompacto(n) {
-  if (Math.abs(n) >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`
-  if (Math.abs(n) >= 1_000)     return `$${(n / 1_000).toFixed(1)}K`
-  return fmt(n)
-}
-
-function pct(a, b) {
-  if (!b) return '—'
-  return `${((a / b) * 100).toFixed(1)}%`
-}
-
-function today() { return new Date().toISOString().slice(0, 10) }
-
-// Paleta según qué tan grave es la demora de pago de un cliente:
-// rojo = alerta de cobranza, amarillo = tarde pero leve, verde = a tiempo o antes.
-function colorDemora(dias) {
-  if (dias > 15) return 'text-red-400 bg-red-500/10 border-red-500/30'
-  if (dias > 0)  return 'text-yellow-400 bg-yellow-500/10 border-yellow-500/30'
-  return 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30'
-}
-
-function fmtDemora(dias) {
-  return `${dias > 0 ? '+' : ''}${dias} d`
-}
-
-function nMesesAtras(n) {
-  const d = new Date()
-  d.setMonth(d.getMonth() - n + 1)
-  d.setDate(1)
-  return d.toISOString().slice(0, 10)
-}
-
-// ─── KPI Card ──────────────────────────────────────────────────────────────
-
-// Acepta un `onClick` opcional para KPIs con drill-down (ej. Ticket promedio
-// → detalle por cliente). Cuando se provee, la card se renderiza como un
-// <button> real (no un <div onClick>) para que sea accesible por teclado
-// (foco, Enter/Space) y anunciada por lectores de pantalla como elemento
-// interactivo — WCAG 2.1 AA (2.1.1 Teclado, 4.1.2 Nombre/Rol/Valor).
-function KpiCard({ icon: Icon, label, value, sub, color = 'brand', trend, onClick, drillDownLabel }) {
-  const colors = {
-    brand:   'text-brand-400  bg-brand-500/10  border-brand-500/20',
-    green:   'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
-    yellow:  'text-yellow-400  bg-yellow-500/10  border-yellow-500/20',
-    red:     'text-red-400     bg-red-500/10     border-red-500/20',
-    blue:    'text-blue-400    bg-blue-500/10    border-blue-500/20',
-    violet:  'text-violet-400  bg-violet-500/10  border-violet-500/20',
-  }
-  const esClickeable = typeof onClick === 'function'
-  const Wrapper = esClickeable ? 'button' : 'div'
-
-  return (
-    <Wrapper
-      {...(esClickeable ? { type: 'button', onClick } : {})}
-      aria-label={esClickeable ? `${label}: ${value}. ${drillDownLabel ?? 'Ver detalle'}.` : undefined}
-      className={`
-      w-full text-left rounded-2xl p-5 flex flex-col gap-3 border transition-all
-      ${esClickeable
-        ? 'cursor-pointer hover:border-brand-500/40 hover:bg-surface-700/50 ' +
-          'focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60 active:scale-[0.98]'
-        : ''}
-      ${label === 'Resultado operativo'
-        ? value.includes('-')
-          ? 'bg-red-500/10 border-red-500/40 shadow-[0_0_25px_rgba(239,68,68,0.15)]'
-          : 'bg-emerald-500/10 border-emerald-500/40 shadow-[0_0_25px_rgba(16,185,129,0.18)]'
-        : 'bg-surface-800 border-surface-700'
-      }
-    `}>
-      <div className="flex items-center justify-between">
-        <div className={`w-9 h-9 rounded-xl flex items-center justify-center border ${colors[color]}`}>
-          <Icon size={17} />
-        </div>
-        {trend !== undefined && (
-          <span className={`text-xs font-mono ${trend >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-            {trend >= 0 ? '▲' : '▼'} {Math.abs(trend).toFixed(1)}%
-          </span>
-        )}
-      </div>
-      <div>
-        <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">{label}</p>
-        <p className={`font-display text-3xl tracking-widest ${colors[color].split(' ')[0]}`}>{value}</p>
-        {sub && <p className="text-surface-500 text-xs font-body mt-1">{sub}</p>}
-        {esClickeable && (
-          <p className="text-brand-400/80 text-[11px] font-body mt-2 flex items-center gap-1" aria-hidden="true">
-            {drillDownLabel ?? 'Ver detalle'} <span>→</span>
-          </p>
-        )}
-      </div>
-    </Wrapper>
-  )
-}
-
-// ─── Barra horizontal simple (sin librería) ────────────────────────────────
-
-function BarraH({ label, value, max, fmtFn = fmt, color = '#f97316', sublabel }) {
-  const pct = max > 0 ? Math.max(2, (value / max) * 100) : 0
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between text-xs font-body">
-        <span className="text-surface-200 truncate max-w-[55%]" title={label}>{label}</span>
-        <div className="text-right">
-          <span className="text-white font-mono">{fmtFn(value)}</span>
-          {sublabel && <span className="text-surface-500 ml-2">{sublabel}</span>}
-        </div>
-      </div>
-      <div className="h-2 bg-surface-700 rounded-full overflow-hidden">
-        <div className="h-full rounded-full transition-all duration-700"
-          style={{ width: `${pct}%`, backgroundColor: color }} />
-      </div>
-    </div>
-  )
-}
-
-// ─── Modal: lista completa de artículos más vendidos ──────────────────────
-
-const PAGE_SIZE = 30
-
-function ModalTopProductos({ open, onClose, productos, desde, hasta }) {
-  const [pagina, setPagina] = useState(1)
-
-  // Reset page when modal opens
-  useEffect(() => { if (open) setPagina(1) }, [open])
-
-  useLockBodyScroll(open)
-  const scrollRef = useAutoFocusScrollable(open)
-  const resetScroll = useResetScrollAnchor(scrollRef)
-
-  if (!open) return null
-
-  const MAX_PRODUCTOS = 180
-  const productosMostrados = productos.slice(0, MAX_PRODUCTOS)
-  const hayMas = productos.length > MAX_PRODUCTOS
-
-  const totalPaginas = Math.ceil(productosMostrados.length / PAGE_SIZE)
-  const inicio       = (pagina - 1) * PAGE_SIZE
-  const pagItems     = productosMostrados.slice(inicio, inicio + PAGE_SIZE)
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/75" onClick={onClose} />
-      <div className="relative bg-surface-800 border border-surface-700 rounded-2xl shadow-2xl
-                      w-full max-w-3xl animate-slide-up flex flex-col max-h-[90vh]">
-
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-5 border-b border-surface-700 flex-shrink-0">
-          <div>
-            <h2 className="font-body font-semibold text-white flex items-center gap-2">
-              <Package size={16} className="text-brand-500" />
-              Artículos más vendidos
-            </h2>
-            <p className="text-surface-500 text-xs font-body mt-0.5">
-              {desde} → {hasta} · {hayMas ? `Mostrando los 180 más vendidos de ${productos.length}` : `${productos.length} productos`}
-            </p>
-          </div>
-          <button onClick={onClose}
-            className="text-surface-400 hover:text-white transition-colors text-2xl leading-none w-8 h-8
-                       flex items-center justify-center rounded-lg hover:bg-surface-700">
-            ×
-          </button>
-        </div>
-
-        {/* Tabla */}
-        <div ref={scrollRef} tabIndex={-1}
-          className="overflow-y-auto overscroll-contain flex-1 focus:outline-none">
-          {productos.length === 0 ? (
-            <div className="text-center py-16 text-surface-500 font-body text-sm">
-              Sin ventas en el período seleccionado.
-            </div>
-          ) : (
-            <table className="w-full text-sm font-body">
-              <thead className="sticky top-0 bg-surface-800 z-10">
-                <tr className="border-b border-surface-700">
-                  <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-10">#</th>
-                  <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-20">ID</th>
-                  <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4">Producto</th>
-                  <th className="text-right text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-28">Unidades</th>
-                  <th className="text-right text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-36">Monto acumulado</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pagItems.map((p, i) => {
-                  const rank = inicio + i + 1
-                  const esTop3 = rank <= 3
-                  return (
-                    <tr key={i}
-                      className="border-b border-surface-700/40 last:border-0 hover:bg-surface-700/30 transition-colors">
-                      <td className="py-3 px-4">
-                        <span className={`font-mono text-xs font-bold
-                          ${rank === 1 ? 'text-yellow-400' :
-                            rank === 2 ? 'text-surface-300' :
-                            rank === 3 ? 'text-brand-400' : 'text-surface-600'}`}>
-                          {rank}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="text-surface-500 font-mono text-xs">
-                          {p.idProducto ?? '—'}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className={`${esTop3 ? 'text-white font-medium' : 'text-surface-200'} truncate block max-w-xs`}
-                          title={p.nombre}>
-                          {p.nombre}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        <span className={`font-mono font-bold ${esTop3 ? 'text-brand-400' : 'text-surface-200'}`}>
-                          {p.unidades} u.
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        <span className="font-mono text-surface-200">{fmt(p.monto)}</span>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          )}
-        </div>
-
-        {/* Paginación */}
-        {totalPaginas > 1 && (
-          <div className="flex items-center justify-between px-6 py-4 border-t border-surface-700 flex-shrink-0">
-            <span className="text-surface-500 text-xs font-body">
-              Página {pagina} de {totalPaginas} · {productosMostrados.length} artículos
-            </span>
-            <div className="flex items-center gap-1">
-              <button onClick={() => { setPagina(1); resetScroll() }} disabled={pagina === 1}
-                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                «
-              </button>
-              <button onClick={() => { setPagina(v => Math.max(1, v - 1)); resetScroll() }} disabled={pagina === 1}
-                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                ‹ Ant.
-              </button>
-
-              {/* Páginas cercanas */}
-              {Array.from({ length: totalPaginas }, (_, i) => i + 1)
-                .filter(p => p === 1 || p === totalPaginas || Math.abs(p - pagina) <= 2)
-                .reduce((acc, p, idx, arr) => {
-                  if (idx > 0 && p - arr[idx - 1] > 1) acc.push('…')
-                  acc.push(p)
-                  return acc
-                }, [])
-                .map((item, idx) =>
-                  item === '…' ? (
-                    <span key={`sep-${idx}`} className="px-2 text-surface-600 text-xs">…</span>
-                  ) : (
-                    <button key={item} onClick={() => { setPagina(item); resetScroll() }}
-                      className={`w-8 h-8 rounded-lg text-xs font-body font-medium transition-all
-                        ${item === pagina
-                          ? 'bg-brand-500 text-white'
-                          : 'text-surface-400 hover:bg-surface-700 hover:text-white'}`}>
-                      {item}
-                    </button>
-                  )
-                )}
-
-              <button onClick={() => { setPagina(v => Math.min(totalPaginas, v + 1)); resetScroll() }} disabled={pagina === totalPaginas}
-                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                Sig. ›
-              </button>
-              <button onClick={() => { setPagina(totalPaginas); resetScroll() }} disabled={pagina === totalPaginas}
-                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                »
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// ─── Modal: productos con datos incompletos (valor de inventario) ─────────
-
-const PAGE_SIZE_INCOMPLETOS = 30
-
-function ModalProductosIncompletos({ open, onClose, productos }) {
-  const [pagina, setPagina] = useState(1)
-
-  // Reset page when modal opens
-  useEffect(() => { if (open) setPagina(1) }, [open])
-
-  useLockBodyScroll(open)
-  const scrollRef = useAutoFocusScrollable(open)
-  const resetScroll = useResetScrollAnchor(scrollRef)
-
-  if (!open) return null
-
-  const totalPaginas = Math.max(1, Math.ceil(productos.length / PAGE_SIZE_INCOMPLETOS))
-  const inicio       = (pagina - 1) * PAGE_SIZE_INCOMPLETOS
-  const pagItems     = productos.slice(inicio, inicio + PAGE_SIZE_INCOMPLETOS)
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/75" onClick={onClose} />
-      <div className="relative bg-surface-800 border border-surface-700 rounded-2xl shadow-2xl
-                      w-full max-w-2xl animate-slide-up flex flex-col max-h-[85vh]">
-
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-5 border-b border-surface-700 flex-shrink-0">
-          <div>
-            <h2 className="font-body font-semibold text-white flex items-center gap-2">
-              <AlertTriangle size={16} className="text-yellow-500" />
-              Productos con datos incompletos
-            </h2>
-            <p className="text-surface-500 text-xs font-body mt-0.5">
-              {productos.length} producto{productos.length !== 1 ? 's' : ''} con stock activo y precio de
-              proveedor y/o venta sin cargar — se contaron como $0 en esa valorización
-            </p>
-          </div>
-          <button onClick={onClose}
-            className="text-surface-400 hover:text-white transition-colors text-2xl leading-none w-8 h-8
-                       flex items-center justify-center rounded-lg hover:bg-surface-700">
-            ×
-          </button>
-        </div>
-
-        {/* Tabla */}
-        <div ref={scrollRef} tabIndex={-1}
-          className="overflow-y-auto overscroll-contain flex-1 focus:outline-none">
-          {productos.length === 0 ? (
-            <div className="text-center py-16 text-surface-500 font-body text-sm">
-              Todos los productos activos tienen ambos precios cargados.
-            </div>
-          ) : (
-            <table className="w-full text-sm font-body">
-              <thead className="sticky top-0 bg-surface-800 z-10">
-                <tr className="border-b border-surface-700">
-                  <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4">Producto</th>
-                  <th className="text-right text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-24">Stock</th>
-                  <th className="text-center text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-40">Falta precio de</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pagItems.map((p, i) => (
-                  <tr key={i}
-                    className="border-b border-surface-700/40 last:border-0 hover:bg-surface-700/30 transition-colors">
-                    <td className="py-3 px-4">
-                      <span className="text-surface-200 truncate block max-w-xs" title={p.nombre}>
-                        {p.nombre}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 text-right">
-                      <span className="font-mono text-surface-300">{p.cantidad}</span>
-                    </td>
-                    <td className="py-3 px-4">
-                      <div className="flex items-center justify-center gap-1.5 flex-wrap">
-                        {p.sinPrecioProveedor && (
-                          <span className="text-[10px] font-body px-2 py-0.5 rounded-full
-                                           bg-red-500/10 border border-red-500/30 text-red-400">
-                            Proveedor
-                          </span>
-                        )}
-                        {p.sinPrecioVenta && (
-                          <span className="text-[10px] font-body px-2 py-0.5 rounded-full
-                                           bg-yellow-500/10 border border-yellow-500/30 text-yellow-400">
-                            Venta
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-
-        {/* Paginación */}
-        {totalPaginas > 1 && (
-          <div className="flex items-center justify-between px-6 py-4 border-t border-surface-700 flex-shrink-0">
-            <span className="text-surface-500 text-xs font-body">
-              Página {pagina} de {totalPaginas} · {productos.length} productos
-            </span>
-            <div className="flex items-center gap-1">
-              <button onClick={() => { setPagina(1); resetScroll() }} disabled={pagina === 1}
-                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                «
-              </button>
-              <button onClick={() => { setPagina(v => Math.max(1, v - 1)); resetScroll() }} disabled={pagina === 1}
-                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                ‹ Ant.
-              </button>
-
-              {/* Páginas cercanas */}
-              {Array.from({ length: totalPaginas }, (_, i) => i + 1)
-                .filter(p => p === 1 || p === totalPaginas || Math.abs(p - pagina) <= 2)
-                .reduce((acc, p, idx, arr) => {
-                  if (idx > 0 && p - arr[idx - 1] > 1) acc.push('…')
-                  acc.push(p)
-                  return acc
-                }, [])
-                .map((item, idx) =>
-                  item === '…' ? (
-                    <span key={`sep-${idx}`} className="px-2 text-surface-600 text-xs">…</span>
-                  ) : (
-                    <button key={item} onClick={() => { setPagina(item); resetScroll() }}
-                      className={`w-8 h-8 rounded-lg text-xs font-body font-medium transition-all
-                        ${item === pagina
-                          ? 'bg-brand-500 text-white'
-                          : 'text-surface-400 hover:bg-surface-700 hover:text-white'}`}>
-                      {item}
-                    </button>
-                  )
-                )}
-
-              <button onClick={() => { setPagina(v => Math.min(totalPaginas, v + 1)); resetScroll() }} disabled={pagina === totalPaginas}
-                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                Sig. ›
-              </button>
-              <button onClick={() => { setPagina(totalPaginas); resetScroll() }} disabled={pagina === totalPaginas}
-                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                »
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// ─── Ranking de productos por ingresos (paginado, Top 20 por página) ──────
-
-const PAGE_SIZE_INGRESOS = 20
-
-function RankingProductosPorIngresos({ productos, desde, hasta }) {
-  const [pagina, setPagina] = useState(1)
-
-  // Si cambia el período (nueva lista), volvemos a la página 1.
-  useEffect(() => { setPagina(1) }, [productos])
-  const { anchorRef: tableAnchorRef, scrollToStart } = useScrollAnchor()
-
-  const totalPaginas = Math.max(1, Math.ceil(productos.length / PAGE_SIZE_INGRESOS))
-  const inicio       = (pagina - 1) * PAGE_SIZE_INGRESOS
-  const pagItems     = productos.slice(inicio, inicio + PAGE_SIZE_INGRESOS)
-
-  return (
-    <div ref={tableAnchorRef}>
-    <Card className="p-6">
-      <h3 className="font-body font-semibold text-white text-sm mb-1 flex items-center gap-2">
-        <DollarSign size={15} className="text-brand-500" />
-        Productos con más ingresos
-      </h3>
-      <p className="text-surface-500 text-xs font-body mb-4">
-        {desde} → {hasta} · ordenado por monto facturado (cantidad × precio de venta)
-        {productos.length > 0 && ` · ${productos.length} producto${productos.length !== 1 ? 's' : ''} con ventas`}
-      </p>
-
-      {productos.length === 0 ? (
-        <p className="text-surface-500 text-sm font-body py-8 text-center">
-          No hay datos disponibles para el período seleccionado.
-        </p>
-      ) : (
-        <>
-          <table className="w-full text-sm font-body">
-            <thead>
-              <tr className="border-b border-surface-700">
-                <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-2 px-2 w-10">#</th>
-                <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-2 px-2">Producto</th>
-                <th className="text-right text-surface-400 text-xs tracking-widest uppercase py-2 px-2 w-24">Unidades</th>
-                <th className="text-right text-surface-400 text-xs tracking-widest uppercase py-2 px-2 w-36">Ingresos</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pagItems.map((p, i) => {
-                const rank = inicio + i + 1
-                const esTop3 = rank <= 3
-                return (
-                  <tr key={i} className="border-b border-surface-700/40 last:border-0 hover:bg-surface-700/30 transition-colors">
-                    <td className="py-2.5 px-2">
-                      <span className={`font-mono text-xs font-bold
-                        ${rank === 1 ? 'text-yellow-400' :
-                          rank === 2 ? 'text-surface-300' :
-                          rank === 3 ? 'text-brand-400' : 'text-surface-600'}`}>
-                        {rank}
-                      </span>
-                    </td>
-                    <td className="py-2.5 px-2">
-                      <span className={`${esTop3 ? 'text-white font-medium' : 'text-surface-200'} truncate block max-w-xs`}
-                        title={p.nombre}>
-                        {p.nombre}
-                      </span>
-                    </td>
-                    <td className="py-2.5 px-2 text-right">
-                      <span className="font-mono text-surface-300">{p.unidades} u.</span>
-                    </td>
-                    <td className="py-2.5 px-2 text-right">
-                      <span className={`font-mono font-bold ${esTop3 ? 'text-brand-400' : 'text-surface-200'}`}>
-                        {fmt(p.monto)}
-                      </span>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-
-          {totalPaginas > 1 && (
-            <div className="flex items-center justify-between pt-4 mt-2 border-t border-surface-700">
-              <span className="text-surface-500 text-xs font-body">
-                Página {pagina} de {totalPaginas} · {productos.length} productos
-              </span>
-              <div className="flex items-center gap-1">
-                <button onClick={() => { setPagina(v => Math.max(1, v - 1)); scrollToStart() }} disabled={pagina === 1}
-                  className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
-                             hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                  ‹ Ant.
-                </button>
-                <span className="px-2 text-xs font-body text-surface-300">{pagina} / {totalPaginas}</span>
-                <button onClick={() => { setPagina(v => Math.min(totalPaginas, v + 1)); scrollToStart() }} disabled={pagina === totalPaginas}
-                  className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
-                             hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                  Sig. ›
-                </button>
-              </div>
-            </div>
-          )}
-        </>
-      )}
-    </Card>
-    </div>
-  )
-}
-
-// ─── Gráfico de dona genérico (reemplaza GraficoMensual) ──────────────────
-
-function GraficoDonaGenerico({ datos, colores }) {
-  const COLORS = colores ?? ['#f97316','#3b82f6','#eab308','#10b981','#8b5cf6','#ec4899','#14b8a6','#f43f5e']
-  if (!datos.length || datos.every(d => d.valor === 0)) return (
-    <div className="flex items-center justify-center h-32 text-surface-500 text-sm font-body">Sin datos.</div>
-  )
-  const total = datos.reduce((a, d) => a + d.valor, 0)
-  const R = 50, CX = 65, CY = 65
-  let angle = -Math.PI / 2
-  const slices = datos.map((d, i) => {
-    const frac = d.valor / total
-    const start = angle
-    angle += frac * 2 * Math.PI
-    const end = angle
-    const x1 = CX + R * Math.cos(start), y1 = CY + R * Math.sin(start)
-    const x2 = CX + R * Math.cos(end),   y2 = CY + R * Math.sin(end)
-    const large = frac > 0.5 ? 1 : 0
-    return { ...d, path: `M${CX},${CY} L${x1},${y1} A${R},${R} 0 ${large},1 ${x2},${y2} Z`,
-             color: COLORS[i % COLORS.length], frac }
-  })
-  return (
-    <div className="flex items-center gap-6">
-      <svg viewBox="0 0 130 130" className="w-32 h-32 flex-shrink-0">
-        {slices.map((s, i) => (
-          <path key={i} d={s.path} fill={s.color} fillOpacity="0.9" stroke="#1a1a1a" strokeWidth="1.5" />
-        ))}
-        <circle cx={CX} cy={CY} r={R * 0.55} fill="#1a1a1a" />
-        <text x={CX} y={CY + 4} textAnchor="middle" fontSize="9" fill="#a3a3a3" fontFamily="DM Sans">
-          {datos.length} items
-        </text>
-      </svg>
-      <div className="space-y-1.5 flex-1">
-        {slices.map((s, i) => (
-          <div key={i} className="flex items-center justify-between text-xs font-body">
-            <span className="flex items-center gap-2 text-surface-300 truncate max-w-[55%]">
-              <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: s.color }} />
-              {s.label}
-            </span>
-            <span className="text-white font-mono">{(s.frac * 100).toFixed(1)}%</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-// ─── Dona de métodos de pago (SVG) ─────────────────────────────────────────
-
-function GraficoDona({ datos }) {
-  if (!datos.length || datos.every(d => d.monto === 0)) return (
-    <div className="flex items-center justify-center h-32 text-surface-500 text-sm font-body">
-      Sin datos.
-    </div>
-  )
-
-  const total  = datos.reduce((a, d) => a + d.monto, 0)
-  const COLORS = ['#f97316','#3b82f6','#eab308','#10b981','#8b5cf6']
-  const R      = 50
-  const CX     = 65
-  const CY     = 65
-
-  let angle = -Math.PI / 2
-  const slices = datos.map((d, i) => {
-    const frac  = d.monto / total
-    const start = angle
-    angle += frac * 2 * Math.PI
-    const end   = angle
-    const x1    = CX + R * Math.cos(start)
-    const y1    = CY + R * Math.sin(start)
-    const x2    = CX + R * Math.cos(end)
-    const y2    = CY + R * Math.sin(end)
-    const large = frac > 0.5 ? 1 : 0
-    return { ...d, path: `M${CX},${CY} L${x1},${y1} A${R},${R} 0 ${large},1 ${x2},${y2} Z`,
-             color: COLORS[i % COLORS.length], frac }
-  })
-
-  return (
-    <div className="flex items-center gap-6">
-      <svg viewBox="0 0 130 130" className="w-32 h-32 flex-shrink-0">
-        {slices.map((s, i) => (
-          <path key={i} d={s.path} fill={s.color} fillOpacity="0.9" stroke="#1a1a1a" strokeWidth="1.5" />
-        ))}
-        <circle cx={CX} cy={CY} r={R * 0.55} fill="#1a1a1a" />
-        <text x={CX} y={CY + 4} textAnchor="middle" fontSize="9" fill="#a3a3a3" fontFamily="DM Sans">
-          {datos.length} métodos
-        </text>
-      </svg>
-      <div className="space-y-2 flex-1">
-        {slices.map((s, i) => (
-          <div key={i} className="flex items-center justify-between text-xs font-body">
-            <span className="flex items-center gap-2 text-surface-300">
-              <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: s.color }} />
-              {s.label}
-            </span>
-            <span className="text-white font-mono">{(s.frac * 100).toFixed(1)}%</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-
-// ─── Modal: listado completo de demora de pago por cliente ────────────────
-// Escenario 2 (AC "Demora de Pago por Cliente"): permite ordenar de mayor a
-// menor demora (o por cualquier otra columna) cliqueando el encabezado.
-
-function ModalDemoraClientes({ open, onClose, clientes }) {
-  const [pagina, setPagina]   = useState(1)
-  const [sortKey, setSortKey] = useState('demoraPromedioDias')
-  const [sortDir, setSortDir] = useState('desc') // 'asc' | 'desc'
-  const scrollRef = useRef(null)
-
-  useEffect(() => { if (open) setPagina(1) }, [open])
-  const resetScroll = useResetScrollAnchor(scrollRef)
-
-  if (!open) return null
-
-  function toggleSort(key) {
-    setPagina(1)
-    if (key === sortKey) {
-      setSortDir(d => (d === 'desc' ? 'asc' : 'desc'))
-    } else {
-      setSortKey(key)
-      // Para nombre tiene más sentido arrancar A→Z; para las columnas
-      // numéricas arrancamos mostrando la más alta primero.
-      setSortDir(key === 'nombre' ? 'asc' : 'desc')
-    }
-  }
-
-  const ordenados = [...clientes].sort((a, b) => {
-    const va = a[sortKey]
-    const vb = b[sortKey]
-    if (typeof va === 'string') {
-      return sortDir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va)
-    }
-    return sortDir === 'asc' ? va - vb : vb - va
-  })
-
-  const totalPaginas = Math.max(1, Math.ceil(ordenados.length / PAGE_SIZE))
-  const inicio       = (pagina - 1) * PAGE_SIZE
-  const pagItems     = ordenados.slice(inicio, inicio + PAGE_SIZE)
-
-  const columnas = [
-    { key: 'nombre',             label: 'Cliente',      align: 'left'  },
-    { key: 'cantPagos',          label: 'Pagos CC',     align: 'right' },
-    { key: 'demoraPromedioDias', label: 'Demora prom.', align: 'right' },
-    { key: 'demoraMaximaDias',   label: 'Demora máx.',  align: 'right' },
-  ]
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/75" onClick={onClose} />
-      <div className="relative bg-surface-800 border border-surface-700 rounded-2xl shadow-2xl
-                      w-full max-w-3xl animate-slide-up flex flex-col max-h-[90vh]">
-
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-5 border-b border-surface-700 flex-shrink-0">
-          <div>
-            <h2 className="font-body font-semibold text-white flex items-center gap-2">
-              <Clock size={16} className="text-yellow-500" />
-              Demora de pago por cliente
-            </h2>
-            <p className="text-surface-500 text-xs font-body mt-0.5">
-              {clientes.length} cliente{clientes.length !== 1 ? 's' : ''} con Cuenta Corriente cobrada
-              · histórico completo · cliqueá una columna para ordenar
-            </p>
-          </div>
-          <button onClick={onClose}
-            className="text-surface-400 hover:text-white transition-colors text-2xl leading-none w-8 h-8
-                       flex items-center justify-center rounded-lg hover:bg-surface-700">
-            ×
-          </button>
-        </div>
-
-        {/* Tabla */}
-        <div ref={scrollRef} className="overflow-y-auto flex-1">
-          {clientes.length === 0 ? (
-            <div className="text-center py-16 text-surface-500 font-body text-sm px-6">
-              Todavía no hay saldos de Cuenta Corriente cobrados con fecha de vencimiento
-              registrada — la demora de pago se calcula solo sobre deuda ya saldada.
-            </div>
-          ) : (
-            <table className="w-full text-sm font-body">
-              <thead className="sticky top-0 bg-surface-800 z-10">
-                <tr className="border-b border-surface-700">
-                  <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-10">#</th>
-                  {columnas.map(col => (
-                    <th key={col.key}
-                      onClick={() => toggleSort(col.key)}
-                      className={`${col.align === 'right' ? 'text-right' : 'text-left'}
-                                  text-surface-400 text-xs tracking-widest uppercase py-3 px-4
-                                  cursor-pointer select-none hover:text-white transition-colors whitespace-nowrap`}>
-                      {col.label}
-                      {sortKey === col.key && (
-                        <span className="text-brand-400 ml-1">{sortDir === 'desc' ? '▼' : '▲'}</span>
-                      )}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {pagItems.map((c, i) => {
-                  const rank = inicio + i + 1
-                  return (
-                    <tr key={c.idCliente}
-                      className="border-b border-surface-700/40 last:border-0 hover:bg-surface-700/30 transition-colors">
-                      <td className="py-3 px-4">
-                        <span className="font-mono text-xs font-bold text-surface-600">{rank}</span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="text-surface-200 truncate block max-w-xs" title={c.nombre}>
-                          {c.nombre}{c.apodo ? ` (${c.apodo})` : ''}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        <span className="text-surface-300 font-mono">{c.cantPagos}</span>
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        <span className={`font-mono font-bold px-2 py-0.5 rounded-lg border text-xs ${colorDemora(c.demoraPromedioDias)}`}>
-                          {fmtDemora(c.demoraPromedioDias)}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        <span className="text-surface-400 font-mono text-xs">{fmtDemora(c.demoraMaximaDias)}</span>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          )}
-        </div>
-
-        {/* Paginación */}
-        {totalPaginas > 1 && (
-          <div className="flex items-center justify-between px-6 py-4 border-t border-surface-700 flex-shrink-0">
-            <span className="text-surface-500 text-xs font-body">
-              Página {pagina} de {totalPaginas} · {ordenados.length} clientes
-            </span>
-            <div className="flex items-center gap-1">
-              <button onClick={() => { setPagina(1); resetScroll() }} disabled={pagina === 1}
-                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                «
-              </button>
-              <button onClick={() => { setPagina(v => Math.max(1, v - 1)); resetScroll() }} disabled={pagina === 1}
-                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                ‹ Ant.
-              </button>
-
-              {Array.from({ length: totalPaginas }, (_, i) => i + 1)
-                .filter(p => p === 1 || p === totalPaginas || Math.abs(p - pagina) <= 2)
-                .reduce((acc, p, idx, arr) => {
-                  if (idx > 0 && p - arr[idx - 1] > 1) acc.push('…')
-                  acc.push(p)
-                  return acc
-                }, [])
-                .map((item, idx) =>
-                  item === '…' ? (
-                    <span key={`sep-${idx}`} className="px-2 text-surface-600 text-xs">…</span>
-                  ) : (
-                    <button key={item} onClick={() => { setPagina(item); resetScroll() }}
-                      className={`w-8 h-8 rounded-lg text-xs font-body font-medium transition-all
-                        ${item === pagina
-                          ? 'bg-brand-500 text-white'
-                          : 'text-surface-400 hover:bg-surface-700 hover:text-white'}`}>
-                      {item}
-                    </button>
-                  )
-                )}
-
-              <button onClick={() => { setPagina(v => Math.min(totalPaginas, v + 1)); resetScroll() }} disabled={pagina === totalPaginas}
-                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                Sig. ›
-              </button>
-              <button onClick={() => { setPagina(totalPaginas); resetScroll() }} disabled={pagina === totalPaginas}
-                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                »
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// ─── Modal: drill-down del KPI global "Ticket promedio" por cliente ───────
-// Historia: clic en el indicador global "Ticket Promedio" del dashboard →
-// listado con el ticket promedio individual de cada cliente.
-//
-// Escenario 1 (AC): se dispara desde `onClick` del KpiCard correspondiente.
-// Escenario 3 (AC): ordenamiento por columna (como ModalDemoraClientes) +
-//                    búsqueda por nombre/apodo. La búsqueda se resuelve del
-//                    lado del servidor (ver `obtenerTicketPromedioPorCliente`
-//                    → RPC `fn_ticket_promedio_por_cliente`), debounceada acá
-//                    con el hook compartido `useDebounce` para no disparar
-//                    una consulta por cada tecla.
-// Escenario 4 (AC): un cliente sin compras se ve con "$0" — lo resuelve la
-//                    propia RPC, acá solo se muestra tal cual llega.
-//
-// Carga bajo demanda: a diferencia de ModalTopProductos/ModalDemoraClientes
-// (que reciben datos ya calculados en `obtenerMetricas`), este modal cubre
-// TODOS los clientes activos — una consulta más pesada que no tiene sentido
-// pagar en cada carga del dashboard si el usuario nunca hace drill-down
-// (YAGNI). Por eso dispara su propio fetch al abrirse.
-//
-// NOTA sobre el reset de estado al reabrir: como el resto de los overlays de
-// esta pantalla, el componente queda montado y solo retorna `null` cuando
-// `open` es false, así que su estado interno sobreviviría entre aperturas.
-// El resto de los modales lo resuelven con `useEffect(() => { if (open)
-// setPagina(1) }, [open])`, pero acá eso no alcanza: `useDebounce` mantiene
-// su propio estado interno, así que resetear `busqueda` dejaría al hook
-// sirviendo el término viejo por 400ms más, con el input ya en blanco.
-// Por eso el padre le pasa una `key` que cambia en cada apertura: React
-// destruye la instancia vieja y monta una nueva con estado limpio de
-// fábrica, sin ningún efecto de reseteo manual.
-
-function ModalTicketPromedioClientes({ open, onClose, desde, hasta, formatoMonto }) {
-  const [datos, setDatos]       = useState([])
-  const [cargando, setCargando] = useState(false)
-  const [error, setError]       = useState(null)
-
-  // `busqueda`: valor crudo del input, se actualiza en cada tecla para que
-  // el campo se sienta responsive. `busquedaEfectiva`: lo que realmente se
-  // manda al servidor, recién cuando el usuario deja de tipear.
-  const [busqueda, setBusqueda] = useState('')
-  const busquedaEfectiva        = useDebounce(busqueda.trim(), 400)
-
-  const [pagina, setPagina]   = useState(1)
-  const [sortKey, setSortKey] = useState('ticketPromedio')
-  const [sortDir, setSortDir] = useState('desc') // 'asc' | 'desc'
-
-  useLockBodyScroll(open)
-  const scrollRef = useAutoFocusScrollable(open)
-  const resetScroll = useResetScrollAnchor(scrollRef)
-
-  const cargarDatos = useCallback((termino) => {
-    if (!desde || !hasta) return
-    setCargando(true)
-    setError(null)
-    obtenerTicketPromedioPorCliente(desde, hasta, termino)
-      .then(setDatos)
-      .catch(e => {
-        console.error('[ModalTicketPromedioClientes]', e)
-        setError('No se pudo cargar el detalle por cliente. Intentá de nuevo.')
-      })
-      .finally(() => setCargando(false))
-  }, [desde, hasta])
-
-  // Dispara la consulta: al montar (primera apertura, gracias a la `key` del
-  // padre), si cambia el período vigente, o cuando el término debounced
-  // efectivamente cambió.
-  useEffect(() => {
-    if (!open) return
-    setPagina(1)
-    cargarDatos(busquedaEfectiva)
-  }, [open, desde, hasta, busquedaEfectiva, cargarDatos])
-
-  if (!open) return null
-
-  function toggleSort(key) {
-    setPagina(1)
-    if (key === sortKey) {
-      setSortDir(d => (d === 'desc' ? 'asc' : 'desc'))
-    } else {
-      setSortKey(key)
-      // Para nombre tiene más sentido arrancar A→Z; para las columnas
-      // numéricas arrancamos mostrando la más alta primero.
-      setSortDir(key === 'nombre' ? 'asc' : 'desc')
-    }
-  }
-
-  // El filtrado por nombre/apodo ya vino resuelto por la RPC — acá solo
-  // queda ordenar el resultado (conjunto acotado por la búsqueda, barato de
-  // ordenar en el navegador incluso con miles de clientes activos).
-  const ordenados = [...datos].sort((a, b) => {
-    const va = a[sortKey]
-    const vb = b[sortKey]
-    if (typeof va === 'string') {
-      return sortDir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va)
-    }
-    return sortDir === 'asc' ? va - vb : vb - va
-  })
-
-  const totalPaginas = Math.max(1, Math.ceil(ordenados.length / PAGE_SIZE))
-  const inicio       = (pagina - 1) * PAGE_SIZE
-  const pagItems     = ordenados.slice(inicio, inicio + PAGE_SIZE)
-
-  const columnas = [
-    { key: 'nombre',         label: 'Cliente',         align: 'left'  },
-    { key: 'presupuestos',   label: 'Tickets',         align: 'right' },
-    { key: 'ticketPromedio', label: 'Ticket promedio', align: 'right' },
-  ]
-
-  // Solo la primera carga (todavía sin datos) bloquea la vista con spinner.
-  // Las búsquedas subsiguientes atenúan la tabla existente en vez de
-  // blanquearla — se siente más fluido mientras se tipea.
-  const cargandoInicial = cargando && datos.length === 0
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/75" onClick={onClose} />
-      <div className="relative bg-surface-800 border border-surface-700 rounded-2xl shadow-2xl
-                      w-full max-w-3xl animate-slide-up flex flex-col max-h-[90vh]"
-        role="dialog" aria-modal="true" aria-labelledby="modal-ticket-promedio-titulo">
-
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-5 border-b border-surface-700 flex-shrink-0 gap-4">
-          <div className="min-w-0">
-            <h2 id="modal-ticket-promedio-titulo"
-              className="font-body font-semibold text-white flex items-center gap-2">
-              <BarChart2 size={16} className="text-blue-400" />
-              Ticket promedio por cliente
-            </h2>
-            <p className="text-surface-500 text-xs font-body mt-0.5">
-              {cargandoInicial
-                ? 'Calculando…'
-                : `${ordenados.length} cliente${ordenados.length !== 1 ? 's' : ''}` +
-                  (busquedaEfectiva ? ` · filtrado por "${busquedaEfectiva}"` : '') +
-                  ' · cliqueá una columna para ordenar'}
-              {!cargandoInicial && cargando && (
-                <span className="ml-2 text-brand-400/80">Buscando…</span>
-              )}
-            </p>
-          </div>
-          <button onClick={onClose} aria-label="Cerrar"
-            className="text-surface-400 hover:text-white transition-colors text-2xl leading-none w-8 h-8
-                       flex items-center justify-center rounded-lg hover:bg-surface-700 flex-shrink-0">
-            ×
-          </button>
-        </div>
-
-        {/* Búsqueda */}
-        <div className="px-6 py-3 border-b border-surface-700 flex-shrink-0">
-          <label htmlFor="buscar-cliente-ticket" className="sr-only">Buscar cliente por nombre</label>
-          <input
-            id="buscar-cliente-ticket"
-            type="text"
-            value={busqueda}
-            onChange={e => setBusqueda(e.target.value)}
-            placeholder="Buscar cliente por nombre o apodo…"
-            autoComplete="off"
-            className="w-full bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
-                       font-body focus:outline-none focus:border-brand-500 placeholder:text-surface-500"
-          />
-        </div>
-
-        {/* Tabla / estados */}
-        <div ref={scrollRef} tabIndex={-1} aria-live="polite"
-          className="overflow-y-auto overscroll-contain flex-1 focus:outline-none">
-          {cargandoInicial ? (
-            <div className="flex items-center justify-center py-16" role="status">
-              <div className="w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
-              <span className="sr-only">Cargando ticket promedio por cliente…</span>
-            </div>
-          ) : error ? (
-            <div className="text-center py-16 px-6" role="alert">
-              <p className="text-red-400 font-body text-sm mb-3">{error}</p>
-              <button onClick={() => cargarDatos(busquedaEfectiva)}
-                className="px-4 py-2 rounded-xl text-sm font-body border border-surface-600
-                           text-surface-200 hover:border-brand-500/50 hover:text-white transition-all">
-                Reintentar
-              </button>
-            </div>
-          ) : ordenados.length === 0 ? (
-            <div className="text-center py-16 text-surface-500 font-body text-sm px-6">
-              {busquedaEfectiva
-                ? `Sin resultados para "${busquedaEfectiva}".`
-                : 'No hay clientes activos para mostrar.'}
-            </div>
-          ) : (
-            <table className={`w-full text-sm font-body transition-opacity ${cargando ? 'opacity-50 pointer-events-none' : ''}`}>
-              <thead className="sticky top-0 bg-surface-800 z-10">
-                <tr className="border-b border-surface-700">
-                  <th className="text-left text-surface-400 text-xs tracking-widest uppercase py-3 px-4 w-10">#</th>
-                  {columnas.map(col => (
-                    <th key={col.key} scope="col"
-                      aria-sort={sortKey === col.key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
-                      className={`${col.align === 'right' ? 'text-right' : 'text-left'}
-                                  text-surface-400 text-xs tracking-widest uppercase py-1 px-2 whitespace-nowrap`}>
-                      <button onClick={() => toggleSort(col.key)}
-                        className="inline-flex items-center gap-1 py-2 px-2 rounded-lg hover:text-white
-                                   hover:bg-surface-700/60 transition-colors focus:outline-none
-                                   focus-visible:ring-2 focus-visible:ring-brand-500/60">
-                        {col.label}
-                        {sortKey === col.key && (
-                          <span className="text-brand-400" aria-hidden="true">{sortDir === 'desc' ? '▼' : '▲'}</span>
-                        )}
-                      </button>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {pagItems.map((c, i) => {
-                  const rank = inicio + i + 1
-                  return (
-                    <tr key={c.idCliente ?? `sin-cliente-${rank}`}
-                      className="border-b border-surface-700/40 last:border-0 hover:bg-surface-700/30 transition-colors">
-                      <td className="py-3 px-4">
-                        <span className="font-mono text-xs font-bold text-surface-600">{rank}</span>
-                      </td>
-                      <td className="py-3 px-4">
-                        <span className="text-surface-200 truncate block max-w-xs" title={c.nombre}>
-                          {c.nombre}{c.apodo ? ` (${c.apodo})` : ''}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        <span className="text-surface-300 font-mono">{c.presupuestos}</span>
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        <span className={`font-mono font-bold ${c.presupuestos === 0 ? 'text-surface-500' : 'text-blue-400'}`}>
-                          {formatoMonto(c.ticketPromedio)}
-                        </span>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          )}
-        </div>
-
-        {/* Paginación */}
-        {!cargandoInicial && !error && totalPaginas > 1 && (
-          <div className={`flex items-center justify-between px-6 py-4 border-t border-surface-700 flex-shrink-0
-                            transition-opacity ${cargando ? 'opacity-50 pointer-events-none' : ''}`}>
-            <span className="text-surface-500 text-xs font-body">
-              Página {pagina} de {totalPaginas} · {ordenados.length} clientes
-            </span>
-            <div className="flex items-center gap-1">
-              <button onClick={() => { setPagina(1); resetScroll() }} disabled={pagina === 1}
-                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                «
-              </button>
-              <button onClick={() => { setPagina(v => Math.max(1, v - 1)); resetScroll() }} disabled={pagina === 1}
-                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                ‹ Ant.
-              </button>
-
-              {Array.from({ length: totalPaginas }, (_, i) => i + 1)
-                .filter(p => p === 1 || p === totalPaginas || Math.abs(p - pagina) <= 2)
-                .reduce((acc, p, idx, arr) => {
-                  if (idx > 0 && p - arr[idx - 1] > 1) acc.push('…')
-                  acc.push(p)
-                  return acc
-                }, [])
-                .map((item, idx) =>
-                  item === '…' ? (
-                    <span key={`sep-${idx}`} className="px-2 text-surface-600 text-xs">…</span>
-                  ) : (
-                    <button key={item} onClick={() => { setPagina(item); resetScroll() }}
-                      className={`w-8 h-8 rounded-lg text-xs font-body font-medium transition-all
-                        ${item === pagina
-                          ? 'bg-brand-500 text-white'
-                          : 'text-surface-400 hover:bg-surface-700 hover:text-white'}`}>
-                      {item}
-                    </button>
-                  )
-                )}
-
-              <button onClick={() => { setPagina(v => Math.min(totalPaginas, v + 1)); resetScroll() }} disabled={pagina === totalPaginas}
-                className="px-3 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                Sig. ›
-              </button>
-              <button onClick={() => { setPagina(totalPaginas); resetScroll() }} disabled={pagina === totalPaginas}
-                className="px-2.5 py-1.5 rounded-lg text-xs font-body text-surface-400
-                           hover:bg-surface-700 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-all">
-                »
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// ─── Componente principal ──────────────────────────────────────────────────
-
-const RANGOS = [
-  { label: 'Este mes',       desde: () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01` }, hasta: today },
-  { label: 'Últ. 3 meses',  desde: () => nMesesAtras(3),  hasta: today },
-  { label: 'Últ. 6 meses',  desde: () => nMesesAtras(6),  hasta: today },
-  { label: 'Últ. 12 meses', desde: () => nMesesAtras(12), hasta: today },
-  { label: 'Personalizado',  desde: null, hasta: null },
-]
+import { PageHeader, Button, Card } from '../components/ui'
+import KpiCard, { KpiGrid } from '../components/estadisticas/KpiCard'
+import SeccionCard from '../components/estadisticas/SeccionCard'
+import BarrasHorizontales from '../components/estadisticas/BarrasHorizontales'
+import GraficoDona from '../components/estadisticas/GraficoDona'
+import PanelFiltros from '../components/estadisticas/PanelFiltros'
+import RankingProductosIngresos from '../components/estadisticas/RankingProductosIngresos'
+import {
+  ModalTopProductos, ModalProductosIncompletos, ModalDemoraClientes, ModalTicketPromedioClientes,
+} from '../components/estadisticas/ModalesEstadisticas'
+import { colorDemora, fmt, fmtCompacto, fmtDemora, pct } from '../components/estadisticas/formatters'
+import { useFiltrosEstadisticas } from '../hooks/useFiltrosEstadisticas'
+import { useMetricasEstadisticas } from '../hooks/useMetricasEstadisticas'
+import { useOnlineStatus } from '../hooks/useOnlineStatus'
+
+const TOQUE = 'justify-center min-h-[44px] min-[1025px]:min-h-0'
+const GRID_2 = 'grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-4'
+const SIN_DATOS = (t) => <p className="text-surface-500 text-sm font-body">{t}</p>
 
 export default function Estadisticas() {
   const [mostrarExacto, setMostrarExacto] = useState(false)
-  const [rangoIdx,  setRangoIdx]  = useState(0)
-  const [desdeCustom, setDesdeCustom] = useState('')
-  const [hastaCustom, setHastaCustom] = useState(today())
-  const [metricas,       setMetricas]       = useState(null)
-  const [cargando,       setCargando]       = useState(false)
-  const [modalProductos, setModalProductos] = useState(false)
-  const [modalIncompletos, setModalIncompletos] = useState(false)
-  const [modalDemora,      setModalDemora]      = useState(false)
-  const [modalTicketPromedio, setModalTicketPromedio] = useState(false)
-  // Se incrementa en cada apertura y se usa como `key` del modal más abajo:
-  // fuerza a React a destruir la instancia anterior y montar una nueva con
-  // estado de fábrica (búsqueda vacía, debounce sin arrastrar el término
-  // anterior, página 1) en vez de tener que resetear todo eso a mano.
-  const [ticketPromedioInstancia, setTicketPromedioInstancia] = useState(0)
+  const { filtros, desde, hasta, aplicar, limpiar } = useFiltrosEstadisticas()
+  const { metricas: m, periodo, cargando, error, recargar } = useMetricasEstadisticas(desde, hasta)
+  const online = useOnlineStatus()
 
-  const desde = rangoIdx < 4 ? RANGOS[rangoIdx].desde() : desdeCustom
-  const hasta = rangoIdx < 4 ? RANGOS[rangoIdx].hasta() : hastaCustom
+  const [modal, setModal] = useState(null) // 'productos' | 'incompletos' | 'demora' | 'ticket' | null
+  // Cada apertura del modal de ticket usa una `key` nueva → instancia limpia (búsqueda vacía).
+  const [instanciaTicket, setInstanciaTicket] = useState(0)
+  const cerrar = useCallback(() => setModal(null), [])
+  const abrirTicket = () => { setInstanciaTicket((v) => v + 1); setModal('ticket') }
 
-  const cargar = useCallback(async () => {
-    if (!desde || !hasta) return
-    setCargando(true)
-    try {
-      const resultado = await obtenerMetricas(desde, hasta)
-      setMetricas(resultado)
-    } catch(e) {
-      console.error('Error calculando métricas:', e)
-    } finally {
-      setCargando(false)
-    }
-  }, [desde, hasta])
-
-  useEffect(() => { cargar() }, [cargar])
-
-  if (!metricas || cargando) return (
-    <div className="flex items-center justify-center h-64">
-      <div className="w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
-    </div>
-  )
-
-  const m = metricas
   const formatoMonto = mostrarExacto ? fmt : fmtCompacto
-  const maxProducto = m.topProductos[0]?.unidades ?? 1
-  const maxCliente  = m.topClientes[0]?.monto ?? 1
+
+  // ── Estados límite: primera carga y error sin datos ───────────────────────
+  if (!m) {
+    return (
+      <div className="max-w-6xl mx-auto space-y-4">
+        <PageHeader title="Estadísticas" subtitle="Panel de métricas" />
+        {error ? (
+          <Card className="p-6 text-center" >
+            <div role="alert">
+              <AlertTriangle size={28} className="mx-auto mb-3 text-red-400" aria-hidden="true" />
+              <p className="text-surface-200 text-sm font-body mb-4">{error}</p>
+            </div>
+            <Button onClick={recargar} icon={RefreshCw} className={TOQUE}>Reintentar</Button>
+          </Card>
+        ) : (
+          <div className="flex items-center justify-center h-64" role="status">
+            <div className="w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+            <span className="sr-only">Cargando estadísticas…</span>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // Los títulos muestran el período de los DATOS que se ven (no el pedido), así nunca se desfasan.
+  const pDesde = periodo?.desde ?? desde
+  const pHasta = periodo?.hasta ?? hasta
+  const listaPrecio = m.facturadoTotal + m.descuentosOtorgados - m.recargosCC
+  const topProductos = m.topProductos.map((p, i) => ({ label: `${i + 1}. ${p.nombre}`, value: p.unidades, sublabel: fmt(p.monto) }))
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
+    <div className="max-w-6xl mx-auto space-y-4 sm:space-y-6 min-w-0" aria-busy={cargando}>
       <PageHeader title="Estadísticas" subtitle="Panel de métricas"
-        actions={
-          <div className="flex items-center gap-2">
-            <Button
-              variant="secondary"
-              onClick={() => setMostrarExacto(v => !v)}
-            >
-              {mostrarExacto ? 'Ver montos resumidos' : 'Ver montos exactos'}
-            </Button>
-          </div>
-        }
-      />
+        actions={(
+          <Button variant="secondary" aria-pressed={mostrarExacto} className={TOQUE}
+            onClick={() => setMostrarExacto((v) => !v)}>
+            {mostrarExacto ? 'Ver montos resumidos' : 'Ver montos exactos'}
+          </Button>
+        )} />
 
-      {/* Selector de rango */}
-      <Card className="p-4">
-        <div className="flex flex-wrap gap-2 items-center">
-          {RANGOS.map((r, i) => (
-            <button key={i} onClick={() => setRangoIdx(i)}
-              className={`px-4 py-2 rounded-xl text-sm font-body transition-all border
-                ${rangoIdx === i
-                  ? 'bg-brand-500/15 border-brand-500/40 text-white'
-                  : 'bg-surface-700 border-surface-600 text-surface-400 hover:border-surface-500'}`}>
-              {r.label}
+      <PanelFiltros filtros={filtros} desde={desde} hasta={hasta} onAplicar={aplicar} onLimpiar={limpiar} />
+
+      {/* Estados de red: offline y error de recarga (se conservan los últimos datos). */}
+      {!online && (
+        <div role="status" className="flex items-center gap-2 rounded-xl border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-yellow-400 text-sm font-body">
+          <WifiOff size={16} className="flex-shrink-0" aria-hidden="true" />
+          Sin conexión. Los datos mostrados pueden estar desactualizados.
+        </div>
+      )}
+      {error && (
+        <div role="alert" className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3">
+          <p className="text-red-400 text-sm font-body">{error}</p>
+          <Button variant="secondary" onClick={recargar} icon={RefreshCw} className={TOQUE}>Reintentar</Button>
+        </div>
+      )}
+      {cargando && <p role="status" className="text-brand-400/80 text-xs font-body">Actualizando…</p>}
+
+      <div className={`space-y-4 sm:space-y-6 transition-opacity ${cargando ? 'opacity-60' : ''}`}>
+        {/* ── KPIs ── */}
+        <KpiGrid label="Indicadores principales">
+          <KpiCard icon={TrendingUp} label="Presupuestado" value={formatoMonto(m.totalCotizado)} color="brand"
+            sub={`${m.cantidadCotizaciones} presupuesto${m.cantidadCotizaciones !== 1 ? 's' : ''}${m.totalRechazados ? ` · ${m.totalRechazados} rechazado${m.totalRechazados !== 1 ? 's' : ''}` : ''}`} />
+          <KpiCard icon={Wallet} label="Cobrado" value={formatoMonto(m.cobradoReal)} color="green"
+            sub="efectivo + transferencia + saldos" />
+          <KpiCard icon={TrendingDown} label="Egresos pagados" value={formatoMonto(m.egresosTotal)} color="red"
+            sub={`pedidos ${formatoMonto(m.egresosPedidos)} · extra ${formatoMonto(m.egresosExtra)}`} />
+          <KpiCard icon={m.resultadoEstimado >= 0 ? TrendingUp : TrendingDown} label="Resultado operativo"
+            value={formatoMonto(m.resultadoEstimado)} color={m.resultadoEstimado >= 0 ? 'green' : 'red'}
+            tono={m.resultadoEstimado >= 0 ? 'positivo' : 'negativo'} sub="ventas + ingresos − egresos" />
+        </KpiGrid>
+
+        <KpiGrid label="Pendientes y alertas">
+          <KpiCard icon={Clock} label="Pedidos pendientes" color="yellow" value={formatoMonto(m.pedidosPendientes)} sub="deuda con proveedores" />
+          <KpiCard icon={Clock} label="Saldos Pendientes CC" color="yellow" value={formatoMonto(m.pendienteCC)} sub="Saldos sin cobrar" />
+          <KpiCard icon={Tag} label="Descuentos dados" color="yellow" value={formatoMonto(m.descuentosOtorgados)}
+            sub={`${pct(m.descuentosOtorgados, listaPrecio)} del precio de lista`} />
+          <KpiCard icon={AlertTriangle} label="Stock crítico" color="yellow" value={m.cantidadStockCritico}
+            sub="productos bajo punto de repo." />
+        </KpiGrid>
+
+        <KpiGrid label="Inversión y clientes">
+          <KpiCard icon={PiggyBank} label="Dinero invertido" color="violet" value={formatoMonto(m.dineroInvertido)} sub="neto activo (global)" />
+          <KpiCard icon={TrendingUp} label="Ingresos extra" color="green" value={formatoMonto(m.ingresosExtra)} sub="FCI, plazo fijo, etc." />
+          <KpiCard icon={BarChart2} label="Ticket promedio" color="blue" value={formatoMonto(m.ticketPromedio)} sub="por presupuesto"
+            onClick={abrirTicket} drillDownLabel="Ver por cliente" />
+          <KpiCard icon={Users} label="Clientes únicos" color="blue" value={m.clientesUnicos} sub="en el período" />
+        </KpiGrid>
+
+        {/* ── Valor actual del inventario ── */}
+        <SeccionCard icon={Boxes} titulo="Valor Actual del Inventario"
+          descripcion="Stock activo al día de hoy · no depende del rango de fechas seleccionado arriba">
+          <div className={GRID_2}>
+            <div className="bg-surface-700/40 border border-surface-600 rounded-xl p-4 sm:p-5 min-w-0">
+              <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Valor a Costo (Proveedor)</p>
+              <p className="font-mono font-bold text-white text-xl sm:text-2xl break-words">{formatoMonto(m.valorInventarioCosto)}</p>
+              <p className="text-surface-500 text-xs font-body mt-1">Capital invertido en stock</p>
+            </div>
+            <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4 sm:p-5 min-w-0">
+              <p className="text-emerald-400 text-xs uppercase tracking-widest font-body mb-1">Valor a Precio de Venta</p>
+              <p className="font-mono font-bold text-emerald-400 text-xl sm:text-2xl break-words">{formatoMonto(m.valorInventarioVenta)}</p>
+              <p className="text-surface-500 text-xs font-body mt-1">Potencial de ingresos si se vendiera todo el stock</p>
+            </div>
+          </div>
+
+          {m.cantidadProductosValorIncompleto > 0 && (
+            <button type="button" onClick={() => setModal('incompletos')}
+              className="mt-4 w-full min-h-[44px] flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between
+                         bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3 hover:bg-yellow-500/15
+                         transition-all text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-yellow-500/60">
+              <span className="flex items-start gap-2 text-yellow-400 text-xs font-body">
+                <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" aria-hidden="true" />
+                {m.cantidadProductosValorIncompleto} producto{m.cantidadProductosValorIncompleto !== 1 ? 's' : ''} con
+                stock y precio incompleto — {m.cantidadProductosValorIncompleto !== 1 ? 'se calcularon' : 'se calculó'} como $0 en esa valorización
+              </span>
+              <span className="text-yellow-400/70 text-xs font-body whitespace-nowrap">Ver detalle →</span>
             </button>
-          ))}
-
-          {rangoIdx === 4 && (
-            <div className="flex items-center gap-2 ml-2">
-              <input type="date" value={desdeCustom} onChange={e => setDesdeCustom(e.target.value)}
-                className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
-                           font-body focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
-              <span className="text-surface-500 text-sm">→</span>
-              <input type="date" value={hastaCustom} onChange={e => setHastaCustom(e.target.value)}
-                className="bg-surface-700 border border-surface-600 rounded-xl px-3 py-2 text-white text-sm
-                           font-body focus:outline-none focus:border-brand-500 [color-scheme:dark]" />
-              <button
-                onClick={() => { setRangoIdx(0); setDesdeCustom(''); setHastaCustom(today()) }}
-                className="px-3 py-2 rounded-xl text-sm font-body border bg-surface-700 border-surface-600
-                           text-surface-400 hover:border-red-500/50 hover:text-red-400 transition-all"
-              >
-                Limpiar Filtros
-              </button>
-            </div>
           )}
-        </div>
-      </Card>
+        </SeccionCard>
 
-      {/* ── KPIs principales ── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KpiCard icon={TrendingUp}  label="Presupuestado"       value={formatoMonto(m.totalCotizado)}   color="brand"
-          sub={`${m.cantidadCotizaciones} presupuesto${m.cantidadCotizaciones!==1?'s':''}${m.totalRechazados ? ` · ${m.totalRechazados} rechazado${m.totalRechazados!==1?'s':''}` : ''}`} />
-        <KpiCard icon={Wallet}      label="Cobrado real"    value={formatoMonto(m.cobradoReal)}       color="green"
-          sub={`${pct(m.cobradoReal, m.facturadoTotal)} del total`} />
-        <KpiCard icon={TrendingDown} label="Egresos pagados" value={formatoMonto(m.egresosTotal)} color="red"
-          sub={`pedidos ${formatoMonto(m.egresosPedidos)} · extra ${formatoMonto(m.egresosExtra)}`} />
-        <KpiCard icon={m.resultadoEstimado >= 0 ? TrendingUp : TrendingDown}
-          label="Resultado operativo" value={formatoMonto(m.resultadoEstimado)}
-          color={m.resultadoEstimado >= 0 ? 'green' : 'red'}
-          sub="ventas + ingresos − egresos" />
-      </div>
+        {/* ── Métodos de pago + egresos por categoría ── */}
+        <div className={GRID_2}>
+          <SeccionCard icon={CreditCard} titulo="Métodos de Pago">
+            <GraficoDona unidad="métodos" formatoValor={fmt}
+              datos={m.mixMetodos.map((mp) => ({ label: mp.label, valor: mp.monto }))} />
+          </SeccionCard>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KpiCard icon={Clock} label="Pedidos pendientes" color="yellow"
-          value={formatoMonto(m.pedidosPendientes)}
-          sub="deuda con proveedores" />
-        <KpiCard icon={Clock}       label="Saldos Pendientes CC"    value={formatoMonto(m.pendienteCC)}       color="yellow"
-          sub="Saldos sin cobrar" />
-        <KpiCard icon={Tag}         label="Descuentos dados" value={formatoMonto(m.descuentosOtorgados)} color="yellow"
-          sub={`${pct(m.descuentosOtorgados, m.facturadoTotal + m.descuentosOtorgados - m.recargosCC)} del precio de lista`} />
-        <KpiCard icon={AlertTriangle} label="Stock crítico" color="yellow"
-          value={m.cantidadStockCritico}
-          sub="productos bajo punto de repo." />
-      </div>
-
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <KpiCard icon={PiggyBank}   label="Dinero invertido"  value={formatoMonto(m.dineroInvertido)} color="violet"
-          sub="neto activo (global)" />
-        <KpiCard icon={TrendingUp}  label="Ingresos extra"    value={formatoMonto(m.ingresosExtra)}  color="green"
-          sub="FCI, plazo fijo, etc." />
-        <KpiCard icon={BarChart2}   label="Ticket promedio" value={formatoMonto(m.ticketPromedio)}    color="blue"
-          sub="por presupuesto"
-          onClick={() => { setTicketPromedioInstancia(v => v + 1); setModalTicketPromedio(true) }}
-          drillDownLabel="Ver por cliente" />
-        <KpiCard icon={Users}       label="Clientes únicos"  value={m.clientesUnicos}               color="blue"
-          sub="en el período" />
-      </div>
-
-      {/* ── Valor actual del inventario ── */}
-      <Card className="p-6">
-        <h3 className="font-body font-semibold text-white text-sm mb-1 flex items-center gap-2">
-          <Boxes size={15} className="text-brand-500" />
-          Valor Actual del Inventario
-        </h3>
-        <p className="text-surface-500 text-xs font-body mb-5">
-          Stock activo al día de hoy · no depende del rango de fechas seleccionado arriba
-        </p>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="bg-surface-700/40 border border-surface-600 rounded-xl p-5">
-            <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">
-              Valor a Costo (Proveedor)
-            </p>
-            <p className="font-mono font-bold text-white text-2xl">
-              {formatoMonto(m.valorInventarioCosto)}
-            </p>
-            <p className="text-surface-500 text-xs font-body mt-1">Capital invertido en stock</p>
-          </div>
-          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-5">
-            <p className="text-emerald-400 text-xs uppercase tracking-widest font-body mb-1">
-              Valor a Precio de Venta
-            </p>
-            <p className="font-mono font-bold text-emerald-400 text-2xl">
-              {formatoMonto(m.valorInventarioVenta)}
-            </p>
-            <p className="text-surface-500 text-xs font-body mt-1">
-              Potencial de ingresos si se vendiera todo el stock
-            </p>
-          </div>
+          <SeccionCard icon={PieChart} titulo="Egresos por categoría">
+            {m.egresosPorCategoria.length === 0 ? SIN_DATOS('Sin egresos en el período.') : (
+              <GraficoDona unidad="items" formatoValor={formatoMonto}
+                datos={m.egresosPorCategoria.map((e) => ({ label: e.label, valor: e.monto }))} />
+            )}
+          </SeccionCard>
         </div>
 
-        {m.cantidadProductosValorIncompleto > 0 && (
-          <button
-            onClick={() => setModalIncompletos(true)}
-            className="mt-4 w-full flex items-center justify-between gap-2 bg-yellow-500/10
-                       border border-yellow-500/30 rounded-xl px-4 py-3
-                       hover:bg-yellow-500/15 transition-all group text-left"
-          >
-            <span className="flex items-center gap-2 text-yellow-400 text-xs font-body">
-              <AlertTriangle size={14} className="flex-shrink-0" />
-              {m.cantidadProductosValorIncompleto} producto{m.cantidadProductosValorIncompleto !== 1 ? 's' : ''} con
-              stock y precio incompleto — {m.cantidadProductosValorIncompleto !== 1 ? 'se calcularon' : 'se calculó'} como
-              $0 en esa valorización
-            </span>
-            <span className="text-yellow-400/70 text-xs font-body whitespace-nowrap
-                             group-hover:text-yellow-300 transition-colors">
-              Ver detalle →
-            </span>
-          </button>
-        )}
-      </Card>
+        {/* ── Top artículos + top clientes ── */}
+        <div className={GRID_2}>
+          <SeccionCard icon={Package} titulo="Top artículos más vendidos"
+            descripcion={`Top 10 · ${m.todosProductosVendidos?.length ?? 0} artículos en total`}
+            accion={{ label: 'Ver todos', onClick: () => setModal('productos') }}>
+            {m.topProductos.length === 0 ? SIN_DATOS('Sin ventas en el período.')
+              : <BarrasHorizontales items={topProductos} fmtFn={(v) => `${v} u.`} />}
+          </SeccionCard>
 
-      <ModalProductosIncompletos
-        open={modalIncompletos}
-        onClose={() => setModalIncompletos(false)}
-        productos={m.productosValorIncompleto ?? []}
-      />
+          <SeccionCard icon={Users} titulo="Top 10 clientes por volumen">
+            {m.topClientes.length === 0 ? SIN_DATOS('Sin datos en el período.') : (
+              <BarrasHorizontales
+                items={m.topClientes.map((c, i) => ({ label: `${i + 1}. ${c.nombre}`, value: c.monto, sublabel: `${c.presupuestos} pres.` }))} />
+            )}
+          </SeccionCard>
+        </div>
 
-      {/* ── 1. Métodos de Pago + Egresos por categoría ── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card className="p-6">
-          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
-            <CreditCard size={15} className="text-brand-500" />
-            Métodos de Pago
-          </h3>
-          <GraficoDona datos={m.mixMetodos} />
-          <div className="mt-4 space-y-2">
-            {m.mixMetodos.map(mp => (
-              <div key={mp.value} className="flex justify-between text-xs font-body">
-                <span className="text-surface-400">{mp.label}</span>
-                <span className="text-white font-mono">{fmt(mp.monto)}</span>
-              </div>
-            ))}
-          </div>
-        </Card>
+        <RankingProductosIngresos productos={m.productosPorIngresos ?? []} desde={pDesde} hasta={pHasta} />
 
-        <Card className="p-6">
-          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
-            <PieChart size={15} className="text-brand-500" />
-            Egresos por categoría
-          </h3>
-          {m.egresosPorCategoria.length === 0 ? (
-            <p className="text-surface-500 text-sm font-body">Sin egresos en el período.</p>
-          ) : (
-            <>
-              <GraficoDonaGenerico
-                datos={m.egresosPorCategoria.map(e => ({ label: e.label, valor: e.monto }))}
-              />
-              <div className="mt-4 space-y-1.5">
-                {m.egresosPorCategoria.slice(0, 5).map((e, i) => (
-                  <div key={i} className="flex justify-between text-xs font-body">
-                    <span className="text-surface-400 truncate">{e.label}</span>
-                    <span className="text-white font-mono">{formatoMonto(e.monto)}</span>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </Card>
-      </div>
-
-      {/* ── Modal top artículos ── */}
-      <ModalTopProductos
-        open={modalProductos}
-        onClose={() => setModalProductos(false)}
-        productos={m.todosProductosVendidos ?? []}
-        desde={desde}
-        hasta={hasta}
-      />
-
-      {/* ── Modal demora de pago por cliente ── */}
-      <ModalDemoraClientes
-        open={modalDemora}
-        onClose={() => setModalDemora(false)}
-        clientes={m.demoraPagoPorCliente ?? []}
-      />
-
-      {/* ── Modal ticket promedio por cliente (drill-down del KPI global) ── */}
-      <ModalTicketPromedioClientes
-        key={ticketPromedioInstancia}
-        open={modalTicketPromedio}
-        onClose={() => setModalTicketPromedio(false)}
-        desde={desde}
-        hasta={hasta}
-        formatoMonto={formatoMonto}
-      />
-
-      {/* ── 2. Top artículos más vendidos + Top clientes ── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card className="p-6 overflow-hidden">
-          <div
-            className="cursor-pointer -m-6 p-6 hover:bg-brand-500/5 transition-all duration-200 group"
-            onClick={() => setModalProductos(true)}
-          >
-          <h3 className="font-body font-semibold text-white text-sm mb-1 flex items-center gap-2">
-            <Package size={15} className="text-brand-500" />
-            Top artículos más vendidos
-            <span className="ml-auto text-brand-500/70 text-xs font-body font-normal
-                             group-hover:text-brand-400 transition-colors flex items-center gap-1">
-              Ver todos →
-            </span>
-          </h3>
-          <p className="text-surface-500 text-xs font-body mb-4">
-            Top 10 · cliqueá para ver la lista completa ({m.todosProductosVendidos?.length ?? 0} artículos)
-          </p>
-          {m.topProductos.length === 0 ? (
-            <p className="text-surface-500 text-sm font-body">Sin ventas en el período.</p>
-          ) : (
-            <div className="space-y-3">
-              {m.topProductos.map((p, i) => (
-                <BarraH key={i}
-                  label={`${i+1}. ${p.nombre}`}
-                  value={p.unidades}
-                  max={maxProducto}
-                  fmtFn={v => `${v} u.`}
-                  sublabel={fmt(p.monto)}
-                  color={i === 0 ? '#f97316' : i < 3 ? '#fb923c' : '#6b7280'}
-                />
-              ))}
-            </div>
-          )}
-          </div>
-        </Card>
-
-        <Card className="p-6">
-          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
-            <Users size={15} className="text-brand-500" />
-            Top 10 clientes por volumen
-          </h3>
-          {m.topClientes.length === 0 ? (
-            <p className="text-surface-500 text-sm font-body">Sin datos en el período.</p>
-          ) : (
-            <div className="space-y-3">
-              {m.topClientes.map((c, i) => (
-                <BarraH key={i}
-                  label={`${i+1}. ${c.nombre}`}
-                  value={c.monto}
-                  max={maxCliente}
-                  sublabel={`${c.presupuestos} pres.`}
-                  color={i === 0 ? '#f97316' : i < 3 ? '#fb923c' : '#6b7280'}
-                />
-              ))}
-            </div>
-          )}
-        </Card>
-      </div>
-
-      {/* ── 2b. Ranking de productos por ingresos ── */}
-      <RankingProductosPorIngresos
-        productos={m.productosPorIngresos ?? []}
-        desde={desde}
-        hasta={hasta}
-      />
-
-      {/* ── 3. Saldos pendientes globales + Clientes recurrentes vs. nuevos ── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card className="p-6">
-          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
-            <AlertTriangle size={15} className="text-yellow-500" />
-            Saldos pendientes globales
-          </h3>
-          <div className="space-y-3">
-            {[
-              { label: 'Vencidos',              value: m.saldosVencidos,    color: 'text-red-400' },
-              { label: 'Vencen en 1–15 días',  value: m.saldosPorVencer15, color: 'text-yellow-400' },
-              { label: 'Vencen en 16–30 días', value: m.saldosPorVencer30, color: 'text-brand-400' },
-            ].map(({ label, value, color }) => (
-              <div key={label} className="flex justify-between items-center py-2 border-b border-surface-700/50 last:border-0">
-                <span className="text-surface-300 text-sm font-body">{label}</span>
-                <span className={`font-mono font-bold text-sm ${color}`}>{fmt(value)}</span>
-              </div>
-            ))}
-          </div>
-
-          {m.proxSaldos.length > 0 && (
-            <div className="mt-4">
-              <p className="text-surface-500 text-xs uppercase tracking-widest font-body mb-2">Próximos vencimientos</p>
-              <div className="space-y-1">
-                {m.proxSaldos.map((s, i) => (
-                  <div key={i} className="flex justify-between text-xs font-body">
-                    <span className="text-surface-400 truncate">{s.nombre} {s.apellido}</span>
-                    <span className="text-white font-mono ml-2">{fmt(s.montoPendiente)}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </Card>
-
-        <Card className="p-6">
-          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
-            <Repeat size={15} className="text-brand-500" />
-            Clientes recurrentes vs. nuevos
-          </h3>
-          {m.clientesUnicos === 0 ? (
-            <p className="text-surface-500 text-sm font-body">Sin datos en el período.</p>
-          ) : (
-            <>
-              <GraficoDonaGenerico
-                datos={[
-                  { label: 'Recurrentes', valor: m.clientesRecurrentes },
-                  { label: 'Nuevos',      valor: m.clientesNuevos },
-                ]}
-                colores={['#10b981','#3b82f6']}
-              />
-              <div className="mt-4 grid grid-cols-2 gap-3">
-                <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3 text-center">
-                  <p className="text-emerald-400 font-mono font-bold text-2xl">{m.clientesRecurrentes}</p>
-                  <p className="text-surface-400 text-xs font-body mt-1">Recurrentes</p>
-                </div>
-                <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-3 text-center">
-                  <p className="text-blue-400 font-mono font-bold text-2xl">{m.clientesNuevos}</p>
-                  <p className="text-surface-400 text-xs font-body mt-1">Nuevos</p>
-                </div>
-              </div>
-            </>
-          )}
-        </Card>
-      </div>
-
-      {/* ── 4. Ventas por categoría de producto + Top proveedores ── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card className="p-6">
-          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
-            <Layers size={15} className="text-brand-500" />
-            Ventas por categoría de producto
-          </h3>
-          {m.topCategorias.length === 0 ? (
-            <p className="text-surface-500 text-sm font-body">Sin ventas en el período.</p>
-          ) : (
-            <div className="space-y-3">
-              {m.topCategorias.map((cat, i) => (
-                <BarraH key={i}
-                  label={`${i+1}. ${cat.nombre}`}
-                  value={cat.monto}
-                  max={m.topCategorias[0]?.monto ?? 1}
-                  sublabel={`${cat.unidades} u.`}
-                  color={i === 0 ? '#8b5cf6' : i < 3 ? '#a78bfa' : '#6b7280'}
-                />
-              ))}
-            </div>
-          )}
-        </Card>
-
-        <Card className="p-6">
-          <h3 className="font-body font-semibold text-white text-sm mb-5 flex items-center gap-2">
-            <Truck size={15} className="text-brand-500" />
-            Top proveedores por compras
-          </h3>
-          {m.topProveedores.length === 0 ? (
-            <p className="text-surface-500 text-sm font-body">Sin pedidos en el período.</p>
-          ) : (
-            <div className="space-y-3">
-              {m.topProveedores.map((prov, i) => (
-                <BarraH key={i}
-                  label={`${i+1}. ${prov.nombre}`}
-                  value={prov.monto}
-                  max={m.topProveedores[0]?.monto ?? 1}
-                  sublabel={`${prov.pedidos} ped.`}
-                  color={i === 0 ? '#ec4899' : i < 3 ? '#f472b6' : '#6b7280'}
-                />
-              ))}
-            </div>
-          )}
-        </Card>
-      </div>
-
-      {/* -- 4b. Demora de pago por cliente (full width, cobranza) -- */}
-      <Card className="p-6 overflow-hidden">
-        <div
-          className="cursor-pointer -m-6 p-6 hover:bg-brand-500/5 transition-all duration-200 group"
-          onClick={() => setModalDemora(true)}
-        >
-          <h3 className="font-body font-semibold text-white text-sm mb-1 flex items-center gap-2">
-            <Clock size={15} className="text-yellow-500" />
-            Demora de pago por cliente
-            <span className="ml-auto text-brand-500/70 text-xs font-body font-normal
-                             group-hover:text-brand-400 transition-colors flex items-center gap-1">
-              Ver todos →
-            </span>
-          </h3>
-          <p className="text-surface-500 text-xs font-body mb-4">
-            Promedio de días entre vencimiento y pago real en Cuenta Corriente · histórico completo del cliente
-            {' '}({m.demoraPagoPorCliente?.length ?? 0} con pagos registrados) · mayor a menor demora
-          </p>
-          {(!m.demoraPagoPorCliente || m.demoraPagoPorCliente.length === 0) ? (
-            <p className="text-surface-500 text-sm font-body">
-              Todavía no hay saldos de Cuenta Corriente cobrados con fecha de vencimiento registrada.
-            </p>
-          ) : (
+        {/* ── Saldos pendientes + clientes recurrentes ── */}
+        <div className={GRID_2}>
+          <SeccionCard icon={AlertTriangle} iconClassName="text-yellow-500" titulo="Saldos pendientes globales">
             <div className="space-y-1">
-              {m.demoraPagoPorCliente.slice(0, 8).map((c, i) => (
-                <div key={c.idCliente}
-                  className="flex items-center justify-between gap-3 py-2 border-b border-surface-700/50 last:border-0">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-surface-600 font-mono text-xs w-5 flex-shrink-0">{i + 1}.</span>
-                    <span className="text-surface-200 text-sm font-body truncate" title={c.nombre}>
-                      {c.nombre}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-3 flex-shrink-0">
-                    <span className="text-surface-500 text-xs font-body whitespace-nowrap">
-                      {c.cantPagos} pago{c.cantPagos !== 1 ? 's' : ''}
-                    </span>
-                    <span className={`font-mono font-bold text-xs px-2 py-0.5 rounded-lg border whitespace-nowrap ${colorDemora(c.demoraPromedioDias)}`}>
-                      {fmtDemora(c.demoraPromedioDias)}
-                    </span>
-                  </div>
+              {[
+                { label: 'Vencidos',             value: m.saldosVencidos,    color: 'text-red-400' },
+                { label: 'Vencen en 1–15 días',  value: m.saldosPorVencer15, color: 'text-yellow-400' },
+                { label: 'Vencen en 16–30 días', value: m.saldosPorVencer30, color: 'text-brand-400' },
+              ].map(({ label, value, color }) => (
+                <div key={label} className="flex justify-between items-center gap-3 py-2 border-b border-surface-700/50 last:border-0">
+                  <span className="text-surface-300 text-sm font-body">{label}</span>
+                  <span className={`font-mono font-bold text-sm ${color}`}>{fmt(value)}</span>
                 </div>
               ))}
             </div>
-          )}
-        </div>
-      </Card>
+            {m.proxSaldos.length > 0 && (
+              <div className="mt-4">
+                <p className="text-surface-500 text-xs uppercase tracking-widest font-body mb-2">Próximos vencimientos</p>
+                <ul className="space-y-1.5">
+                  {m.proxSaldos.map((s, i) => (
+                    <li key={i} className="flex justify-between gap-3 text-sm min-[1025px]:text-xs font-body">
+                      <span className="text-surface-400 min-w-0 break-words">{s.nombre} {s.apellido}</span>
+                      <span className="text-white font-mono flex-shrink-0">{fmt(s.montoPendiente)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </SeccionCard>
 
-      {/* ── 5. Impacto de descuentos y recargos (full width) ── */}
-      <Card className="p-6">
-        <h3 className="font-body font-semibold text-white text-sm mb-4 flex items-center gap-2">
-          <Tag size={15} className="text-brand-500" />
-          Impacto de descuentos y recargos
-        </h3>
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-          <div className="bg-surface-700/40 rounded-xl p-4 text-center">
-            <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Precio de lista total</p>
-            <p className="font-mono font-bold text-white text-xl">
-              {fmt(m.facturadoTotal + m.descuentosOtorgados - m.recargosCC)}
-            </p>
-          </div>
-          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4 text-center">
-            <p className="text-emerald-400 text-xs uppercase tracking-widest font-body mb-1">Desc. por promociones</p>
-            <p className="font-mono font-bold text-emerald-400 text-xl">- {fmt(m.descuentosPromos)}</p>
-            <p className="text-surface-500 text-xs mt-1 font-body">Promos de producto</p>
-          </div>
-          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4 text-center">
-            <p className="text-emerald-400 text-xs uppercase tracking-widest font-body mb-1">Desc. por método de pago</p>
-            <p className="font-mono font-bold text-emerald-400 text-xl">- {fmt(m.descuentosMetodoPago)}</p>
-            <p className="text-surface-500 text-xs mt-1 font-body">Efectivo · Transferencia</p>
-          </div>
-          <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 text-center">
-            <p className="text-red-400 text-xs uppercase tracking-widest font-body mb-1">Recargos CC cobrados</p>
-            <p className="font-mono font-bold text-red-400 text-xl">+ {fmt(m.recargosCC)}</p>
-            <p className="text-surface-500 text-xs mt-1 font-body">Cuenta corriente 30d</p>
-          </div>
+          <SeccionCard icon={Repeat} titulo="Clientes recurrentes vs. nuevos">
+            {m.clientesUnicos === 0 ? SIN_DATOS('Sin datos en el período.') : (
+              <>
+                <GraficoDona unidad="grupos" colores={['#10b981', '#3b82f6']}
+                  datos={[{ label: 'Recurrentes', valor: m.clientesRecurrentes }, { label: 'Nuevos', valor: m.clientesNuevos }]} />
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3 text-center">
+                    <p className="text-emerald-400 font-mono font-bold text-2xl">{m.clientesRecurrentes}</p>
+                    <p className="text-surface-400 text-xs font-body mt-1">Recurrentes</p>
+                  </div>
+                  <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-3 text-center">
+                    <p className="text-blue-400 font-mono font-bold text-2xl">{m.clientesNuevos}</p>
+                    <p className="text-surface-400 text-xs font-body mt-1">Nuevos</p>
+                  </div>
+                </div>
+              </>
+            )}
+          </SeccionCard>
         </div>
-      </Card>
+
+        {/* ── Categorías + proveedores ── */}
+        <div className={GRID_2}>
+          <SeccionCard icon={Layers} titulo="Ventas por categoría de producto">
+            {m.topCategorias.length === 0 ? SIN_DATOS('Sin ventas en el período.') : (
+              <BarrasHorizontales colores={['#8b5cf6', '#a78bfa']}
+                items={m.topCategorias.map((c, i) => ({ label: `${i + 1}. ${c.nombre}`, value: c.monto, sublabel: `${c.unidades} u.` }))} />
+            )}
+          </SeccionCard>
+
+          <SeccionCard icon={Truck} titulo="Top proveedores por compras">
+            {m.topProveedores.length === 0 ? SIN_DATOS('Sin pedidos en el período.') : (
+              <BarrasHorizontales colores={['#ec4899', '#f472b6']}
+                items={m.topProveedores.map((p, i) => ({ label: `${i + 1}. ${p.nombre}`, value: p.monto, sublabel: `${p.pedidos} ped.` }))} />
+            )}
+          </SeccionCard>
+        </div>
+
+        {/* ── Demora de pago por cliente ── */}
+        <SeccionCard icon={Clock} iconClassName="text-yellow-500" titulo="Demora de pago por cliente"
+          descripcion={`Promedio de días entre vencimiento y pago real en Cuenta Corriente · histórico completo del cliente (${m.demoraPagoPorCliente?.length ?? 0} con pagos registrados) · mayor a menor demora`}
+          accion={{ label: 'Ver todos', onClick: () => setModal('demora') }}>
+          {!m.demoraPagoPorCliente?.length
+            ? SIN_DATOS('Todavía no hay saldos de Cuenta Corriente cobrados con fecha de vencimiento registrada.')
+            : (
+              <ul className="space-y-1">
+                {m.demoraPagoPorCliente.slice(0, 8).map((c, i) => (
+                  <li key={c.idCliente}
+                    className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2 border-b border-surface-700/50 last:border-0">
+                    <span className="flex items-start gap-2 min-w-0 flex-1">
+                      <span className="text-surface-600 font-mono text-xs w-5 flex-shrink-0 pt-0.5">{i + 1}.</span>
+                      <span className="text-surface-200 text-sm font-body break-words">{c.nombre}</span>
+                    </span>
+                    <span className="flex items-center gap-3 flex-shrink-0">
+                      <span className="text-surface-500 text-xs font-body whitespace-nowrap">
+                        {c.cantPagos} pago{c.cantPagos !== 1 ? 's' : ''}
+                      </span>
+                      <span className={`font-mono font-bold text-xs px-2 py-0.5 rounded-lg border whitespace-nowrap ${colorDemora(c.demoraPromedioDias)}`}>
+                        {fmtDemora(c.demoraPromedioDias)}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+        </SeccionCard>
+
+        {/* ── Impacto de descuentos y recargos ── */}
+        <SeccionCard icon={Tag} titulo="Impacto de descuentos y recargos">
+          <div className="grid grid-cols-1 sm:grid-cols-2 min-[1025px]:grid-cols-4 gap-3 sm:gap-4">
+            <div className="bg-surface-700/40 rounded-xl p-4 text-center min-w-0">
+              <p className="text-surface-400 text-xs uppercase tracking-widest font-body mb-1">Precio de lista total</p>
+              <p className="font-mono font-bold text-white text-lg sm:text-xl break-words">{fmt(listaPrecio)}</p>
+            </div>
+            <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4 text-center min-w-0">
+              <p className="text-emerald-400 text-xs uppercase tracking-widest font-body mb-1">Desc. por promociones</p>
+              <p className="font-mono font-bold text-emerald-400 text-lg sm:text-xl break-words">- {fmt(m.descuentosPromos)}</p>
+              <p className="text-surface-500 text-xs mt-1 font-body">Promos de producto</p>
+            </div>
+            <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4 text-center min-w-0">
+              <p className="text-emerald-400 text-xs uppercase tracking-widest font-body mb-1">Desc. por método de pago</p>
+              <p className="font-mono font-bold text-emerald-400 text-lg sm:text-xl break-words">- {fmt(m.descuentosMetodoPago)}</p>
+              <p className="text-surface-500 text-xs mt-1 font-body">Efectivo · Transferencia</p>
+            </div>
+            <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 text-center min-w-0">
+              <p className="text-red-400 text-xs uppercase tracking-widest font-body mb-1">Recargos CC cobrados</p>
+              <p className="font-mono font-bold text-red-400 text-lg sm:text-xl break-words">+ {fmt(m.recargosCC)}</p>
+              <p className="text-surface-500 text-xs mt-1 font-body">Cuenta corriente 30d</p>
+            </div>
+          </div>
+        </SeccionCard>
+      </div>
+
+      {/* ── Diálogos (estado `modal` en el padre: sobreviven a la rotación) ── */}
+      <ModalTopProductos open={modal === 'productos'} onClose={cerrar}
+        productos={m.todosProductosVendidos ?? undefined} desde={pDesde} hasta={pHasta} />
+      <ModalProductosIncompletos open={modal === 'incompletos'} onClose={cerrar}
+        productos={m.productosValorIncompleto ?? undefined} />
+      <ModalDemoraClientes open={modal === 'demora'} onClose={cerrar}
+        clientes={m.demoraPagoPorCliente ?? undefined} />
+      <ModalTicketPromedioClientes key={instanciaTicket} open={modal === 'ticket'} onClose={cerrar}
+        desde={desde} hasta={hasta} formatoMonto={formatoMonto} />
     </div>
   )
 }
